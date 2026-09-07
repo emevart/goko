@@ -234,7 +234,13 @@ Session = { id, room: string, currentGameId: string | null, createdAt }
 Коды ошибок: `invalid_coord`, `illegal_move` (с `reason: occupied | ko |
 suicide`), `not_your_turn`, `game_finished`, `nothing_to_undo`,
 `revision_conflict`, `engine_busy`, `engine_unavailable`,
-`unsupported_controller`, `not_found`.
+`unsupported_controller`, `not_found`, `bad_request` (тело не прошло схему),
+`limit_reached` (превышен лимит сессий), `unauthorized` (нет или неверный
+`X-App-Key` / `X-Engine-Key`), `internal` (непредвиденная ошибка сервера).
+HTTP-статусы: 400 для `invalid_coord`, `illegal_move`,
+`unsupported_controller`, `bad_request`; 401 `unauthorized`; 404 `not_found`;
+409 `not_your_turn`, `game_finished`, `nothing_to_undo`, `revision_conflict`;
+429 `limit_reached`; 500 `internal`; 503 `engine_busy`, `engine_unavailable`.
 
 ### Analysis
 
@@ -258,8 +264,10 @@ Analysis = {
 
 ```ts
 'session.game'     { gameId }                              // сессия переключилась на партию
-'state.updated'    { state, cause: 'play' | 'pass' | 'undo' | 'correct' | 'rank' | 'engine',
+'state.updated'    { state, cause: 'play' | 'pass' | 'undo' | 'correct' | 'rank' | 'engine'
+                                   | 'resign' | 'new' | 'sync',
                      by: 'human' | 'engine' | 'external' | 'system', via?: 'voice' | 'tap' | 'api' }
+                   // 'new' — партия создана; 'sync' — первое сообщение при подключении к потоку
 'engine.thinking'  { color }
 'game.finished'    { result }
 'error'            { code, message }
