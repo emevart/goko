@@ -232,6 +232,14 @@ describe('createEngineClient', () => {
     await check((e) => e.score(scoreReq), 30_000);
   });
 
+  it('после ответа таймер запроса снят: клиент не держит процесс живым', async () => {
+    const f = fakeFetch([() => Response.json(ok)]);
+    const engine = createEngineClient({ baseUrl: 'http://engine.test', engineKey: 'ek', fetch: f.fetch });
+    await engine.genmove(req);
+    // Незакрытый таймаут держал бы событийный цикл до 30 с после ответа.
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it('константы по умолчанию: таймауты 10/15/30 с, пауза перед повтором 200 мс', () => {
     expect(ENGINE_TIMEOUTS).toEqual({ genmove: 10_000, analyze: 15_000, score: 30_000 });
     expect(ENGINE_RETRY_DELAY_MS).toBe(200);
