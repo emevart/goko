@@ -26,10 +26,14 @@ export type KataGoOptions = {
 export type KataQuery = Record<string, unknown>;
 export type KataResponse = Record<string, unknown> & { id: string };
 
-export class KataGoError extends Error {
-  readonly kind: 'crashed' | 'timeout' | 'rejected';
+// aborted — вызывающий отказался ждать (оборванный HTTP-запрос): работа снимается с движка,
+// а не досиживает свой бюджет, иначе следующий запрос встаёт в очередь за брошенным.
+export type KataGoErrorKind = 'crashed' | 'timeout' | 'rejected' | 'aborted';
 
-  constructor(kind: 'crashed' | 'timeout' | 'rejected', message: string) {
+export class KataGoError extends Error {
+  readonly kind: KataGoErrorKind;
+
+  constructor(kind: KataGoErrorKind, message: string) {
     super(message);
     this.name = 'KataGoError';
     this.kind = kind;
@@ -156,8 +160,13 @@ export class KataGo {
     this.pump();
   }
 
-  query(query: KataQuery, timeoutMs = 30_000): Promise<KataResponse> {
+  query(query: KataQuery, timeoutMs = 30_000, signal?: AbortSignal): Promise<KataResponse> {
     return new Promise((resolve, reject) => {
+      // Вызывающий уже ушёл: движку такой запрос не отправляется вовсе.
+      if (signal?.aborted === true) {
+        reject(new KataGoError('aborted', 'katago query aborted by the caller'));
+        return;
+      }
       // После stop() ждать некому: запрос отклоняется сразу, а не виснет в очереди навсегда.
       if (this.stopped) {
         reject(new KataGoError('crashed', 'katago stopped'));
@@ -174,7 +183,28 @@ export class KataGo {
       // ждёт вызывающий. Иначе последний из N запросов в очереди жил бы до N * timeoutMs.
       // Часы монотонные (performance.now), а не настенные: синхронизация времени на VPS
       // не должна ни отклонять ждущих досрочно, ни оставлять после этого висящий таймер.
-      const p: Pending = { id, query, timeoutMs, deadline: performance.now() + timeoutMs, resolve, reject };
+      // Подписка на abort снимается на любом завершении: и таймер, и слушатель уходят
+      // вместе с запросом, поэтому долгоживущий сигнал не копит мусор от прошлых запросов.
+      let detach = (): void => undefined;
+      const p: Pending = {
+        id,
+        query,
+        timeoutMs,
+        deadline: performance.now() + timeoutMs,
+        resolve: (r) => {
+          detach();
+          resolve(r);
+        },
+        reject: (e) => {
+          detach();
+          reject(e);
+        },
+      };
+      if (signal !== undefined) {
+        const onAbort = (): void => this.onAbort(p);
+        signal.addEventListener('abort', onAbort, { once: true });
+        detach = () => signal.removeEventListener('abort', onAbort);
+      }
       p.timer = setTimeout(() => this.onTimeout(p), timeoutMs);
       this.queue.push(p);
       this.pump();
@@ -215,24 +245,35 @@ export class KataGo {
         continue;
       }
       this.inFlight.set(p.id, p);
-      this.proc.stdin.write(`${JSON.stringify({ id: p.id, ...p.query })}\n`);
+      // Служебный id идёт последним: поле id из чужого запроса не должно его перетирать,
+      // иначе ответ придёт с чужим id, inFlight его не узнает и вызывающий повиснет.
+      this.proc.stdin.write(`${JSON.stringify({ ...p.query, id: p.id })}\n`);
     }
   }
 
-  private onTimeout(p: Pending): void {
-    const err = timeoutError(p);
+  // Общий путь отказа для таймаута и отмены: снять работу с движка, если он её уже видел,
+  // иначе просто вынуть запрос из очереди. Место в полёте освобождается сразу.
+  private drop(p: Pending, err: KataGoError): void {
     if (this.inFlight.delete(p.id)) {
       this.proc?.stdin.write(`${JSON.stringify({ id: `t-${p.id}`, action: 'terminate', terminateId: p.id })}\n`);
       p.reject(err);
       this.pump();
       return;
     }
-    // Дедлайн истёк, пока запрос ждал места: движок его не видел, terminate слать некому
-    // и место в полёте не освобождается — отправлять такой запрос уже незачем.
+    // Движок запроса не видел: terminate слать некому и место в полёте не освобождается.
     const index = this.queue.indexOf(p);
     if (index === -1) return; // запрос уже завершён другим путём
     this.queue.splice(index, 1);
     p.reject(err);
+  }
+
+  private onTimeout(p: Pending): void {
+    this.drop(p, timeoutError(p));
+  }
+
+  private onAbort(p: Pending): void {
+    clearTimeout(p.timer); // отмена приходит раньше бюджета: таймер больше не нужен
+    this.drop(p, new KataGoError('aborted', `katago query ${p.id} aborted by the caller`));
   }
 
   private onLine(line: string): void {

@@ -722,6 +722,104 @@ describe('KataGo', () => {
     await k.stop();
   });
 
+  it('свой id в запросе не перетирает служебный: ответ доходит до вызывающего', async () => {
+    // Раньше служебный id шёл первым, а спред запроса — вторым, и чужой id молча побеждал:
+    // ответ приходил с ним, inFlight его не знал, а вызывающий висел до самого таймаута.
+    const f = fakeSpawner((q, reply) => reply({ id: q.id, ok: true }));
+    const k = new KataGo({ ...opts, spawn: f.spawn });
+    k.start();
+    const p = k.query({ id: 'warmup', maxVisits: 1 }, 20);
+    const state = track(p);
+    await tick();
+    expect(state.settled).toBe(true); // без перестановки ответ теряется и запрос живёт до таймаута
+    expect(await p).toMatchObject({ id: 'q1', ok: true });
+    const s = at(f.spawned, 0);
+    expect(JSON.parse(at(s.written, 0))).toMatchObject({ id: 'q1', maxVisits: 1 });
+    await k.stop();
+  });
+
+  it('abort в полёте: движку уходит terminate, отказ kind aborted, место освобождается', async () => {
+    const f = fakeSpawner(() => undefined);
+    const k = new KataGo({ ...opts, spawn: f.spawn, maxConcurrent: 1 });
+    k.start();
+    const ac = new AbortController();
+    const a = k.query({ n: 1 }, 20_000, ac.signal);
+    await tick();
+    ac.abort();
+    await expect(a).rejects.toBeInstanceOf(KataGoError);
+    await expect(a).rejects.toMatchObject({ kind: 'aborted' });
+    const s = at(f.spawned, 0);
+    expect(JSON.parse(at(s.written, 1))).toEqual({ id: 't-q1', action: 'terminate', terminateId: 'q1' });
+    expect(k.queueLength).toBe(0);
+    // Единственный слот освободился сразу, а не через весь бюджет брошенного запроса.
+    const b = k.query({ n: 2 });
+    await tick();
+    expect(JSON.parse(at(s.written, 2))).toMatchObject({ n: 2 });
+    await k.stop();
+    await expect(b).rejects.toMatchObject({ kind: 'crashed' });
+  });
+
+  it('abort в очереди: запрос движку не уходит и terminate не шлётся', async () => {
+    const f = fakeSpawner(() => undefined);
+    const k = new KataGo({ ...opts, spawn: f.spawn, maxConcurrent: 1 });
+    k.start();
+    const a = k.query({ n: 1 }, 20_000);
+    track(a);
+    const ac = new AbortController();
+    const b = k.query({ n: 2 }, 20_000, ac.signal);
+    await tick();
+    ac.abort();
+    await expect(b).rejects.toMatchObject({ kind: 'aborted' });
+    const s = at(f.spawned, 0);
+    expect(s.written).toHaveLength(1); // движок второго запроса не видел, отменять ему нечего
+    expect(k.queueLength).toBe(1);
+    await k.stop();
+    await expect(a).rejects.toMatchObject({ kind: 'crashed' });
+  });
+
+  it('уже отменённый сигнал: запрос движку не уходит вовсе', async () => {
+    const f = fakeSpawner(() => undefined);
+    const k = new KataGo({ ...opts, spawn: f.spawn });
+    k.start();
+    const ac = new AbortController();
+    ac.abort();
+    const p = k.query({ n: 1 }, 20_000, ac.signal);
+    await expect(p).rejects.toMatchObject({ kind: 'aborted' });
+    await tick();
+    expect(at(f.spawned, 0).written).toEqual([]);
+    expect(k.queueLength).toBe(0);
+    await k.stop();
+  });
+
+  it('abort после ответа ничего не отменяет: подписка снята вместе с таймером', async () => {
+    const f = fakeSpawner((q, reply) => reply({ id: q.id, ok: true }));
+    const k = new KataGo({ ...opts, spawn: f.spawn });
+    k.start();
+    const ac = new AbortController();
+    const p = k.query({ n: 1 }, 20_000, ac.signal);
+    expect(await p).toMatchObject({ ok: true });
+    ac.abort();
+    await tick();
+    const s = at(f.spawned, 0);
+    expect(s.written).toHaveLength(1); // terminate на завершённый запрос не уходит
+    expect(k.queueLength).toBe(0);
+    await k.stop();
+  });
+
+  it('сигнал не мешает таймауту: бюджет по-прежнему истекает сам', async () => {
+    const f = fakeSpawner(() => undefined);
+    const k = new KataGo({ ...opts, spawn: f.spawn });
+    k.start();
+    const ac = new AbortController();
+    const p = k.query({ n: 1 }, 20, ac.signal);
+    const state = track(p);
+    await vi.advanceTimersByTimeAsync(19);
+    expect(state.settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(p).rejects.toMatchObject({ kind: 'timeout' });
+    await k.stop();
+  });
+
   it('счётчики на старте нулевые', () => {
     const f = fakeSpawner(() => undefined);
     const k = new KataGo({ ...opts, spawn: f.spawn });
