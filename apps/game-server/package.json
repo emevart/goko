@@ -1,0 +1,17 @@
+{
+  "name": "@goko/game-server",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node --env-file-if-exists=../../.env src/main.ts"
+  },
+  "dependencies": {
+    "@goko/go-core": "*",
+    "@goko/protocol": "*",
+    "@hono/node-server": "^2.1.1",
+    "hono": "^4.13.7",
+    "livekit-server-sdk": "^2.18.0",
+    "zod": "^4.5.4"
+  }
+}
