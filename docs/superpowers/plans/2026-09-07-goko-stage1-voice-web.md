@@ -16,7 +16,7 @@
 - Правила го, координаты и озвучивание координат (`speakCoord`) — только из `@goko/go-core`; веб рисует присланную строку `board`; агент не хранит позицию: каждая реплика о партии — из результата инструмента (правило 2 `CLAUDE.md`). В памяти агента только `sessionId`, `gameId`, цвет человека, ранг, коми и служебные флаги.
 - Инструменты ровно по таблице раздела 9 спеки: `start_game`, `play_move`, `correct_last_move`, `pass`, `resign`, `undo`, `get_position`, `get_assessment`, `set_rank`; `get_assessment` — `analyze` с `maxVisits: 50`; тексты `note`/`reason` для модели — по-русски; координаты в аргументах и результатах — латиницей (`D4`), рядом произношение (`дэ четыре`).
 - Речь: `VOICE_MODE=realtime` (по умолчанию) — `openai.realtime.RealtimeModel({ model: 'gpt-realtime', voice: 'marin' })`, серверный VAD с перебиванием, транскрипция входа `gpt-live-transcribe` с `language: 'ru'`; `VOICE_MODE=pipeline` — `silero.VAD` + `openai.STT` (`gpt-transcribe`, `ru`) + `openai.LLM` + `openai.TTS` (`gpt-4o-mini-tts` с инструкцией по тону). Приветствие — `generateReply` в `onEnter`.
-- Текстовые каналы LiveKit: вход `lk.chat` (стандартный `RoomIO`), выход `lk.transcription` (атрибуты `lk.segment_id`, `lk.transcription_final`, `lk.transcribed_track_id`). Признаком финальности реплики считается дочитанный поток, а не атрибут `lk.transcription_final`: `@livekit/agents` 1.8.0 оставляет в нём `false` навсегда (проверено на спайке 08.09).
+- Текстовые каналы LiveKit: вход `lk.chat` (стандартный `RoomIO`), выход `lk.transcription` (атрибуты `lk.segment_id`, `lk.transcription_final`, `lk.transcribed_track_id`). Признак финальности двусторонний (проверено на спайке 08.09, `@livekit/agents` 1.8.0): у транскрипта агента поток дельта-, атрибут `lk.transcription_final` навсегда `false`, финал — дочитанный поток; у транскрипта человека поток не дельта-, атрибут выставляется честно, но каждый промежуточный результат STT приходит отдельным уже закрытым потоком с тем же `lk.segment_id`. Отсюда общее правило обоих потребителей: единица реплики — `lk.segment_id`, а не поток; фильтровать по одному атрибуту нельзя. Консоль (`scripts/chat.mjs`) печатает сегмент один раз — сразу при `final="true"`, иначе по паузе без новых кусков; веб держит строку ленты по `lk.segment_id` и переписывает её новым куском того же сегмента.
 - Имена воркера: `AGENT_NAME=goko` на VPS, `goko-dev` на ПК; game-server кладёт то же имя в `roomConfig` токена (`AGENT_NAME` у него же). Метаданные диспетчеризации — `{ "sessionId": "<id>" }`, комната — `goko-<sessionId>`.
 - Веб: одна страница, портретный телефон, SVG-доска, тап = ближайший пункт → `play` с `via: 'tap'` и `waitForReply: false`; не ход человека — сообщение «сейчас ход Гоко» без запроса; цели касания ≥ 44 px; тёмная и светлая тема по `prefers-color-scheme`; без UI-библиотек; без агента в комнате страница играет тапами.
 - Протокол и заголовки как в ядре: `X-App-Key` на `/api/*`; ключ в веб попадает на этапе сборки (`APP_KEY` из `.env` → `import.meta.env.VITE_APP_KEY`), в git не попадает. Значения переменных не печатать в логи и не вставлять в доки.
@@ -1930,7 +1930,7 @@ git commit -m "voice-agent: промпт, режимы realtime/pipeline, вор
 
 **Interfaces:**
 - Consumes: `createClient` из `@goko/protocol` (`createSession`, `events`, `ascii`); `Room`, `RoomEvent` из `@livekit/rtc-node`; воркер из Task 4, зарегистрированный под тем же `AGENT_NAME`, что и game-server.
-- Produces: `node scripts/chat.mjs [--api http://127.0.0.1:8787]` (`npm run chat`): создаёт сессию через game-server, входит в комнату с токеном сессии (агент диспетчеризуется сам), stdin → `lk.chat`, ответы из `lk.transcription` и события SSE → stdout; команда `/board` печатает ascii-доску; `describeEvent(ev): string` — экспорт для теста.
+- Produces: `node scripts/chat.mjs [--api http://127.0.0.1:8787]` (`npm run chat`): создаёт сессию через game-server, входит в комнату с токеном сессии (агент диспетчеризуется сам), stdin → `lk.chat`, ответы из `lk.transcription` и события SSE → stdout; команда `/board` печатает ascii-доску; `describeEvent(ev): string` — экспорт для теста. Реплики печатаются по одному разу на `lk.segment_id`; по EOF на stdin скрипт ждёт тишины (`CHAT_QUIET_MS`, потолок `CHAT_MAX_WAIT_MS`) и закрывается сам, по `Ctrl+C` — отключается от комнаты; коды возврата: 0 — штатно, 1 — сбой LiveKit или game-server, 2 — нет `APP_KEY`.
 
 - [ ] **Step 1: Тест `scripts/chat.test.ts`**
 
@@ -1967,6 +1967,11 @@ Expected: FAIL — `Cannot find module './chat.mjs'`.
 
 - [ ] **Step 3: `scripts/chat.mjs`**
 
+Код ниже — полный, вместе с уроками спайка стадии 0 (живой прогон и два круга ревью 08.09):
+печать по факту дочитанного потока, дедуп по `lk.segment_id`, ожидание тишины перед выходом,
+корректный `SIGINT` и диагностика недопечатанных сегментов. `spike/` к этому моменту удалён
+(последняя задача плана стадии 0), подсматривать там нечего — код здесь самодостаточный.
+
 ```js
 #!/usr/bin/env node
 // Текстовый диалог с Гоко без микрофона (раздел 12 спеки): сессия через game-server, комната LiveKit,
@@ -1975,9 +1980,23 @@ Expected: FAIL — `Cannot find module './chat.mjs'`.
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline';
+import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { Room, RoomEvent } from '@livekit/rtc-node';
 import { createClient } from '@goko/protocol';
+
+// Сколько ждать тишины после EOF на stdin: ответ на последнюю фразу приходит позже конца ввода,
+// и при скриптовом прогоне (echo 'дэ четыре' | npm run chat) он иначе теряется целиком.
+const QUIET_MS = Number(process.env.CHAT_QUIET_MS ?? 5000);
+// Потолок ожидания: агент может замолчать или зациклиться, а висящая комната — это живые деньги
+// за сессию Realtime (empty_timeout закрывает её только через 5 минут).
+const MAX_WAIT_MS = Number(process.env.CHAT_MAX_WAIT_MS ?? 60000);
+// Пауза без новых кусков сегмента, после которой считаем сегмент законченным.
+const SEGMENT_DEBOUNCE_MS = 500;
+// Диспетчеризация воркера занимает 3-5 с; фраза, отправленная в эту щель, до агента не доходит
+// и пропадает молча — поэтому приглашение печатаем только после входа агента.
+const AGENT_WAIT_MS = Number(process.env.CHAT_AGENT_WAIT_MS ?? 15000);
+const POLL_MS = 200;
 
 export function describeEvent(ev) {
   switch (ev.type) {
@@ -2016,56 +2035,150 @@ async function main() {
   const { session, livekit } = await client.createSession();
   console.log(`[OK] сессия ${session.id}, комната ${session.room}, агент ${process.env.AGENT_NAME ?? 'goko'}`);
 
-  const sent = new Set();
-  const seen = new Map(); // lk.segment_id -> последний напечатанный текст
   let gameId = session.currentGameId;
   const room = new Room();
-  room.registerTextStreamHandler('lk.transcription', async (reader, info) => {
-    let text = '';
-    for await (const chunk of reader) text += chunk;
-    // Атрибут lk.transcription_final НЕ фильтруем: @livekit/agents 1.8.0
-    // открывает транскрипт агента дельта-потоком с 'false' в заголовке и
-    // больше его не меняет (проверено на спайке 08.09). Дочитанный поток и
-    // есть финальная реплика — но только для агента.
-    // Транскрипт человека приходит НЕ дельта-потоком и переоткрывается на
-    // каждом промежуточном куске, поэтому без дедупликации по lk.segment_id
-    // одна фраза печаталась бы растущими дублями.
-    const seg = attrs['lk.segment_id'];
-    if (seg) {
-      if (seen.get(seg) === text) return;
-      seen.set(seg, text);
+  const abort = new AbortController();
+
+  let lastActivityAt = Date.now();
+  let activeStreams = 0;
+  let closing = false;
+  let agentJoined = false;
+  // Сегменты, уже напечатанные: повторные куски того же сегмента игнорируем.
+  const printedSegments = new Set();
+  // lk.segment_id -> { identity, text, timer } — сегменты в ожидании подтверждения.
+  const pendingSegments = new Map();
+
+  const printSegment = (identity, text) => {
+    lastActivityAt = Date.now();
+    console.log(`[${identity}] ${text}`);
+  };
+
+  const flushSegment = (segmentId) => {
+    const pending = pendingSegments.get(segmentId);
+    if (!pending) return;
+    clearTimeout(pending.timer);
+    pendingSegments.delete(segmentId);
+    printedSegments.add(segmentId);
+    printSegment(pending.identity, pending.text);
+  };
+
+  // Выход по потолку ожидания или по Ctrl+C может застать сегмент недопечатанным. Молча терять
+  // его нельзя: именно такой прогон (зависший поток, оборванная сеть) и разбирают по логу, а
+  // «строки просто нет» неотличимо от «агент ничего не сказал».
+  const reportLostSegments = () => {
+    for (const [segmentId, pending] of pendingSegments) {
+      clearTimeout(pending.timer);
+      console.error(`[!] сегмент ${segmentId} от ${pending.identity} не подтверждён, недопечатано: ${pending.text}`);
     }
-    if (sent.has(text)) return; // эхо нашей же реплики из lk.chat
-    console.log(`[${info.identity}] ${text}`);
+    pendingSegments.clear();
+  };
+
+  const shutdown = async (code, announce = true) => {
+    if (closing) return;
+    closing = true;
+    reportLostSegments();
+    abort.abort();
+    if (announce) console.log('[OK] сессия закрыта');
+    try {
+      await room.disconnect();
+    } catch {
+      // Отключение уже могло произойти; для выхода это не важно.
+    }
+    process.exit(code);
+  };
+
+  // Регистрировать до connect: первые реплики агента приходят сразу после входа.
+  room.registerTextStreamHandler('lk.transcription', async (reader, participant) => {
+    activeStreams += 1;
+    lastActivityAt = Date.now();
+    try {
+      let text = '';
+      for await (const chunk of reader) text += chunk;
+      lastActivityAt = Date.now();
+      if (!text) return;
+
+      const attrs = reader.info.attributes ?? {};
+      const segmentId = attrs['lk.segment_id'];
+      const identity = participant?.identity ?? 'agent';
+      // Атрибут lk.transcription_final нельзя использовать как фильтр «печатать или нет»:
+      // @livekit/agents 1.8.0 ведёт транскрипт агента дельта-потоком (isDeltaStream: true),
+      // открывает его один раз с "false" в заголовке и уже не переписывает — фильтр по атрибуту
+      // отбрасывал бы все реплики агента (проверено на спайке 08.09). Для агента признак финала —
+      // дочитанный поток. Но транскрипт человека идёт НЕ дельта-потоком (isDeltaStream: false):
+      // каждый промежуточный результат STT — отдельный закрытый поток с тем же lk.segment_id,
+      // и «поток дочитан» там не значит «фраза закончена». Без дедупа по сегменту одна фраза
+      // с телефона печаталась бы растущими дублями: «При», «Привет», «Привет, я»...
+      // Отсечь по identity нельзя: микрофон на стадии 1 — отдельный участник с чужим именем,
+      // и как раз распознанную речь человека в консоли видеть важнее всего.
+      if (!segmentId) {
+        printSegment(identity, text);
+        return;
+      }
+      if (printedSegments.has(segmentId)) return;
+
+      const pending = pendingSegments.get(segmentId);
+      if (pending) clearTimeout(pending.timer);
+
+      // У человека атрибут выставляется честно — печатаем сразу; у агента ждём паузу.
+      if (attrs['lk.transcription_final'] === 'true') {
+        pendingSegments.set(segmentId, { identity, text, timer: null });
+        flushSegment(segmentId);
+        return;
+      }
+      const timer = setTimeout(() => flushSegment(segmentId), SEGMENT_DEBOUNCE_MS);
+      pendingSegments.set(segmentId, { identity, text, timer });
+    } finally {
+      activeStreams -= 1;
+    }
   });
-  room.on(RoomEvent.ParticipantConnected, (p) => console.log(`[OK] в комнате: ${p.identity}`));
+
+  room.on(RoomEvent.ParticipantConnected, (p) => {
+    if (p.identity?.startsWith('agent-')) agentJoined = true;
+    console.log(`[OK] в комнате: ${p.identity}`);
+  });
   room.on(RoomEvent.ParticipantDisconnected, (p) => console.log(`[!] вышел: ${p.identity}`));
   room.on(RoomEvent.Disconnected, () => {
+    // Наше собственное отключение уже ведёт shutdown; выходить здесь — оборвать хвост вывода.
+    if (closing) return;
     console.log('[!] комната закрыта');
     process.exit(0);
   });
-  await room.connect(livekit.url, livekit.token, { autoSubscribe: true, dynacast: false });
+
+  try {
+    await room.connect(livekit.url, livekit.token, { autoSubscribe: true, dynacast: false });
+  } catch {
+    // Текст ошибки rtc-node содержит адрес сервера, то есть значение LIVEKIT_URL: не печатаем
+    // ни его, ни err.message — репозиторий и логи прогонов публичные.
+    console.error('[X] не удалось подключиться к LiveKit; проверьте настройки сессии и воркер');
+    process.exit(1);
+  }
   console.log(`[OK] вошёл как ${room.localParticipant?.identity}; жду агента...`);
 
-  const abort = new AbortController();
+  // Ctrl+C без обработчика убил бы процесс молча: участник отвалился бы не по причине из
+  // CLOSE_ON_DISCONNECT_REASONS, сессия Realtime висела бы до empty_timeout и стоила денег.
+  const onSignal = () => {
+    console.log('');
+    void shutdown(0);
+  };
+  process.on('SIGINT', onSignal);
+  process.on('SIGTERM', onSignal);
+
   void (async () => {
     try {
       for await (const ev of client.events({ sessionId: session.id }, abort.signal)) {
         if (ev.type === 'session.game') gameId = ev.gameId;
+        lastActivityAt = Date.now();
         console.log(`[event] ${describeEvent(ev)}`);
       }
-    } catch (e) {
-      if (!abort.signal.aborted) console.log(`[!] SSE оборвался: ${e.message}`);
+    } catch {
+      // Текст ошибки клиента содержит адрес game-server — печатаем свою строку.
+      if (!abort.signal.aborted) console.log('[!] SSE оборвался, события больше не приходят');
     }
   })();
 
-  const stop = async () => {
-    abort.abort();
-    await room.disconnect().catch(() => {});
-    process.exit(0);
-  };
-  process.on('SIGINT', stop);
-  process.on('SIGTERM', stop);
+  const agentDeadline = Date.now() + AGENT_WAIT_MS;
+  while (!agentJoined && Date.now() < agentDeadline) await sleep(POLL_MS);
+  if (!agentJoined) console.log('[!] агент не вошёл в комнату; писать можно, но ответов не будет');
 
   console.log('[OK] пиши фразы («давай партию», «дэ четыре», «кто впереди»); /board — доска; Ctrl+C — выход');
   const rl = readline.createInterface({ input: process.stdin });
@@ -2073,25 +2186,61 @@ async function main() {
     const text = line.trim();
     if (!text) continue;
     if (text === '/board') {
-      if (!gameId) console.log('[!] партии ещё нет');
-      else console.log(await client.ascii(gameId));
+      if (!gameId) {
+        console.log('[!] партии ещё нет');
+        continue;
+      }
+      try {
+        console.log(await client.ascii(gameId));
+      } catch {
+        console.log('[!] не удалось получить доску от game-server');
+      }
       continue;
     }
-    sent.add(text);
-    await room.localParticipant.sendText(text, { topic: 'lk.chat' });
+    try {
+      await room.localParticipant.sendText(text, { topic: 'lk.chat' });
+    } catch {
+      console.error('[X] не удалось отправить реплику агенту; соединение с LiveKit потеряно');
+      await shutdown(1, false);
+    }
+    lastActivityAt = Date.now();
   }
-  await stop();
+
+  // EOF на stdin — ещё не конец разговора. Ждём тишины: нет открытых потоков, нет неподтверждённых
+  // сегментов, QUIET_MS без новой активности, — но не дольше MAX_WAIT_MS.
+  const waitStartedAt = Date.now();
+  while (activeStreams > 0 || pendingSegments.size > 0 || Date.now() - lastActivityAt < QUIET_MS) {
+    if (Date.now() - waitStartedAt >= MAX_WAIT_MS) {
+      console.error(`[!] тишины не дождался за ${Math.round(MAX_WAIT_MS / 1000)} с, закрываю сессию`);
+      break;
+    }
+    await sleep(POLL_MS);
+  }
+
+  await shutdown(0);
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  main().catch((e) => {
-    console.error(`[X] chat: ${e.message}`);
+  main().catch(() => {
+    // Сюда попадают сбои до входа в комнату (createSession). Текст ошибки клиента содержит адрес
+    // game-server, поэтому печатаем свою строку без err.message.
+    console.error('[X] chat: не удалось создать сессию; проверьте --api, APP_KEY и запущенный game-server');
     process.exit(1);
   });
 }
 ```
 
-Если `sendText` в установленной версии `@livekit/rtc-node` отсутствует — стадия 0 (`spike/chat.mjs`) уже нашла рабочий путь; повторить его здесь (`publishData` с `topic: 'lk.chat'`).
+Почему именно так — уроки спайка стадии 0 (живой прогон и два круга ревью), их переносить целиком:
+
+- **Признак финальности.** У транскрипта агента `lk.transcription_final` навсегда `false`, у транскрипта человека выставляется честно. Отсюда правило на два случая: `"true"` — печатаем сразу, иначе по паузе `SEGMENT_DEBOUNCE_MS` без новых кусков того же сегмента. Побочный эффект: реплика агента появляется на ~0.5 с позже; для консоли это не мешает.
+- **Дедуп только по `lk.segment_id`.** Транскрипт человека переоткрывается на каждом промежуточном куске, поэтому без дедупа одна фраза печатается растущими дублями. Отсечение по имени участника не годится: микрофон на стадии 1 — отдельный участник с чужим именем, и как раз его распознанную речь важнее всего видеть.
+- **Ошибки `connect` и `sendText`** — `[X]` со своим текстом, без `err.message` и без адреса, ненулевой код возврата (правила 4 и 6 `CLAUDE.md`).
+- **Ожидание тишины вместо разрыва по EOF** — иначе ответ на последнюю фразу теряется в скриптовом прогоне; потолок `MAX_WAIT_MS` не даёт висеть и жечь деньги.
+- **`SIGINT`/`SIGTERM` через `shutdown`** — без него участник отваливается не по причине из `CLOSE_ON_DISCONNECT_REASONS`, сессия Realtime доживает до `empty_timeout`.
+- **`[!]` о недопечатанных сегментах** на выходе по потолку ожидания и по Ctrl+C: спайк здесь молча терял хвост, в стадии 1 это исправлено.
+- **Ожидание входа агента до приглашения** — диспетчеризация занимает 3-5 с, отправленная в эту щель фраза пропадает без следа.
+
+Если `sendText` в установленной версии `@livekit/rtc-node` отсутствует — отправлять через `publishData` с `topic: 'lk.chat'`; обёртка `try/catch` та же.
 
 - [ ] **Step 4: Корневой `package.json`**
 
@@ -2103,7 +2252,14 @@ Run: `npx vitest run scripts/chat.test.ts`
 Expected: PASS.
 
 Run (нужны `.env` с `LIVEKIT_*`, `OPENAI_API_KEY`, `APP_KEY`; в одном терминале `npm run dev`): `npm run chat`
-Expected: `[OK] сессия ...`, `[OK] вошёл как phone-<id>`, через 1–3 с `[OK] в комнате: <identity агента>` и приветствие `[<identity агента>] ...`. Ввести `давай партию` → `[event] партия g...`, `[event] new by human via voice ...`, реплика агента; `дэ четыре` → `[event] play by human via voice: ход 1 B D4 ...`, `[event] engine by engine: ход 2 W ...`, агент называет ход; `/board` печатает ascii-доску с двумя камнями; `кто впереди` → `[event]`-строк нет (analyze событий не шлёт), агент отвечает без лучшего хода. Без VPS шаг пропускается и отмечается в `docs/NOW.md` как `[TODO founder]` проверка.
+Expected: `[OK] сессия ...`, `[OK] вошёл как phone-<id>`, через 1–3 с `[OK] в комнате: <identity агента>` и приветствие `[<identity агента>] ...`. Ввести `давай партию` → `[event] партия g...`, `[event] new by human via voice ...`, реплика агента; `дэ четыре` → `[event] play by human via voice: ход 1 B D4 ...`, `[event] engine by engine: ход 2 W ...`, агент называет ход; `/board` печатает ascii-доску с двумя камнями; `кто впереди` → `[event]`-строк нет (analyze событий не шлёт), агент отвечает без лучшего хода. Каждая реплика агента печатается ровно один раз (с задержкой ~0.5 с после конца потока), растущих префиксов нет даже когда в той же комнате говорит телефон. `Ctrl+C` → `[OK] сессия закрыта`, код 0.
+
+Run (сценарный прогон без клавиатуры): `echo 'дэ четыре' | npm run chat`
+Expected: ответ агента на последнюю фразу успевает напечататься (скрипт ждёт тишины, а не рвёт комнату по EOF), затем `[OK] сессия закрыта`, код 0. При зависшем агенте — `[!] тишины не дождался за 60 с...` и, если хвост сегмента остался неподтверждённым, `[!] сегмент SG_... не подтверждён, недопечатано: ...`, а не молчание.
+
+Run (проверка диагностики без сети, на заведомо неверных данных LiveKit): ожидается `[X] не удалось подключиться к LiveKit; проверьте настройки сессии и воркер`, код 1; адреса, стека и текста ошибки библиотеки в выводе нет.
+
+Без VPS живые шаги пропускаются и отмечаются в `docs/NOW.md` как `[TODO founder]` проверка.
 
 - [ ] **Step 6: Commit**
 
@@ -2742,9 +2898,12 @@ export function useSession() {
         text += chunk;
         setLines((ls) => upsertLine(ls, { id, who, text, final: false }));
       }
-      // Поток дочитан — реплика финальная. На атрибут lk.transcription_final
-      // не смотрим: agents 1.8.0 оставляет в заголовке 'false' навсегда
-      // (проверено на спайке 08.09), и строка никогда не перестала бы мигать.
+      // Финал: честный 'true' в заголовке (так помечается транскрипт человека) либо
+      // дочитанный поток. По одному атрибуту решать нельзя: у дельта-потока агента
+      // lk.transcription_final навсегда 'false' (agents 1.8.0, проверено на спайке 08.09),
+      // и строка никогда не перестала бы мигать. Промежуточный кусок человека — отдельный
+      // уже закрытый поток с тем же lk.segment_id, поэтому строка ленты живёт по id
+      // сегмента: следующий кусок перепишет её, а не добавит растущий дубль.
       setLines((ls) => upsertLine(ls, { id, who, text, final: true }));
     });
     try {
