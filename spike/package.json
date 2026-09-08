@@ -5,6 +5,7 @@
   "version": "0.0.0",
   "scripts": {
     "agent": "node --env-file-if-exists=../.env agent.ts dev",
+    "chat": "node --env-file-if-exists=../.env chat.mjs",
     "token": "node --env-file-if-exists=../.env token.mjs"
   },
   "dependencies": {
