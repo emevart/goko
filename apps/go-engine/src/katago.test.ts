@@ -1,4 +1,4 @@
-import { EventEmitter } from 'node:events';
+import { EventEmitter, getEventListeners } from 'node:events';
 import readline from 'node:readline';
 import { PassThrough } from 'node:stream';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -592,6 +592,17 @@ describe('KataGo', () => {
     expect(f.spawned).toHaveLength(0);
   });
 
+  it('запрос после stop отклоняется со своей причиной, а не как «не запущен»', async () => {
+    const f = fakeSpawner(() => undefined);
+    const k = new KataGo({ ...opts, spawn: f.spawn });
+    k.start();
+    await k.stop();
+    // Обе ветки дают crashed, но текст разный: по логу должно быть видно, остановили нас
+    // намеренно или запрос пришёл раньше запуска.
+    await expect(k.query({})).rejects.toThrow(/katago stopped/);
+    expect(at(f.spawned, 0).written).toEqual([]);
+  });
+
   it('запрос во время паузы перезапуска не отклоняется, а ждёт нового процесса', async () => {
     const f = fakeSpawner((q, reply, i) => {
       if (i > 0) reply({ id: q.id, ok: true });
@@ -759,6 +770,44 @@ describe('KataGo', () => {
     await expect(b).rejects.toMatchObject({ kind: 'crashed' });
   });
 
+  it('abort снимает и таймер запроса: висящих таймеров не остаётся', async () => {
+    const f = fakeSpawner(() => undefined);
+    const k = new KataGo({ ...opts, spawn: f.spawn });
+    k.start();
+    const ac = new AbortController();
+    const p = k.query({ n: 1 }, 20_000, ac.signal);
+    await tick();
+    ac.abort();
+    await expect(p).rejects.toMatchObject({ kind: 'aborted' });
+    expect(vi.getTimerCount()).toBe(0);
+    await k.stop();
+  });
+
+  it('abort уже завершённого запроса не выбрасывает чужой из очереди', async () => {
+    const replies: Reply[] = [];
+    const f = fakeSpawner((q, reply) => {
+      if (q.action !== 'terminate') replies.push(() => reply({ id: q.id, n: q.n }));
+    });
+    const k = new KataGo({ ...opts, spawn: f.spawn, maxConcurrent: 1 });
+    k.start();
+    const ac = new AbortController();
+    const a = k.query({ n: 1 }, 20_000, ac.signal);
+    await tick();
+    at(replies, 0)(undefined);
+    expect(await a).toMatchObject({ n: 1 });
+    const b = k.query({ n: 2 });
+    const c = k.query({ n: 3 });
+    await tick();
+    ac.abort(); // сигнал завершённого запроса: в очереди ему делать нечего
+    await tick();
+    at(replies, 1)(undefined);
+    expect(await b).toMatchObject({ n: 2 });
+    await tick();
+    at(replies, 2)(undefined);
+    expect(await c).toMatchObject({ n: 3 });
+    await k.stop();
+  });
+
   it('abort в очереди: запрос движку не уходит и terminate не шлётся', async () => {
     const f = fakeSpawner(() => undefined);
     const k = new KataGo({ ...opts, spawn: f.spawn, maxConcurrent: 1 });
@@ -789,6 +838,48 @@ describe('KataGo', () => {
     expect(at(f.spawned, 0).written).toEqual([]);
     expect(k.queueLength).toBe(0);
     await k.stop();
+  });
+
+  it('очередь честная: место освобождается в порядке поступления', async () => {
+    const replies: Reply[] = [];
+    const f = fakeSpawner((q, reply) => replies.push(() => reply({ id: q.id, ok: true })));
+    const k = new KataGo({ ...opts, spawn: f.spawn, maxConcurrent: 1 });
+    k.start();
+    const a = k.query({ n: 1 });
+    const b = k.query({ n: 2 });
+    const c = k.query({ n: 3 });
+    await tick();
+    at(replies, 0)(undefined);
+    await tick();
+    const s = at(f.spawned, 0);
+    // Вторым движку уходит запрос, пришедший вторым, а не последний в очереди.
+    expect(JSON.parse(at(s.written, 1))).toMatchObject({ n: 2 });
+    at(replies, 1)(undefined);
+    await tick();
+    expect(JSON.parse(at(s.written, 2))).toMatchObject({ n: 3 });
+    at(replies, 2)(undefined);
+    expect(await a).toMatchObject({ ok: true });
+    expect(await b).toMatchObject({ ok: true });
+    expect(await c).toMatchObject({ ok: true });
+    await k.stop();
+  });
+
+  it('подписки на сигнал не накапливаются: завершённый запрос отписывается', async () => {
+    const f = fakeSpawner((q, reply) => {
+      if (q.n !== 3) reply({ id: q.id, ok: true });
+    });
+    const k = new KataGo({ ...opts, spawn: f.spawn });
+    k.start();
+    const ac = new AbortController();
+    // Один сигнал живёт всю партию: без снятия подписки слушатели копились бы на каждый ход.
+    for (let i = 0; i < 3; i++) expect(await k.query({ n: i }, 20_000, ac.signal)).toMatchObject({ ok: true });
+    expect(getEventListeners(ac.signal, 'abort')).toEqual([]);
+    const pending = k.query({ n: 3 }, 20_000, ac.signal);
+    track(pending);
+    expect(getEventListeners(ac.signal, 'abort')).toHaveLength(1); // проба с зубами: подписка есть
+    await k.stop();
+    await expect(pending).rejects.toMatchObject({ kind: 'crashed' });
+    expect(getEventListeners(ac.signal, 'abort')).toEqual([]); // отписка и на отказе тоже
   });
 
   it('abort после ответа ничего не отменяет: подписка снята вместе с таймером', async () => {

@@ -1,5 +1,8 @@
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { REQUIRED_ENV, checkEnvNames, checkNodeVersion, verdict } from './doctor.mjs';
+import { REQUIRED_ENV, checkEnvNames, checkNodeVersion, readDotEnv, verdict } from './doctor.mjs';
 
 describe('doctor', () => {
   it('finds missing env names without printing values', () => {
@@ -24,6 +27,25 @@ describe('doctor', () => {
   it('вердикт не печатает значений переменных, только имена', () => {
     const line = verdict({ failed: false, blockers: ['ENGINE_KEY', 'OPENAI_API_KEY'] });
     expect(line).toBe('[!] doctor: инструменты на месте, но не запустится без ENGINE_KEY, OPENAI_API_KEY');
+  });
+
+  it('пустое значение переменной считается отсутствующим', () => {
+    // Пустая строка в .env — самая частая форма «переменной нет»: сервис на ней падает так же.
+    const res = checkEnvNames({ APP_KEY: '', ENGINE_KEY: 'x' }, ['APP_KEY', 'ENGINE_KEY']);
+    expect(res.missing).toEqual(['APP_KEY']);
+    expect(res.present).toEqual(['ENGINE_KEY']);
+  });
+
+  it('readDotEnv пропускает комментарии и пустые строки, снимает кавычки', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'goko-doctor-'));
+    const file = path.join(dir, '.env');
+    try {
+      const lines = ['# ENGINE_KEY=commented', '', 'APP_KEY="quoted"', 'ENGINE_KEY=plain', 'broken-line'];
+      writeFileSync(file, lines.join('\n'));
+      expect(readDotEnv(file)).toEqual({ APP_KEY: 'quoted', ENGINE_KEY: 'plain' });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('accepts node >= 22.18 and rejects older', () => {
