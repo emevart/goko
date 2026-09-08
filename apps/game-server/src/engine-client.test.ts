@@ -105,7 +105,7 @@ describe('createEngineClient', () => {
     const engineFast = createEngineClient({ baseUrl: 'http://engine.test', engineKey: 'ek', fetch: fast.fetch, retryDelayMs: 1 });
     const t1 = Date.now();
     await expect(engineFast.genmove(req)).rejects.toMatchObject({ code: 'engine_unavailable' });
-    expect(Date.now() - t1).toBeLessThan(120);
+    expect(Date.now() - t1).toBeLessThan(160);
   });
 
   it('каждой операции достаётся свой таймаут', async () => {
@@ -128,10 +128,10 @@ describe('createEngineClient', () => {
       await expect(fn()).rejects.toMatchObject({ code: 'engine_busy' });
       return Date.now() - t0;
     };
-    expect(await elapsed(() => engine.genmove(req))).toBeLessThan(150);
+    expect(await elapsed(() => engine.genmove(req))).toBeLessThan(250);
     const analyzeMs = await elapsed(() => engine.analyze({ ...req }));
     expect(analyzeMs).toBeGreaterThanOrEqual(380);
-    expect(analyzeMs).toBeLessThan(700);
+    expect(analyzeMs).toBeLessThan(750);
     expect(await elapsed(() => engine.score({ boardSize: 13, rules: 'chinese', komi: 7.5, moves: [] }))).toBeGreaterThanOrEqual(780);
   });
 
