@@ -33,6 +33,25 @@ export function readDotEnv(file) {
   return out;
 }
 
+// Что чем ломается. Списки разделены по последствию, а не по «стадии»: doctor не должен
+// писать «можно работать» там, где сервис выходит с кодом 2 из-за отсутствующей переменной.
+export const REQUIRED_ENV = {
+  // Без этих пяти голосовой спайк не запускается: agent.ts, chat.mjs, token.mjs.
+  spike: ['LIVEKIT_URL', 'LIVEKIT_API_KEY', 'LIVEKIT_API_SECRET', 'OPENAI_API_KEY', 'WEB_HOST'],
+  // ENGINE_KEY читает apps/go-engine/src/main.ts: без него go-engine выходит с кодом 2.
+  engine: ['ENGINE_KEY'],
+  // Понадобится game-server'у; сейчас его никто не читает.
+  later: ['APP_KEY'],
+};
+
+// Итоговая строка. blockers — имена переменных, без которых сервис не поднимется;
+// значения переменных сюда не попадают никогда, только имена.
+export function verdict({ failed, blockers }) {
+  if (failed) return '[X] doctor: есть блокирующие проблемы';
+  if (blockers.length) return `[!] doctor: инструменты на месте, но не запустится без ${blockers.join(', ')}`;
+  return '[OK] doctor: можно работать';
+}
+
 function has(cmd) {
   try {
     execSync(cmd, { stdio: 'ignore' });
@@ -59,18 +78,15 @@ function main() {
   has('git --version') ? ok('git') : fail('git not found');
 
   const env = { ...readDotEnv(path.join(root, '.env')), ...process.env };
-  // Список разделён по тому, что переменные ломают на самом деле, — иначе doctor
-  // печатал «можно работать», а следом npm run token -w spike падал на WEB_HOST.
-  // Без этих пяти голосовой спайк не запускается: agent.ts, chat.mjs, token.mjs.
-  const requiredNow = ['LIVEKIT_URL', 'LIVEKIT_API_KEY', 'LIVEKIT_API_SECRET', 'OPENAI_API_KEY', 'WEB_HOST'];
-  // Понадобятся на стадии 1 (game-server и go-engine), сейчас их никто не читает.
-  const requiredLater = ['APP_KEY', 'ENGINE_KEY'];
 
-  const now = checkEnvNames(env, requiredNow);
+  const now = checkEnvNames(env, REQUIRED_ENV.spike);
   now.present.length ? ok(`env: ${now.present.join(', ')}`) : warn('env: ни одной переменной из .env не задано');
   if (now.missing.length) warn(`env отсутствуют: ${now.missing.join(', ')} — спайк не запустится (см. infra/.env.example)`);
 
-  const later = checkEnvNames(env, requiredLater);
+  const engine = checkEnvNames(env, REQUIRED_ENV.engine);
+  if (engine.missing.length) warn(`env отсутствуют: ${engine.missing.join(', ')} — go-engine не запустится (см. infra/.env.example)`);
+
+  const later = checkEnvNames(env, REQUIRED_ENV.later);
   if (later.missing.length) warn(`env для стадии 1 отсутствуют: ${later.missing.join(', ')} (сейчас не нужны)`);
 
   // AGENT_NAME молча подменяется дефолтом 'goko' в трёх файлах спайка. На ПК это
@@ -96,9 +112,7 @@ function main() {
     else warn(`${net.label} не найдена (${net.envName} или apps/go-engine/models/README.md)`);
   }
 
-  if (failed) console.log('[X] doctor: есть блокирующие проблемы');
-  else if (now.missing.length) console.log(`[!] doctor: инструменты на месте, но голосовой спайк не запустится без ${now.missing.join(', ')}`);
-  else console.log('[OK] doctor: можно работать');
+  console.log(verdict({ failed, blockers: [...now.missing, ...engine.missing] }));
   process.exit(failed ? 1 : 0);
 }
 
