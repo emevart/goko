@@ -310,6 +310,25 @@ describe('createEngineApp', () => {
     expect(katago.calls[0]).toMatchObject({ includeOwnership: false });
   });
 
+  it('analyze: maxVisits из запроса доходит до движка', async () => {
+    const katago = fakeKatago(() => ({ rootInfo: { winrate: 0.5, scoreLead: 0, visits: 77 }, moveInfos: [] }));
+    const app = createEngineApp({ katago, engineKey: KEY, models: { main: 'm', human: 'h' } });
+    await post(app, '/v1/analyze', { ...base, moves: [], maxVisits: 77 });
+    expect(katago.calls[0]).toMatchObject({ maxVisits: 77 });
+  });
+
+  it('analyze на доске 9x9: владение перекладывается по запрошенному размеру', async () => {
+    const ownership = new Array<number>(81).fill(0);
+    ownership[0] = 0.9; // A9 у KataGo
+    const katago = fakeKatago(() => ({ rootInfo: { winrate: 0.5, scoreLead: 0, visits: 1 }, moveInfos: [], ownership }));
+    const app = createEngineApp({ katago, engineKey: KEY, models: { main: 'm', human: 'h' } });
+    const res = await post(app, '/v1/analyze', { boardSize: 9, rules: 'chinese', komi: 7.5, moves: [] });
+    expect(res.status).toBe(200);
+    const body = await jsonAs<AnalyzeShape>(res);
+    expect(body.ownership).toHaveLength(81);
+    expect(body.ownership?.[coordToIndex('A9', 9)]).toBe(0.9);
+  });
+
   it('score: мёртвые по владению, площадь через go-core, winner и margin', async () => {
     // Чёрные строки 1..7 (стена на 7), белые 8..13; плюс чёрный камень M12 в белой зоне.
     const moves: [string, string][] = [...walls(7, 8), ['B', 'M12'], ['W', 'pass']];
@@ -367,6 +386,8 @@ describe('createEngineApp', () => {
   it('genmove: ms — настоящая длительность запроса', async () => {
     vi.useFakeTimers({ toFake: ['performance'] });
     try {
+      // Часы уводятся от нуля: ms — длительность запроса, а не показание часов.
+      vi.advanceTimersByTime(5000);
       const app = createEngineApp({
         katago: fakeKatago(() => {
           vi.advanceTimersByTime(1234);
@@ -458,6 +479,11 @@ describe('createEngineApp', () => {
     const rejected = await post(make(new KataGoError('rejected', 'bad query')), '/v1/analyze', { ...base, moves: [] });
     expect(rejected.status).toBe(500);
     expect(await codeOf(rejected)).toBe('internal');
+    // aborted — вызывающий уже ушёл; в internal такой отказ падать не должен, иначе
+    // каждый оборванный запрос выглядит в логах как ошибка сервера.
+    const aborted = await post(make(new KataGoError('aborted', 'gone')), '/v1/score', { ...base, moves: [] });
+    expect(aborted.status).toBe(503);
+    expect(await codeOf(aborted)).toBe('engine_busy');
   });
 
   it('прочая ошибка — 500 internal и строка в логе', async () => {
