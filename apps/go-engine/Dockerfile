@@ -14,9 +14,13 @@ ARG HUMAN_NET_SHA256=637746e44f0efe00ad1245a50aa9bbf0716efe364c43965ead97bd6835d
 # пакет переименован. libgomp1 нужен eigen-сборке KataGo (она собрана с OpenMP).
 RUN apt-get update && apt-get install -y --no-install-recommends curl unzip ca-certificates libzip4t64 libgomp1 && rm -rf /var/lib/apt/lists/*
 WORKDIR /opt/katago
+# Релиз KataGo под Linux — AppImage: без FUSE (а в контейнере его нет) он не запускается.
+# Распаковываем образ один раз при сборке, /opt/katago/katago оставляем обёрткой над AppRun.
 RUN curl -fsSL -o katago.zip https://github.com/lightvector/KataGo/releases/download/${KATAGO_VERSION}/${KATAGO_ASSET} \
  && echo "${KATAGO_SHA256}  katago.zip" | sha256sum -c - \
- && unzip -q katago.zip && rm katago.zip && chmod +x katago
+ && unzip -q katago.zip && rm katago.zip && chmod +x katago \
+ && ./katago --appimage-extract >/dev/null && rm katago \
+ && printf '#!/bin/sh\nexec /opt/katago/squashfs-root/AppRun "$@"\n' > katago && chmod +x katago
 RUN mkdir models \
  && curl -fsSL -o models/main.txt.gz "${MAIN_NET_URL}" \
  && echo "${MAIN_NET_SHA256}  models/main.txt.gz" | sha256sum -c - \
