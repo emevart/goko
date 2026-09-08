@@ -372,7 +372,7 @@ OpenCL-сборка для Windows на RTX 3060) + основная сеть + 
 
 Запасной путь, если русский голос Realtime не устроит по качеству или цене:
 конвейер `STT → LLM → TTS` того же фреймворка (`openai.STT` на
-`gpt-4o-transcribe`, `openai.LLM`, `openai.TTS` на `gpt-4o-mini-tts` с
+`gpt-transcribe`, `openai.LLM`, `openai.TTS` на `gpt-4o-mini-tts` с
 инструкцией по тону). Инструменты и промпт те же, меняется только сборка
 `AgentSession`; задержка выше на 0,5–1 с, зато голос настраивается
 инструкцией и минута дешевле. Переключатель — `VOICE_MODE=realtime|pipeline`.

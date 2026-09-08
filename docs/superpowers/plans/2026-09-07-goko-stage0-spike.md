@@ -305,7 +305,7 @@ git commit -m "scaffold: каркас монорепы, vitest, doctor"
 WEB_HOST=goko.example.org          # страница и /api; A-запись -> адрес VPS
 LK_HOST=goko-lk.example.org        # сигналинг LiveKit и TURN; A-запись -> адрес VPS
 ACME_EMAIL=                        # почта для Let's Encrypt; по умолчанию admin@WEB_HOST
-LIVEKIT_IMAGE=livekit/livekit-server:v1.9.11   # зафиксировать актуальный тег при выполнении
+LIVEKIT_IMAGE=livekit/livekit-server:v1.13.6   # проверено 08.09: новейший стабильный тег
 LIVEKIT_API_KEY=                   # openssl rand -hex 8
 LIVEKIT_API_SECRET=                # openssl rand -hex 32
 LIVEKIT_URL=wss://goko-lk.example.org   # = wss://LK_HOST; для воркера и game-server на ПК
@@ -500,7 +500,7 @@ git commit -m "infra: compose с caddy и livekit, скрипты bootstrap и d
 - Create: `apps/go-engine/Dockerfile`, `apps/go-engine/config/analysis.cfg`, `apps/go-engine/models/README.md`, `apps/go-engine/package.json` (минимальный, только имя), `spike/katago-bench.mjs`, `spike/README.md`
 
 **Interfaces:**
-- Produces: `analysis.cfg` с `reportAnalysisWinratesAs = BLACK`; образ `goko-engine-base` с бинарём `/opt/katago/katago` и сетями `/opt/katago/models/{main.bin.gz,human.bin.gz}`; скрипт `node spike/katago-bench.mjs --bin <katago> --model <main> --human <human> [--config <cfg>]`, печатает таблицу мс.
+- Produces: `analysis.cfg` с `reportAnalysisWinratesAs = BLACK`; образ `goko-engine-base` с бинарём `/opt/katago/katago` и сетями `/opt/katago/models/{main.txt.gz,human.bin.gz}`; скрипт `node spike/katago-bench.mjs --bin <katago> --model <main> --human <human> [--config <cfg>]`, печатает таблицу мс.
 
 - [ ] **Step 1: `apps/go-engine/models/README.md`**
 
@@ -511,10 +511,13 @@ git commit -m "infra: compose с caddy и livekit, скрипты bootstrap и d
 
 - Человеческая (обязательна): `b18c384nbt-humanv0.bin.gz`
   https://github.com/lightvector/KataGo/releases/download/v1.15.0/b18c384nbt-humanv0.bin.gz
-- Основная, кандидат 1 (быстрая): `kata1-b10c128-s1141046784-d204142634.bin.gz`
-  https://media.katagotraining.org/uploaded/networks/models/kata1/kata1-b10c128-s1141046784-d204142634.bin.gz
-- Основная, кандидат 2 (сильнее): `kata1-b15c192-s1672170752-d466197061.bin.gz`
-  https://media.katagotraining.org/uploaded/networks/models/kata1/kata1-b15c192-s1672170752-d466197061.bin.gz
+- Основная, кандидат 1 (быстрая): `kata1-b10c128-s1141046784-d204142634.txt.gz`
+  https://media.katagotraining.org/uploaded/networks/models/kata1/kata1-b10c128-s1141046784-d204142634.txt.gz
+- Основная, кандидат 2 (сильнее): `kata1-b15c192-s1672170752-d466197061.txt.gz`
+  https://media.katagotraining.org/uploaded/networks/models/kata1/kata1-b15c192-s1672170752-d466197061.txt.gz
+
+Расширение `.txt.gz`, а не `.bin.gz`: по этому каталогу `.bin.gz` отдаёт 403
+(проверено 08.09). KataGo читает оба формата.
 
 Если ссылка на media.katagotraining.org отдаёт 404, взять файл с той же архитектурой
 в разделе «older networks» на https://katagotraining.org/networks/ и записать имя сюда.
@@ -548,15 +551,17 @@ numEigenThreadsPerModel = 2
 
 ```dockerfile
 FROM ubuntu:24.04 AS katago
+# Тег v1.18.1 менять нельзя: в v1.18.2 сборок eigen и opencl нет вовсе (проверено 08.09)
 ARG KATAGO_VERSION=v1.18.1
 ARG KATAGO_ASSET=katago-v1.18.1-eigenavx2-linux-x64.zip
-ARG MAIN_NET_URL=https://media.katagotraining.org/uploaded/networks/models/kata1/kata1-b10c128-s1141046784-d204142634.bin.gz
+# .bin.gz по этому пути отдаёт 403 (проверено 08.09); каталог раздаёт .txt.gz, KataGo читает оба формата
+ARG MAIN_NET_URL=https://media.katagotraining.org/uploaded/networks/models/kata1/kata1-b10c128-s1141046784-d204142634.txt.gz
 ARG HUMAN_NET_URL=https://github.com/lightvector/KataGo/releases/download/v1.15.0/b18c384nbt-humanv0.bin.gz
 RUN apt-get update && apt-get install -y --no-install-recommends curl unzip ca-certificates libzip4 && rm -rf /var/lib/apt/lists/*
 WORKDIR /opt/katago
 RUN curl -fsSL -o katago.zip https://github.com/lightvector/KataGo/releases/download/${KATAGO_VERSION}/${KATAGO_ASSET} \
  && unzip -q katago.zip && rm katago.zip && chmod +x katago
-RUN mkdir models && curl -fsSL -o models/main.bin.gz "${MAIN_NET_URL}" && curl -fsSL -o models/human.bin.gz "${HUMAN_NET_URL}"
+RUN mkdir models && curl -fsSL -o models/main.txt.gz "${MAIN_NET_URL}" && curl -fsSL -o models/human.bin.gz "${HUMAN_NET_URL}"
 COPY config/analysis.cfg /opt/katago/analysis.cfg
 # Стадия 1 добавит слой с Node и обёрткой; для замера стадии 0 достаточно этого образа.
 CMD ["/opt/katago/katago", "version"]
@@ -638,7 +643,7 @@ Expected: все строки с `human=yes`; на RTX 3060 `humanPolicy` < 300 
 ```bash
 infra/scripts/deploy.sh
 ssh goko 'cd /opt/goko/src/apps/go-engine && grep -c avx2 /proc/cpuinfo && docker build -t goko-engine-base .'
-ssh goko 'docker run --rm -v /opt/goko/src/spike:/spike -v /opt/goko/src/apps/go-engine/config:/cfg goko-engine-base sh -c "apt-get install -y -qq nodejs >/dev/null 2>&1; node /spike/katago-bench.mjs --bin /opt/katago/katago --model /opt/katago/models/main.bin.gz --human /opt/katago/models/human.bin.gz --config /cfg/analysis.cfg"'
+ssh goko 'docker run --rm -v /opt/goko/src/spike:/spike -v /opt/goko/src/apps/go-engine/config:/cfg goko-engine-base sh -c "apt-get install -y -qq nodejs >/dev/null 2>&1; node /spike/katago-bench.mjs --bin /opt/katago/katago --model /opt/katago/models/main.txt.gz --human /opt/katago/models/human.bin.gz --config /cfg/analysis.cfg"'
 ```
 
 Если `nodejs` в образе нет (ubuntu 24.04 даёт Node 18 — для скрипта достаточно), альтернатива: `docker run ... --entrypoint /opt/katago/katago goko-engine-base analysis -config ... ` и вручную вставить одну строку запроса из скрипта. Записать числа для `b10c128`; повторить сборку с `--build-arg MAIN_NET_URL=<b15c192>` и записать.
@@ -736,7 +741,7 @@ export default defineAgent({
         model: 'gpt-realtime',
         voice: 'marin',
         turnDetection: { type: 'server_vad', threshold: 0.5, prefix_padding_ms: 300, silence_duration_ms: 500 },
-        inputAudioTranscription: { model: 'gpt-4o-mini-transcribe', language: 'ru' },
+        inputAudioTranscription: { model: 'gpt-live-transcribe', language: 'ru' },
       }),
     });
 
@@ -950,7 +955,7 @@ git commit -m "spike: текстовый канал lk.chat из консоли"
 const mode = process.env.VOICE_MODE ?? 'realtime';
 const session = mode === 'pipeline'
   ? new voice.AgentSession({
-      stt: new openai.STT({ model: 'gpt-4o-transcribe', language: 'ru' }),
+      stt: new openai.STT({ model: 'gpt-transcribe', language: 'ru' }),
       llm: new openai.LLM({ model: 'gpt-4.1-mini' }),
       tts: new openai.TTS({ model: 'gpt-4o-mini-tts', voice: 'marin', instructions: 'Говори по-русски спокойно, как игрок за доской.' }),
       vad: await silero.VAD.load(),

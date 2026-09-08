@@ -2881,7 +2881,7 @@ if (!bin || !engineKey) {
   console.error('[X] go-engine: нужны KATAGO_BIN и ENGINE_KEY (см. infra/.env.example)');
   process.exit(2);
 }
-const model = env.KATAGO_MODEL ?? path.join(root, 'apps/go-engine/models/kata1-b10c128-s1141046784-d204142634.bin.gz');
+const model = env.KATAGO_MODEL ?? path.join(root, 'apps/go-engine/models/kata1-b10c128-s1141046784-d204142634.txt.gz');
 const humanModel = env.KATAGO_HUMAN_MODEL ?? path.join(root, 'apps/go-engine/models/b18c384nbt-humanv0.bin.gz');
 const config = env.KATAGO_CONFIG ?? path.join(root, 'apps/go-engine/config/analysis.cfg');
 const port = Number(env.ENGINE_PORT ?? 8788);
@@ -2914,7 +2914,7 @@ import { KataGo } from './katago.ts';
 
 const BIN = process.env.KATAGO_BIN;
 const root = path.resolve(import.meta.dirname, '../../..');
-const MODEL = process.env.KATAGO_MODEL ?? path.join(root, 'apps/go-engine/models/kata1-b10c128-s1141046784-d204142634.bin.gz');
+const MODEL = process.env.KATAGO_MODEL ?? path.join(root, 'apps/go-engine/models/kata1-b10c128-s1141046784-d204142634.txt.gz');
 const HUMAN = process.env.KATAGO_HUMAN_MODEL ?? path.join(root, 'apps/go-engine/models/b18c384nbt-humanv0.bin.gz');
 const CONFIG = process.env.KATAGO_CONFIG ?? path.join(root, 'apps/go-engine/config/analysis.cfg');
 const KEY = 'contract';
@@ -2990,7 +2990,7 @@ describe.skipIf(!BIN)('KataGo contract', () => {
 - [ ] **Step 7: `infra/.env.example` — добавить переменные движка и game-server** (после строки `KATAGO_BIN=`)
 
 ```
-KATAGO_MODEL=                      # путь к основной сети; по умолчанию apps/go-engine/models/kata1-b10c128-...bin.gz
+KATAGO_MODEL=                      # путь к основной сети; по умолчанию apps/go-engine/models/kata1-b10c128-...txt.gz
 KATAGO_HUMAN_MODEL=                # путь к человеческой сети; по умолчанию apps/go-engine/models/b18c384nbt-humanv0.bin.gz
 KATAGO_CONFIG=                     # по умолчанию apps/go-engine/config/analysis.cfg
 ENGINE_PORT=8788                   # go-engine слушает ENGINE_HOST:ENGINE_PORT

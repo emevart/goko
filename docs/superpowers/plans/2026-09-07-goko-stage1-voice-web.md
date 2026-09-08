@@ -15,7 +15,7 @@
 - Node `>=22.18`; импорты внутри пакетов с расширением `.ts`/`.tsx`; между пакетами — по имени `@goko/go-core`, `@goko/protocol`; `tsconfig.base.json`: `strict`, `noUncheckedIndexedAccess`, `verbatimModuleSyntax` (типы только через `import type`), `erasableSyntaxOnly` (никаких `enum`, `namespace`, parameter properties). `apps/web` имеет свой `tsconfig.json` (DOM, JSX, bundler) и исключён из корневого.
 - Правила го, координаты и озвучивание координат (`speakCoord`) — только из `@goko/go-core`; веб рисует присланную строку `board`; агент не хранит позицию: каждая реплика о партии — из результата инструмента (правило 2 `CLAUDE.md`). В памяти агента только `sessionId`, `gameId`, цвет человека, ранг, коми и служебные флаги.
 - Инструменты ровно по таблице раздела 9 спеки: `start_game`, `play_move`, `correct_last_move`, `pass`, `resign`, `undo`, `get_position`, `get_assessment`, `set_rank`; `get_assessment` — `analyze` с `maxVisits: 50`; тексты `note`/`reason` для модели — по-русски; координаты в аргументах и результатах — латиницей (`D4`), рядом произношение (`дэ четыре`).
-- Речь: `VOICE_MODE=realtime` (по умолчанию) — `openai.realtime.RealtimeModel({ model: 'gpt-realtime', voice: 'marin' })`, серверный VAD с перебиванием, транскрипция входа `gpt-4o-mini-transcribe` с `language: 'ru'`; `VOICE_MODE=pipeline` — `silero.VAD` + `openai.STT` (`gpt-4o-transcribe`, `ru`) + `openai.LLM` + `openai.TTS` (`gpt-4o-mini-tts` с инструкцией по тону). Приветствие — `generateReply` в `onEnter`.
+- Речь: `VOICE_MODE=realtime` (по умолчанию) — `openai.realtime.RealtimeModel({ model: 'gpt-realtime', voice: 'marin' })`, серверный VAD с перебиванием, транскрипция входа `gpt-live-transcribe` с `language: 'ru'`; `VOICE_MODE=pipeline` — `silero.VAD` + `openai.STT` (`gpt-transcribe`, `ru`) + `openai.LLM` + `openai.TTS` (`gpt-4o-mini-tts` с инструкцией по тону). Приветствие — `generateReply` в `onEnter`.
 - Текстовые каналы LiveKit: вход `lk.chat` (стандартный `RoomIO`), выход `lk.transcription` (атрибуты `lk.segment_id`, `lk.transcription_final`, `lk.transcribed_track_id`).
 - Имена воркера: `AGENT_NAME=goko` на VPS, `goko-dev` на ПК; game-server кладёт то же имя в `roomConfig` токена (`AGENT_NAME` у него же). Метаданные диспетчеризации — `{ "sessionId": "<id>" }`, комната — `goko-<sessionId>`.
 - Веб: одна страница, портретный телефон, SVG-доска, тап = ближайший пункт → `play` с `via: 'tap'` и `waitForReply: false`; не ход человека — сообщение «сейчас ход Гоко» без запроса; цели касания ≥ 44 px; тёмная и светлая тема по `prefers-color-scheme`; без UI-библиотек; без агента в комнате страница играет тапами.
@@ -1694,13 +1694,13 @@ export async function sessionOptions(mode: VoiceMode): Promise<SessionOptions> {
         model: 'gpt-realtime',
         voice: 'marin',
         turnDetection: REALTIME_TURN_DETECTION,
-        inputAudioTranscription: { model: 'gpt-4o-mini-transcribe', language: 'ru' },
+        inputAudioTranscription: { model: 'gpt-live-transcribe', language: 'ru' },
       }),
     };
   }
   return {
     vad: await silero.VAD.load(),
-    stt: new openai.STT({ model: 'gpt-4o-transcribe', language: 'ru' }),
+    stt: new openai.STT({ model: 'gpt-transcribe', language: 'ru' }),
     llm: new openai.LLM({ model: 'gpt-4.1-mini' }),
     tts: new openai.TTS({
       model: 'gpt-4o-mini-tts',
@@ -3298,7 +3298,7 @@ COPY packages/protocol/src packages/protocol/src
 COPY apps/go-engine/src apps/go-engine/src
 COPY apps/go-engine/config apps/go-engine/config
 ENV KATAGO_BIN=/opt/katago/katago \
-    KATAGO_MODEL=/opt/katago/models/main.bin.gz \
+    KATAGO_MODEL=/opt/katago/models/main.txt.gz \
     KATAGO_HUMAN_MODEL=/opt/katago/models/human.bin.gz \
     KATAGO_CONFIG=/opt/katago/analysis.cfg \
     ENGINE_HOST=0.0.0.0 ENGINE_PORT=8788
