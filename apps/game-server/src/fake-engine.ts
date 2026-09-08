@@ -39,9 +39,8 @@ function randomLegal(pos: Position, color: Color, random: () => number): string 
     const eye = neighbors(i, size).every((n) => pos.board.charAt(n) === color);
     if (!eye) candidates.push(coord);
   }
-  if (candidates.length === 0) return 'pass';
-  // Под noUncheckedIndexedAccess индексация даёт string | undefined: сломанный random
-  // вне [0, 1) не должен ронять движок, безопасный ответ — пас.
+  // Пас — ответ на оба случая, когда кандидата нет: список пуст или random вернул
+  // значение вне [0, 1). Отдельная проверка на пустой список была бы её же дублем.
   return candidates[Math.floor(random() * candidates.length)] ?? 'pass';
 }
 
