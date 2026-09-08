@@ -14,6 +14,16 @@ if (!bin || !model || !human) {
 }
 
 const proc = spawn(bin, ['analysis', '-config', config, '-model', model, '-human-model', human], { stdio: ['pipe', 'pipe', 'inherit'] });
+let finished = false;
+proc.on('error', (e) => {
+  console.error(`[X] не удалось запустить ${bin}: ${e.message}`);
+  process.exit(1);
+});
+proc.on('exit', (code, signal) => {
+  if (finished) return;
+  console.error(`[X] KataGo завершился раньше времени: код ${code ?? '-'}, сигнал ${signal ?? '-'}`);
+  process.exit(1);
+});
 const rl = readline.createInterface({ input: proc.stdout });
 const waiting = new Map();
 rl.on('line', (line) => {
@@ -39,6 +49,12 @@ async function timed(label, q) {
   const t0 = performance.now();
   const r = await query(q);
   const ms = Math.round(performance.now() - t0);
+  if (r.error) {
+    console.error(`[X] ${label}: ${r.error}${r.field ? ` (поле ${r.field})` : ''}`);
+    finished = true;
+    proc.kill();
+    process.exit(1);
+  }
   const root = r.rootInfo ?? {};
   console.log(`${label.padEnd(22)} ${String(ms).padStart(6)} ms  visits=${root.visits ?? '-'} winrateB=${root.winrate?.toFixed(3) ?? '-'} lead=${root.scoreLead?.toFixed(1) ?? '-'} human=${Array.isArray(r.humanPolicy) ? 'yes' : 'NO'}`);
   return r;
@@ -55,5 +71,8 @@ for (const rank of ['rank_20k', 'rank_10k', 'rank_1d']) {
 await timed('genmove 10 visits', { ...base, maxVisits: 10, includePolicy: true, overrideSettings: { humanSLProfile: 'rank_10k' } });
 await timed('analyze 50 visits', { ...base, maxVisits: 50, includeOwnership: true });
 await timed('score 400 visits', { ...base, maxVisits: 400, includeOwnership: true });
+finished = true;
 proc.stdin.end();
 proc.kill();
+console.log('[OK] замер завершён');
+process.exit(0);
