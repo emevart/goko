@@ -80,8 +80,9 @@ export class HttpError extends Error {
   readonly status: number;
   readonly body?: string;
 
-  constructor(status: number, body?: string) {
-    super(`HTTP ${status}${body ? `: ${body.slice(0, 200)}` : ''}`);
+  // options.cause — исходная ошибка разбора (SyntaxError, ZodError), если ответ не разобрался.
+  constructor(status: number, body?: string, options?: ErrorOptions) {
+    super(`HTTP ${status}${body ? `: ${body.slice(0, 200)}` : ''}`, options);
     this.name = 'HttpError';
     this.status = status;
     this.body = body;

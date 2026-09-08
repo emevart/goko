@@ -24,6 +24,11 @@ export async function* parseSseStream(body: ReadableStream<Uint8Array>): AsyncGe
       }
     }
   } finally {
+    // Отмена, а не releaseLock: при раннем `break` потребителя тело ответа иначе
+    // остаётся неотменённым и соединение висит до таймаута. Ошибку отмены (уже отменённый
+    // или сломанный поток) глотаем — уборке она не мешает; блокировку снимаем отдельно,
+    // cancel() её не отпускает.
+    await reader.cancel().catch(() => {});
     reader.releaseLock();
   }
 }

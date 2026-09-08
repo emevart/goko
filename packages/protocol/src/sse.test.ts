@@ -56,7 +56,14 @@ describe('parseSseStream', () => {
   });
 
   it('блок без строк data пропускается целиком', async () => {
-    const data = await collect(streamOf(['event: ping\nid: 7\n\ndata: one\n\n']));
+    // `datax: 9` — поле, начинающееся с data, но не являющееся data: наружу уходить не должно.
+    const data = await collect(streamOf(['event: ping\nid: 7\ndatax: 9\n\ndata: one\n\n']));
+    expect(data).toEqual(['one']);
+  });
+
+  it('пустой блок в начале потока не мешает разбору остальных', async () => {
+    // Keep-alive перед первым блоком: разделитель в позиции 0, следующего чанка не будет.
+    const data = await collect(streamOf(['\n\ndata: one\n\n']));
     expect(data).toEqual(['one']);
   });
 
@@ -68,5 +75,42 @@ describe('parseSseStream', () => {
   it('после data: обрезается ровно один пробел, внутренние сохраняются', async () => {
     const data = await collect(streamOf(['data:  {"a": 1, "b": 2}\n\n']));
     expect(data).toEqual([' {"a": 1, "b": 2}']);
+  });
+
+  it('ранний выход потребителя отменяет исходный поток', async () => {
+    // Поток не закрывается сам: только отмена освобождает соединение.
+    const enc = new TextEncoder();
+    let cancelled = false;
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        controller.enqueue(enc.encode('data: one\n\n'));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const seen: string[] = [];
+    for await (const d of parseSseStream(stream)) {
+      seen.push(d);
+      break;
+    }
+    expect(seen).toEqual(['one']);
+    expect(cancelled).toBe(true);
+    expect(stream.locked).toBe(false);
+  });
+
+  it('повторная отмена уже отменённого потока не бросает', async () => {
+    const enc = new TextEncoder();
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        controller.enqueue(enc.encode('data: one\n\n'));
+      },
+      cancel() {
+        throw new Error('cancel failed');
+      },
+    });
+    const gen = parseSseStream(stream);
+    await gen.next();
+    await expect(gen.return(undefined)).resolves.toEqual({ value: undefined, done: true });
   });
 });

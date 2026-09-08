@@ -27,6 +27,7 @@ describe('createClient', () => {
     expect(f.calls[0]?.url).toBe('http://api.test/api/games/g1/play');
     expect(f.calls[0]?.init.method).toBe('POST');
     expect((f.calls[0]?.init.headers as Record<string, string>)['x-app-key']).toBe('k');
+    expect((f.calls[0]?.init.headers as Record<string, string>)['content-type']).toBe('application/json');
     expect(JSON.parse(String(f.calls[0]?.init.body))).toEqual({ coord: 'D4', via: 'voice' });
   });
 
@@ -42,6 +43,14 @@ describe('createClient', () => {
     const err = await client.getGame('g1').catch((e: unknown) => e);
     expect(err).toBeInstanceOf(HttpError);
     expect((err as HttpError).status).toBe(502);
+    expect((err as HttpError).body).toBe('bad gateway');
+  });
+
+  it('хвостовые слэши базового адреса срезаются все', async () => {
+    const f = fakeFetch(() => Response.json(state));
+    const client = createClient({ baseUrl: 'http://api.test//', appKey: 'k', fetch: f.fetch });
+    await client.getGame('g1');
+    expect(f.calls[0]?.url).toBe('http://api.test/api/games/g1');
   });
 
   it('ascii и sgf — текст, events — разобранные события', async () => {
@@ -118,6 +127,9 @@ describe('маршруты клиента', () => {
     expect(call?.url).toBe(`http://api.test${route.path}`);
     expect(call?.init.method).toBe(route.method);
     expect((call?.init.headers as Record<string, string> | undefined)?.['x-app-key']).toBe('k');
+    // Без content-type Hono на сервере не разберёт тело запроса; текстовые маршруты его не шлют.
+    const contentType = (call?.init.headers as Record<string, string> | undefined)?.['content-type'];
+    expect(contentType).toBe(route.method === undefined ? undefined : 'application/json');
     const body = call?.init.body;
     if (route.body === undefined) expect(body).toBeUndefined();
     else expect(JSON.parse(String(body))).toEqual(route.body);
@@ -169,6 +181,24 @@ describe('events', () => {
     expect(seen).toEqual(['engine.thinking']);
   });
 
+  it('onUnknownEvent получает событие не по схеме, разбор продолжается', async () => {
+    const body = 'data: {"type":"unknown.kind"}\n\n' + oneEvent;
+    const f = fakeFetch(() => sseResponse(body));
+    const client = createClient({ baseUrl: 'http://api.test', appKey: 'k', fetch: f.fetch });
+    const unknown: unknown[] = [];
+    const errors: string[] = [];
+    const seen = [];
+    for await (const ev of client.events({ gameId: 'g1' }, undefined, (raw, error) => {
+      unknown.push(raw);
+      errors.push(error.name);
+    })) {
+      seen.push(ev.type);
+    }
+    expect(seen).toEqual(['engine.thinking']);
+    expect(unknown).toEqual([{ type: 'unknown.kind' }]);
+    expect(errors).toEqual(['ZodError']);
+  });
+
   it('ошибка статуса -> ApiError, пустое тело -> HttpError', async () => {
     const api = fakeFetch(() => Response.json({ error: { code: 'not_found', message: 'no game' } }, { status: 404 }));
     const clientApi = createClient({ baseUrl: 'http://api.test', appKey: 'k', fetch: api.fetch });
@@ -184,10 +214,24 @@ describe('events', () => {
 });
 
 describe('разбор ответа схемой', () => {
-  it('ответ не по схеме -> ошибка, а не молчаливый пропуск', async () => {
+  it('ответ не по схеме -> HttpError с исходной ошибкой в cause', async () => {
     const f = fakeFetch(() => Response.json({ state: { ...state, board: '.'.repeat(168) }, move }));
     const client = createClient({ baseUrl: 'http://api.test', appKey: 'k', fetch: f.fetch });
-    await expect(client.play('g1', { coord: 'D4' })).rejects.toThrow(/board has 168 chars/);
+    const err = await client.play('g1', { coord: 'D4' }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(HttpError);
+    expect((err as HttpError).status).toBe(200);
+    expect((err as HttpError).body).toContain('"board"');
+    expect(String((err as HttpError).cause)).toMatch(/board has 168 chars/);
+  });
+
+  it('успешный ответ не в JSON -> HttpError с исходной ошибкой в cause', async () => {
+    const f = fakeFetch(() => new Response('<html>proxy</html>', { status: 200, headers: { 'content-type': 'text/html' } }));
+    const client = createClient({ baseUrl: 'http://api.test', appKey: 'k', fetch: f.fetch });
+    const err = await client.getGame('g1').catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(HttpError);
+    expect((err as HttpError).status).toBe(200);
+    expect((err as HttpError).body).toBe('<html>proxy</html>');
+    expect((err as HttpError).cause).toBeInstanceOf(SyntaxError);
   });
 });
 
@@ -204,6 +248,15 @@ describe('fakeFetch', () => {
     const f = fakeFetch(() => new Response('ok'));
     await f.fetch('u1');
     expect(f.calls[0]?.init).toEqual({});
+  });
+
+  it('Request первым аргументом: url, метод и заголовки берутся из него', async () => {
+    const f = fakeFetch(() => new Response('ok'));
+    await f.fetch(new Request('http://api.test/api/games', { method: 'POST', headers: { 'x-app-key': 'k' }, body: '{}' }));
+    const call = f.calls[0];
+    expect(call?.url).toBe('http://api.test/api/games');
+    expect(call?.init.method).toBe('POST');
+    expect(new Headers(call?.init.headers).get('x-app-key')).toBe('k');
   });
 
   it('пустой список обработчиков — внятная ошибка', async () => {

@@ -44,10 +44,21 @@ export function createClient(opts: ClientOptions) {
     const res = await fetchFn(`${base}${path}`, {
       method,
       headers: { 'content-type': 'application/json', 'x-app-key': opts.appKey },
-      body: body === undefined ? undefined : JSON.stringify(body),
+      body: JSON.stringify(body),
     });
     if (!res.ok) throw await toError(res);
-    return schema.parse(await res.json());
+    // Успешный ответ, который не разобрался, — тоже HttpError: у клиента ровно два класса
+    // ошибок (ApiError и HttpError), голый SyntaxError или ZodError наружу не выпускаем.
+    const raw = await res.text();
+    let json: unknown;
+    try {
+      json = JSON.parse(raw);
+    } catch (cause) {
+      throw new HttpError(res.status, raw, { cause });
+    }
+    const parsed = schema.safeParse(json);
+    if (!parsed.success) throw new HttpError(res.status, raw, { cause: parsed.error });
+    return parsed.data;
   }
 
   async function text(path: string): Promise<string> {
@@ -56,7 +67,13 @@ export function createClient(opts: ClientOptions) {
     return res.text();
   }
 
-  async function* events(target: EventsTarget, signal?: AbortSignal): AsyncGenerator<GameEvent, void, undefined> {
+  // onUnknownEvent — необязательный крючок для вызывающего: событие не по схеме иначе
+  // отбрасывается молча, и расхождение версий сервера и клиента остаётся невидимым.
+  async function* events(
+    target: EventsTarget,
+    signal?: AbortSignal,
+    onUnknownEvent?: (raw: unknown, error: z.ZodError) => void,
+  ): AsyncGenerator<GameEvent, void, undefined> {
     const path = 'sessionId' in target ? `/api/sessions/${enc(target.sessionId)}/events` : `/api/games/${enc(target.gameId)}/events`;
     const res = await fetchFn(`${base}${path}`, { headers: { 'x-app-key': opts.appKey, accept: 'text/event-stream' }, signal });
     if (!res.ok) throw await toError(res);
@@ -70,6 +87,7 @@ export function createClient(opts: ClientOptions) {
       }
       const parsed = GameEvent.safeParse(json);
       if (parsed.success) yield parsed.data;
+      else onUnknownEvent?.(json, parsed.error);
     }
   }
 
