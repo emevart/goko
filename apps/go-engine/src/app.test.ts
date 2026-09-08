@@ -1,16 +1,17 @@
 import { describe, expect, it, vi } from 'vitest';
 import { coordToIndex } from '@goko/go-core';
-import { SCORE_VISITS, createEngineApp } from './app.ts';
+import { DEFAULT_TIMEOUTS, SCORE_VISITS, createEngineApp } from './app.ts';
 import { KataGoError, type KataQuery, type KataResponse } from './katago.ts';
 import { walls } from './test-helpers.ts';
 
 type FakeKatago = {
   calls: KataQuery[];
   timeouts: (number | undefined)[];
+  signals: (AbortSignal | undefined)[];
   alive: boolean;
   queueLength: number;
   restarts: number;
-  query: (q: KataQuery, timeoutMs?: number) => Promise<KataResponse>;
+  query: (q: KataQuery, timeoutMs?: number, signal?: AbortSignal) => Promise<KataResponse>;
 };
 
 function fakeKatago(
@@ -20,12 +21,14 @@ function fakeKatago(
   return {
     calls: [],
     timeouts: [],
+    signals: [],
     alive: extra.alive ?? true,
     queueLength: extra.queueLength ?? 0,
     restarts: extra.restarts ?? 0,
-    async query(q: KataQuery, timeoutMs?: number): Promise<KataResponse> {
+    async query(q: KataQuery, timeoutMs?: number, signal?: AbortSignal): Promise<KataResponse> {
       this.calls.push(q);
       this.timeouts.push(timeoutMs);
+      this.signals.push(signal);
       return { id: 'q', ...reply(q) };
     },
   };
@@ -48,6 +51,7 @@ type GenmoveShape = {
   winrateB: number;
   scoreLeadB: number;
   humanPolicyTop: { coord: string; prob: number }[];
+  humanFallback?: boolean;
   ms: number;
 };
 type AnalyzeShape = {
@@ -70,15 +74,20 @@ type ScoreShape = {
 const jsonAs = async <T>(res: Response): Promise<T> => (await res.json()) as T;
 const codeOf = async (res: Response): Promise<string> => (await jsonAs<ErrorShape>(res)).error.code;
 
-const post = (app: ReturnType<typeof createEngineApp>, route: string, body: unknown, h = headers) =>
-  app.request(route, { method: 'POST', headers: h, body: JSON.stringify(body) });
+const post = (
+  app: ReturnType<typeof createEngineApp>,
+  route: string,
+  body: unknown,
+  h = headers,
+  signal?: AbortSignal,
+) => app.request(route, { method: 'POST', headers: h, body: JSON.stringify(body), signal });
 
 // Ownership в порядке KataGo (строки сверху): строки выше границы белые (-1), ниже — чёрные (+1).
-function kataOwnership(blackRowsFromBottom: number): number[] {
+function kataOwnership(blackRowsFromBottom: number, size = 13): number[] {
   const out: number[] = [];
-  for (let rowFromTop = 0; rowFromTop < 13; rowFromTop++) {
-    const row = 13 - rowFromTop; // 13..1
-    for (let c = 0; c < 13; c++) out.push(row <= blackRowsFromBottom ? 1 : -1);
+  for (let rowFromTop = 0; rowFromTop < size; rowFromTop++) {
+    const row = size - rowFromTop; // size..1
+    for (let c = 0; c < size; c++) out.push(row <= blackRowsFromBottom ? 1 : -1);
   }
   return out;
 }
@@ -418,7 +427,10 @@ describe('createEngineApp', () => {
     await post(app, '/v1/genmove', { ...base, moves: [], rank: '5k' });
     await post(app, '/v1/analyze', { ...base, moves: [] });
     await post(app, '/v1/score', { ...base, moves: [] });
-    expect(katago.timeouts).toEqual([20_000, 30_000, 60_000]);
+    expect(katago.timeouts).toEqual([8_000, 12_000, 25_000]);
+    // Внутренний бюджет обязан истекать раньше клиентского (game-server: 10 / 15 / 30 с),
+    // иначе клиент всегда отваливается первым и осмысленного кода ошибки движка не видит.
+    expect(DEFAULT_TIMEOUTS).toEqual({ genmove: 8_000, analyze: 12_000, score: 25_000 });
 
     const own = fakeKatago(() => ({ rootInfo: { winrate: 0.5, scoreLead: 0, visits: 1 }, moveInfos: [] }));
     const custom = createEngineApp({
@@ -479,5 +491,190 @@ describe('createEngineApp', () => {
     });
     const body = await jsonAs<GenmoveShape>(await post(app, '/v1/genmove', { ...base, moves: [], rank: '5k' }));
     expect(body.move).toBe('B13');
+  });
+
+  it('сигнал HTTP-запроса доходит до движка на всех трёх маршрутах', async () => {
+    const katago = fakeKatago(() => ({
+      rootInfo: { winrate: 0.5, scoreLead: 0, visits: 1 },
+      moveInfos: [{ move: 'K10', order: 0, winrate: 0.5, scoreLead: 0, visits: 1 }],
+      ownership: new Array<number>(169).fill(0),
+    }));
+    const app = createEngineApp({ katago, engineKey: KEY, models: { main: 'm', human: 'h' } });
+    await post(app, '/v1/genmove', { ...base, moves: [], rank: '5k' });
+    await post(app, '/v1/analyze', { ...base, moves: [] });
+    await post(app, '/v1/score', { ...base, moves: [] });
+    expect(katago.signals).toHaveLength(3);
+    for (const signal of katago.signals) expect(signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it('оборванный HTTP-запрос отменяет работу движка, а не досиживает бюджет', async () => {
+    const katago = fakeKatago(() => ({ rootInfo: { winrate: 0.5, scoreLead: 0, visits: 400 }, ownership: kataOwnership(7) }));
+    const app = createEngineApp({ katago, engineKey: KEY, models: { main: 'm', human: 'h' } });
+    const ac = new AbortController();
+    await post(app, '/v1/score', { ...base, moves: [] }, headers, ac.signal);
+    const signal = katago.signals[0];
+    expect(signal?.aborted).toBe(false);
+    ac.abort();
+    expect(signal?.aborted).toBe(true);
+  });
+
+  it('genmove без человеческой сети помечает ход запасным, а не только пишет в лог', async () => {
+    const app = createEngineApp({
+      katago: fakeKatago(() => ({
+        rootInfo: { winrate: 0.5, scoreLead: 0 },
+        moveInfos: [{ move: 'K10', order: 0, winrate: 0.5, scoreLead: 0, visits: 1 }],
+      })),
+      engineKey: KEY,
+      models: { main: 'm', human: 'h' },
+    });
+    const body = await jsonAs<GenmoveShape>(await post(app, '/v1/genmove', { ...base, moves: [], rank: '1d' }));
+    // Без признака у доски видно только то, что Гоко вдруг заиграл на порядок сильнее.
+    expect(body).toMatchObject({ move: 'K10', humanFallback: true, humanPolicyTop: [] });
+  });
+
+  it('genmove по человеческой сети запасным не помечается', async () => {
+    const policy = new Array<number>(170).fill(0);
+    policy[0] = 0.4;
+    const app = createEngineApp({
+      katago: fakeKatago(() => ({
+        rootInfo: { winrate: 0.5, scoreLead: 0 },
+        moveInfos: [{ move: 'D4', order: 0, winrate: 0.5, scoreLead: 0, visits: 1 }],
+        humanPolicy: policy,
+      })),
+      engineKey: KEY,
+      models: { main: 'm', human: 'h' },
+    });
+    const body = await jsonAs<GenmoveShape>(await post(app, '/v1/genmove', { ...base, moves: [], rank: '5k' }));
+    expect(body).toMatchObject({ move: 'A13', humanFallback: false });
+  });
+
+  it('genmove: человеческая сеть без годных кандидатов — тоже запасной ход', async () => {
+    const policy = new Array<number>(170).fill(0);
+    policy[0] = 0.001; // ниже отсечки хвоста
+    const app = createEngineApp({
+      katago: fakeKatago(() => ({
+        rootInfo: { winrate: 0.5, scoreLead: 0 },
+        moveInfos: [{ move: 'D4', order: 0, winrate: 0.5, scoreLead: 0, visits: 1 }],
+        humanPolicy: policy,
+      })),
+      engineKey: KEY,
+      models: { main: 'm', human: 'h' },
+    });
+    const body = await jsonAs<GenmoveShape>(await post(app, '/v1/genmove', { ...base, moves: [], rank: '5k' }));
+    expect(body).toMatchObject({ move: 'D4', humanFallback: true });
+  });
+
+  it('genmove на доске 9x9: размер доходит до движка и до выбора хода', async () => {
+    const policy = new Array<number>(82).fill(0);
+    policy[0] = 0.4; // A9 в порядке KataGo
+    const katago = fakeKatago(() => ({
+      rootInfo: { winrate: 0.5, scoreLead: 0 },
+      moveInfos: [{ move: 'E5', order: 0, winrate: 0.5, scoreLead: 0, visits: 1 }],
+      humanPolicy: policy,
+    }));
+    const app = createEngineApp({ katago, engineKey: KEY, models: { main: 'm', human: 'h' } });
+    const res = await post(app, '/v1/genmove', { boardSize: 9, rules: 'chinese', komi: 7.5, moves: [], rank: '5k' });
+    expect(res.status).toBe(200);
+    expect(await jsonAs<GenmoveShape>(res)).toMatchObject({ move: 'A9', humanFallback: false });
+    expect(katago.calls[0]).toMatchObject({ boardXSize: 9, boardYSize: 9 });
+  });
+
+  it('score на доске 9x9: владение, позиция и площадь считаются по запрошенному размеру', async () => {
+    const katago = fakeKatago(() => ({
+      rootInfo: { winrate: 0.4, scoreLead: -1, visits: 400 },
+      ownership: kataOwnership(4, 9),
+    }));
+    const app = createEngineApp({ katago, engineKey: KEY, models: { main: 'm', human: 'h' } });
+    const res = await post(app, '/v1/score', {
+      boardSize: 9,
+      rules: 'chinese',
+      komi: 7.5,
+      moves: walls(4, 5, 9),
+    });
+    expect(res.status).toBe(200);
+    const body = await jsonAs<ScoreShape>(res);
+    // Чёрным строки 1..4 (36), белым 5..9 (45), коми 7.5 -> W+16.5.
+    expect(body).toMatchObject({ areaB: 36, areaW: 45, winner: 'W', margin: 16.5, dead: [] });
+    expect(body.ownership).toHaveLength(81);
+    expect(body.ownership[coordToIndex('A1', 9)]).toBe(1);
+    expect(body.ownership[coordToIndex('A9', 9)]).toBe(-1);
+    expect(katago.calls[0]).toMatchObject({ boardXSize: 9, boardYSize: 9 });
+  });
+
+  it('нет ключа и движок мёртв — 401: ключ проверяется первым', async () => {
+    // Порядок проверок важен: состояние движка не должно утекать неаутентифицированному.
+    const app = createEngineApp({
+      katago: fakeKatago(() => ({}), { alive: false }),
+      engineKey: KEY,
+      models: { main: 'm', human: 'h' },
+    });
+    const res = await app.request('/v1/genmove', {
+      method: 'POST',
+      body: '{}',
+      headers: { 'content-type': 'application/json' },
+    });
+    expect(res.status).toBe(401);
+    expect(await codeOf(res)).toBe('unauthorized');
+  });
+
+  it('genmove: непустые moveInfos без order === 0 — первый из массива, а не пас', async () => {
+    const app = createEngineApp({
+      katago: fakeKatago(() => ({
+        rootInfo: { winrate: 0.5, scoreLead: 0 },
+        moveInfos: [
+          { move: 'D4', order: 1, winrate: 0.5, scoreLead: 0, visits: 3 },
+          { move: 'C3', order: 2, winrate: 0.4, scoreLead: -1, visits: 2 },
+        ],
+      })),
+      engineKey: KEY,
+      models: { main: 'm', human: 'h' },
+    });
+    const body = await jsonAs<GenmoveShape>(await post(app, '/v1/genmove', { ...base, moves: [], rank: '3k' }));
+    expect(body.move).toBe('D4');
+  });
+
+  it('движок ответил мусором вместо moveInfos — пас, а не падение', async () => {
+    const app = createEngineApp({
+      katago: fakeKatago(() => ({ rootInfo: { winrate: 0.5, scoreLead: 0 }, moveInfos: null })),
+      engineKey: KEY,
+      models: { main: 'm', human: 'h' },
+    });
+    const res = await post(app, '/v1/genmove', { ...base, moves: [], rank: '3k' });
+    expect(res.status).toBe(200);
+    expect((await jsonAs<GenmoveShape>(res)).move).toBe('pass');
+  });
+
+  it('движок ответил мусором вместо humanPolicy — запасной ход, а не падение', async () => {
+    const app = createEngineApp({
+      katago: fakeKatago(() => ({
+        rootInfo: { winrate: 0.5, scoreLead: 0 },
+        moveInfos: [{ move: 'K10', order: 0, winrate: 0.5, scoreLead: 0, visits: 1 }],
+        humanPolicy: null,
+      })),
+      engineKey: KEY,
+      models: { main: 'm', human: 'h' },
+    });
+    const res = await post(app, '/v1/genmove', { ...base, moves: [], rank: '3k' });
+    expect(res.status).toBe(200);
+    expect(await jsonAs<GenmoveShape>(res)).toMatchObject({ move: 'K10', humanFallback: true });
+  });
+
+  it('движок ответил мусором вместо ownership в analyze — ответ без владения', async () => {
+    const app = createEngineApp({
+      katago: fakeKatago(() => ({ rootInfo: { winrate: 0.5, scoreLead: 0, visits: 1 }, moveInfos: [], ownership: 'x' })),
+      engineKey: KEY,
+      models: { main: 'm', human: 'h' },
+    });
+    const res = await post(app, '/v1/analyze', { ...base, moves: [] });
+    expect(res.status).toBe(200);
+    expect((await jsonAs<AnalyzeShape>(res)).ownership).toBeUndefined();
+  });
+
+  it('тело не по схеме: в тексте ошибки — поле и причина, а не дамп zod', async () => {
+    const app = createEngineApp({ katago: fakeKatago(() => ({})), engineKey: KEY, models: { main: 'm', human: 'h' } });
+    const res = await post(app, '/v1/genmove', { ...base, moves: [], rank: '99k' });
+    const message = (await jsonAs<ErrorShape>(res)).error.message;
+    expect(message).toMatch(/^rank: /);
+    expect(message.startsWith('[')).toBe(false); // err.message в zod 4 — это JSON со всеми issue
   });
 });

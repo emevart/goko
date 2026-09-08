@@ -26,6 +26,9 @@ export const EngineGenmoveResponse = z.object({
   winrateB: z.number(),
   scoreLeadB: z.number(),
   humanPolicyTop: z.array(z.object({ coord: z.string(), prob: z.number() })),
+  // true — ход взят из поиска, а не из человеческой сети (сеть не ответила или её кандидаты
+  // отсеяны). У доски это слышно как «Гоко вдруг заиграл сильнее», поэтому признак идёт наружу.
+  humanFallback: z.boolean().optional(),
   ms: z.number(),
 });
 export type EngineGenmoveResponse = z.infer<typeof EngineGenmoveResponse>;

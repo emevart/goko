@@ -30,9 +30,11 @@ export type EngineDeps = {
 
 export const SCORE_VISITS = 400;
 export const DEFAULT_MAX_QUEUE = 8;
-// Наружу таймаут больше внутреннего не выставляется: timeoutMs у KataGo.query отсчитывается
-// от вызова, поэтому это же число и есть «сколько ждёт game-server от нас» (задача 7).
-export const DEFAULT_TIMEOUTS = { genmove: 20_000, analyze: 30_000, score: 60_000 };
+// Внутренний бюджет движка обязан истекать раньше клиентского (game-server ждёт 10 / 15 / 30 с
+// по разделу 8 спеки): иначе клиент отваливается по своему таймауту первым и никогда не видит
+// осмысленного кода ошибки движка. timeoutMs у KataGo.query отсчитывается от вызова, поэтому
+// это же число и есть «сколько ждёт game-server от нас» (задача 7).
+export const DEFAULT_TIMEOUTS = { genmove: 8_000, analyze: 12_000, score: 25_000 };
 
 type KataRoot = { winrate?: number; scoreLead?: number; visits?: number };
 type KataMoveInfo = { move: string; winrate: number; scoreLead: number; visits: number; order: number };
@@ -83,7 +85,8 @@ export function createEngineApp(deps: EngineDeps): Hono {
     if (err instanceof KataGoError) {
       // rejected — движок разобрал запрос и отказал: повтор того же запроса не поможет,
       // это наша ошибка, а не занятость машины. 503 с намёком «повторите» здесь врал бы.
-      if (err.kind === 'timeout') return fail(c, 'engine_busy', err.message);
+      // aborted — вызывающий уже ушёл, ответ читать некому; 503 здесь только ради формы.
+      if (err.kind === 'timeout' || err.kind === 'aborted') return fail(c, 'engine_busy', err.message);
       if (err.kind === 'crashed') return fail(c, 'engine_unavailable', err.message);
       deps.log?.(`[X] engine: katago rejected the query: ${err.message}`);
       return fail(c, 'internal', err.message);
@@ -107,6 +110,7 @@ export function createEngineApp(deps: EngineDeps): Hono {
         overrideSettings: { humanSLProfile: rankToProfile(req.rank) },
       },
       timeouts.genmove,
+      c.req.raw.signal,
     );
     const root = rootOf(r);
     const infos = moveInfosOf(r);
@@ -114,7 +118,8 @@ export function createEngineApp(deps: EngineDeps): Hono {
     const humanPolicy = numbersOf(r.humanPolicy);
     // Пустой humanPolicy — не «сломанный массив», а ответ без человеческой сети: chooseMove
     // такую длину справедливо считает рассогласованием и бросает, поэтому сюда он не зовётся.
-    // Партия при этом продолжается лучшим ходом поиска, только сильнее заявленного разряда.
+    // Партия при этом продолжается лучшим ходом поиска, только сильнее заявленного разряда,
+    // поэтому наружу идёт humanFallback: у доски иначе не понять, почему Гоко вдруг усилился.
     let chosen: ChooseMoveResult = { move: bestMove, top: [], fallback: true };
     if (humanPolicy.length === 0) deps.log?.('[!] humanPolicy отсутствует: проверить -human-model');
     else chosen = chooseMove({ humanPolicy, size: req.boardSize, bestMove, random: deps.random });
@@ -124,6 +129,7 @@ export function createEngineApp(deps: EngineDeps): Hono {
         winrateB: root.winrate,
         scoreLeadB: root.scoreLead,
         humanPolicyTop: chosen.top,
+        humanFallback: chosen.fallback,
         ms: Math.round(performance.now() - t0),
       }),
     );
@@ -134,6 +140,7 @@ export function createEngineApp(deps: EngineDeps): Hono {
     const r = await deps.katago.query(
       { ...baseQuery(req), maxVisits: req.maxVisits, includeOwnership: req.includeOwnership },
       timeouts.analyze,
+      c.req.raw.signal,
     );
     const root = rootOf(r);
     const moveInfos = [...moveInfosOf(r)]
@@ -158,6 +165,9 @@ export function createEngineApp(deps: EngineDeps): Hono {
     const r = await deps.katago.query(
       { ...baseQuery(req), maxVisits: SCORE_VISITS, includeOwnership: true },
       timeouts.score,
+      // Брошенный клиентом score обязан отпустить единственный слот KataGo сразу, иначе
+      // следующий запрос встаёт в очередь за зомби — это минута тишины у доски.
+      c.req.raw.signal,
     );
     const root = rootOf(r);
     const ownership = reorderFromKata(numbersOf(r.ownership), req.boardSize);
