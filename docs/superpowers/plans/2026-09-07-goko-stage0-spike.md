@@ -635,7 +635,7 @@ proc.kill();
 
 - [ ] **Step 5: Замер на ПК** (founder скачал бинарь и сети по README)
 
-Run: `node spike/katago-bench.mjs --bin apps/go-engine/bin/katago.exe --model apps/go-engine/models/kata1-b10c128-s1141046784-d204142634.bin.gz --human apps/go-engine/models/b18c384nbt-humanv0.bin.gz`
+Run: `node spike/katago-bench.mjs --bin apps/go-engine/bin/katago.exe --model apps/go-engine/models/kata1-b10c128-s1141046784-d204142634.txt.gz --human apps/go-engine/models/b18c384nbt-humanv0.bin.gz`
 Expected: все строки с `human=yes`; на RTX 3060 `humanPolicy` < 300 мс, `analyze 50` < 1 с. Если `human=NO` — в `-human-model` подан не тот файл или KataGo старше 1.15.
 
 - [ ] **Step 6: Замер на VPS** (после Task 2 Step 10; founder выполняет команды с ПК)

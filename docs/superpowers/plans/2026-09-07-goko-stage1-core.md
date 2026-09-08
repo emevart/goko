@@ -6,7 +6,7 @@
 
 **Architecture:** Четыре пакета поверх каркаса стадии 0. `packages/go-core` — чистые функции правил (позиция всегда переигрывается из списка ходов). `packages/protocol` — zod-схемы операций, ошибок, событий и движка плюс типизированный HTTP-клиент с разбором SSE; им пользуются все клиенты. `apps/go-engine` — Hono-сервис, держит один процесс `katago analysis`, очередь запросов, перезапуск с паузой, выбор хода по `humanPolicy`. `apps/game-server` — Hono-сервис: чистые переходы состояния партии (`game.ts`), сервис с мьютексом на партию, автоматикой мест `engine`, ожиданием ответа и автосчётом (`service.ts`), снапшоты в JSON, шина событий, сессии и токены LiveKit. Фейковый движок (`FAKE_ENGINE=1`) даёт полную партию без KataGo.
 
-**Tech Stack:** Node 22.22 (нативный запуск `.ts`, `erasableSyntaxOnly`), npm workspaces, TypeScript 5.9, vitest 5, zod 4.5, Hono 4.13 + `@hono/node-server` 2.1, `livekit-server-sdk` 2.18 + `@livekit/protocol` 1.51, KataGo v1.18.1 (analysis engine, JSON по stdin/stdout), человеческая сеть `b18c384nbt-humanv0.bin.gz`.
+**Tech Stack:** Node 22.22 (нативный запуск `.ts`, `erasableSyntaxOnly`), npm workspaces, TypeScript 5.9, vitest 5, zod 4.5, Hono 4.13 + `@hono/node-server` 2.1, `livekit-server-sdk` 2.18 (классы протокола — из его реэкспорта), KataGo v1.18.1 (analysis engine, JSON по stdin/stdout), человеческая сеть `b18c384nbt-humanv0.bin.gz`.
 
 **Spec:** `docs/superpowers/specs/2026-09-07-goko-voice-go-opponent-design.md` — разделы 4 (модель партии), 5 (протокол, ошибки, события), 6 (`go-core`), 7 (`game-server`), 8 (`go-engine`), 11 (локальная разработка), 12 (тестирование), 18 (AI-first). Предполагается выполненный план стадии 0 (`2026-09-07-goko-stage0-spike.md`): каркас монорепы, `scripts/doctor.mjs`, `infra/`, `apps/go-engine/{Dockerfile,config/analysis.cfg,models/README.md}`.
 
@@ -59,7 +59,7 @@ apps/go-engine/src/app.ts             createEngineApp(deps): /health, /v1/genmov
 apps/go-engine/src/main.ts            запуск из env
 apps/go-engine/src/*.test.ts          unit с фейковым процессом; katago.contract.test.ts при KATAGO_BIN
 
-apps/game-server/package.json         @goko/game-server: hono, @hono/node-server, zod, livekit-server-sdk, @livekit/protocol, @goko/*
+apps/game-server/package.json         @goko/game-server: hono, @hono/node-server, zod, livekit-server-sdk, @goko/*
 apps/game-server/src/ids.ts           newId()
 apps/game-server/src/game.ts          чистые переходы: newGame, applyMove, undo, resign, finishByScore, setRank, rebuild, positionOf
 apps/game-server/src/store.ts         GameStore: атомарные снапшоты data/games/<id>.json
@@ -3046,7 +3046,6 @@ git commit -m "go-engine: HTTP-обёртка genmove/analyze/score, запус�
     "@goko/go-core": "*",
     "@goko/protocol": "*",
     "@hono/node-server": "^2.1.1",
-    "@livekit/protocol": "^1.51.0",
     "hono": "^4.13.7",
     "livekit-server-sdk": "^2.18.0",
     "zod": "^4.5.4"
@@ -4855,8 +4854,7 @@ export class SessionManager {
 ```ts
 // Токен участника с диспетчеризацией агента (раздел 7 спеки). roomCreate обязателен: в livekit.yaml
 // auto_create=false, комнату создаёт первый вход с этим правом, и вместе с ней стартует агент из roomConfig.
-import { RoomAgentDispatch, RoomConfiguration } from '@livekit/protocol';
-import { AccessToken } from 'livekit-server-sdk';
+import { AccessToken, RoomAgentDispatch, RoomConfiguration } from 'livekit-server-sdk';
 
 export type MintTokenOptions = {
   apiKey: string;
@@ -5501,13 +5499,20 @@ console.log(failed ? `[X] smoke: ошибок ${failed}` : '[OK] smoke: все �
 process.exit(failed ? 1 : 0);
 ```
 
-- [ ] **Step 2: Корневой `package.json` — скрипты**
+- [ ] **Step 2: Корневой `package.json` — скрипты и `vite`**
 
 В `"scripts"` добавить:
 
 ```json
     "smoke": "node scripts/smoke.mjs",
     "dev": "node scripts/dev.mjs"
+```
+
+В `"devDependencies"` рядом с `vitest` добавить `vite`: это обязательная
+peer-зависимость vitest 5, и её лучше зафиксировать явно, а не получать молча:
+
+```json
+    "vite": "^8.2.2"
 ```
 
 - [ ] **Step 3: Запустить smoke с фейковым движком**
