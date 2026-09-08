@@ -52,13 +52,17 @@ export function createEngineClient(opts: EngineClientOptions): Engine {
   const retryDelay = opts.retryDelayMs ?? ENGINE_RETRY_DELAY_MS;
 
   async function attempt<T extends z.ZodType>(path: string, body: unknown, timeoutMs: number, schema: T): Promise<z.output<T>> {
+    // Свой таймер вместо AbortSignal.timeout: внутренний таймер сигнала не подменяется
+    // фейковыми таймерами, и тесты о времени пришлось бы писать на настоящих паузах.
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(new DOMException(`engine did not respond within ${timeoutMs} ms`, 'TimeoutError')), timeoutMs);
     let res: Response;
     try {
       res = await fetchFn(`${base}${path}`, {
         method: 'POST',
         headers: { 'content-type': 'application/json', 'x-engine-key': opts.engineKey },
         body: JSON.stringify(body),
-        signal: AbortSignal.timeout(timeoutMs),
+        signal: controller.signal,
       });
     } catch (e) {
       // Прерывание по таймауту даёт DOMException с name 'TimeoutError'; всё остальное —
@@ -68,8 +72,20 @@ export function createEngineClient(opts: EngineClientOptions): Engine {
         ? new ApiError('engine_busy', `engine did not respond within ${timeoutMs} ms`)
         : new ApiError('engine_unavailable', `engine is unreachable: ${e instanceof Error ? e.message : String(e)}`);
       throw new AttemptError(true, api);
+    } finally {
+      clearTimeout(timer);
     }
-    if (res.ok) return schema.parse(await res.json());
+    if (res.ok) {
+      try {
+        return schema.parse(await res.json());
+      } catch (e) {
+        // Мусор в успешном ответе уходит наружу как ApiError, а не сырым ZodError:
+        // сырой попал бы в событие error целиком и в HTTP-слое стал бы 500 вместо 503.
+        // Повтор не ставится: тело разобралось бы так же и со второй попытки.
+        const detail = e instanceof Error ? e.message : String(e);
+        throw new AttemptError(false, new ApiError('engine_unavailable', `engine response does not match the protocol: ${detail.slice(0, 200)}`));
+      }
+    }
     const text = await res.text().catch(() => '');
     const api = apiErrorFromBody(text, res.status) ?? new ApiError('engine_unavailable', `engine responded with ${res.status}`);
     // Повторяем только 5xx: 4xx повторять бессмысленно, запрос не изменится.
