@@ -11,3 +11,4 @@ data/
 Thumbs.db
 apps/go-engine/models/
 apps/go-engine/bin/
+.superpowers/
