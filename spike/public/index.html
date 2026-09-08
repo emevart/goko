@@ -20,12 +20,55 @@ const logEl = document.getElementById('log');
 const show = (who, text) => { logEl.textContent += `${who}: ${text}\n`; logEl.scrollTop = logEl.scrollHeight; };
 const room = new Room();
 room.on(RoomEvent.TrackSubscribed, (track) => { if (track.kind === 'audio') document.body.appendChild(track.attach()); });
+// Пауза, после которой сегмент без пометки final считаем законченным.
+const SEGMENT_DEBOUNCE_MS = 500;
+// Сегменты, уже показанные: повторные куски того же сегмента игнорируем.
+const printedSegments = new Set();
+// segment_id -> { who, text, timer } — сегменты в ожидании подтверждения.
+const pendingSegments = new Map();
+
+function flushSegment(segmentId) {
+  const pending = pendingSegments.get(segmentId);
+  if (!pending) return;
+  clearTimeout(pending.timer);
+  pendingSegments.delete(segmentId);
+  printedSegments.add(segmentId);
+  show(pending.who, pending.text);
+}
+
 room.registerTextStreamHandler('lk.transcription', async (reader, participant) => {
   let text = '';
   for await (const chunk of reader) text += chunk;
-  const final = reader.info.attributes?.['lk.transcription_final'];
-  if (final === 'false') return;
-  show(participant?.identity ?? '?', text);
+  if (!text) return;
+
+  const attributes = reader.info.attributes ?? {};
+  const segmentId = attributes['lk.segment_id'];
+  const who = participant?.identity ?? '?';
+  // То же, что в spike/chat.mjs: атрибут lk.transcription_final нельзя использовать
+  // как фильтр «показывать или нет». @livekit/agents 1.8.0 ведёт транскрипт агента
+  // дельта-потоком (isDeltaStream: true), открывает его один раз с "false" в заголовке
+  // и уже не переписывает — прежняя проверка отбрасывала все реплики агента, лента
+  // показывала только человека. Транскрипт человека, наоборот, идёт НЕ дельта-потоком:
+  // каждый промежуточный результат STT — отдельный закрытый поток с тем же
+  // lk.segment_id, и без дедупликации фразы шли бы растущими дублями. Поэтому:
+  // показываем сегмент один раз, либо по пометке final="true", либо по паузе без
+  // новых кусков того же сегмента.
+  if (!segmentId) {
+    show(who, text);
+    return;
+  }
+  if (printedSegments.has(segmentId)) return;
+
+  const pending = pendingSegments.get(segmentId);
+  if (pending) clearTimeout(pending.timer);
+
+  if (attributes['lk.transcription_final'] === 'true') {
+    pendingSegments.set(segmentId, { who, text, timer: null });
+    flushSegment(segmentId);
+    return;
+  }
+  const timer = setTimeout(() => flushSegment(segmentId), SEGMENT_DEBOUNCE_MS);
+  pendingSegments.set(segmentId, { who, text, timer });
 });
 document.getElementById('mic').onclick = async () => {
   await room.connect(params.get('url'), params.get('token'));
