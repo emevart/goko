@@ -190,6 +190,24 @@ describe('схемы партии', () => {
     expect(() => GameState.parse({ ...state, board: '.'.repeat(168) })).toThrow();
     expect(() => GameState.parse({ ...state, board: 'x'.repeat(169) })).toThrow();
     expect(() => GameState.parse({ ...state, board: '.'.repeat(168) + 'b' })).toThrow();
+    // вторая половина неравенства: доска длиннее заявленного размера ловится так же,
+    // как короткая, иначе партия 9x9 с доской 13x13 проходит молча
+    expect(() => GameState.parse({ ...state, settings: { boardSize: 9 }, board: '.'.repeat(169) })).toThrow(
+      /169[\s\S]*81|81[\s\S]*169/,
+    );
+    expect(() => GameState.parse({ ...state, board: '.'.repeat(170) })).toThrow();
+  });
+
+  it('GameState сообщает путь board у нарушенного инварианта доски', () => {
+    const short = GameState.safeParse({ ...state, board: '.'.repeat(81) });
+    expect(short.success).toBe(false);
+    expect(short.error?.issues.map((issue) => issue.path)).toEqual([['board']]);
+    const long = GameState.safeParse({ ...state, settings: { boardSize: 9 }, board: '.'.repeat(169) });
+    expect(long.success).toBe(false);
+    expect(long.error?.issues.map((issue) => issue.path)).toEqual([['board']]);
+    const alphabet = GameState.safeParse({ ...state, board: 'x'.repeat(169) });
+    expect(alphabet.success).toBe(false);
+    expect(alphabet.error?.issues.map((issue) => issue.path)).toEqual([['board']]);
   });
 
   it('GameSummary и Session', () => {
@@ -576,6 +594,7 @@ describe('движок', () => {
     expect(() => EngineGenmoveRequest.parse({ ...r, rank: undefined })).toThrow();
     expect(() => EngineGenmoveRequest.parse({ ...r, rank: '10d' })).toThrow();
     expect(() => EngineGenmoveRequest.parse({ ...r, maxVisits: 1001 })).toThrow();
+    expect(() => EngineGenmoveRequest.parse({ ...r, maxVisits: 0 })).toThrow();
     const input: EngineGenmoveRequest = { boardSize: 13, rules: 'chinese', komi: 7.5, moves: [], rank: '10k' };
     expect(EngineGenmoveRequest.parse(input).maxVisits).toBe(10);
   });
@@ -587,6 +606,7 @@ describe('движок', () => {
     expect(r.includeOwnership).toBe(true);
     expect(EngineAnalyzeRequest.parse({ ...input, includeOwnership: false }).includeOwnership).toBe(false);
     expect(() => EngineAnalyzeRequest.parse({ ...input, maxVisits: 0 })).toThrow();
+    expect(() => EngineAnalyzeRequest.parse({ ...input, maxVisits: 1001 })).toThrow();
   });
 
   it('ответы движка', () => {

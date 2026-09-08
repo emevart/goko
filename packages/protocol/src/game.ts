@@ -79,15 +79,20 @@ export const GameState = z.object({
 }).superRefine((value, ctx) => {
   // Инвариант раздела 4 спеки: доска — строка из boardSize^2 символов '.', 'B', 'W'.
   // Без него ответ, потерявший settings.boardSize, молча становится партией 13x13.
+  // Проверено на zod 4.5: .extend инвариант переносит в производную схему, вложение
+  // GameState в другую схему его сохраняет, а .omit/.pick на схеме с refinement
+  // бросают сразу при объявлении — тихо потерять проверку нельзя ни в одном из случаев.
   const expectedLength = value.settings.boardSize ** 2;
   if (value.board.length !== expectedLength) {
     const message =
-      `длина board ${value.board.length} не совпадает с boardSize ${value.settings.boardSize}` +
-      ` (ожидается ${expectedLength})`;
+      `board has ${value.board.length} chars, expected ${expectedLength}` +
+      ` for boardSize ${value.settings.boardSize}`;
     ctx.addIssue({ code: 'custom', path: ['board'], message });
   }
-  if (!/^[.BW]*$/.test(value.board)) {
-    ctx.addIssue({ code: 'custom', path: ['board'], message: "board содержит символы вне '.', 'B', 'W'" });
+  const badChar = /[^.BW]/.exec(value.board);
+  if (badChar !== null) {
+    const message = `board has unexpected char "${badChar[0]}" at index ${badChar.index}, expected one of ".BW"`;
+    ctx.addIssue({ code: 'custom', path: ['board'], message });
   }
 });
 export type GameState = z.infer<typeof GameState>;
