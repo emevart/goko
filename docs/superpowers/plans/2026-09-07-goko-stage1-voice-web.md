@@ -2017,6 +2017,7 @@ async function main() {
   console.log(`[OK] сессия ${session.id}, комната ${session.room}, агент ${process.env.AGENT_NAME ?? 'goko'}`);
 
   const sent = new Set();
+  const seen = new Map(); // lk.segment_id -> последний напечатанный текст
   let gameId = session.currentGameId;
   const room = new Room();
   room.registerTextStreamHandler('lk.transcription', async (reader, info) => {
@@ -2025,7 +2026,15 @@ async function main() {
     // Атрибут lk.transcription_final НЕ фильтруем: @livekit/agents 1.8.0
     // открывает транскрипт агента дельта-потоком с 'false' в заголовке и
     // больше его не меняет (проверено на спайке 08.09). Дочитанный поток и
-    // есть финальная реплика.
+    // есть финальная реплика — но только для агента.
+    // Транскрипт человека приходит НЕ дельта-потоком и переоткрывается на
+    // каждом промежуточном куске, поэтому без дедупликации по lk.segment_id
+    // одна фраза печаталась бы растущими дублями.
+    const seg = attrs['lk.segment_id'];
+    if (seg) {
+      if (seen.get(seg) === text) return;
+      seen.set(seg, text);
+    }
     if (sent.has(text)) return; // эхо нашей же реплики из lk.chat
     console.log(`[${info.identity}] ${text}`);
   });
