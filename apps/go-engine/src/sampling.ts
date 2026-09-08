@@ -20,11 +20,26 @@ export function chooseMove(input: ChooseMoveInput): ChooseMoveResult {
   const cutoff = input.tailCutoff ?? TAIL_CUTOFF;
   const random = input.random ?? Math.random;
   const passIndex = input.size * input.size;
+  // Длина проверяется так же, как в reorderFromKata: policy приходит с местом под пас,
+  // массив ровно на доску тоже допустим. Всё прочее — рассогласование size и ответа
+  // движка; молча принятый короткий массив дал бы ход не в ту точку, а не ошибку.
+  if (input.humanPolicy.length !== passIndex && input.humanPolicy.length !== passIndex + 1) {
+    throw new Error(
+      `invalid humanPolicy length ${input.humanPolicy.length}: expected ${passIndex} or ${passIndex + 1} for a ${input.size}x${input.size} board`,
+    );
+  }
   const candidates: Candidate[] = [];
   // Цикл идёт по доске, а не по длине чужого массива: хвост за пасом — рассогласование
   // size и ответа движка, из него получались бы отрицательные индексы координат.
   for (let k = 0; k <= passIndex; k++) {
-    const prob = input.humanPolicy[k] ?? -1;
+    const value = input.humanPolicy[k];
+    // Отсутствовать может только пас — в массиве длиной ровно с доску. Дыра внутри
+    // доски (разреженный массив) — сломанный ответ движка, а не ноль.
+    if (value === undefined) {
+      if (k === passIndex) continue;
+      throw new Error(`invalid humanPolicy: missing value at index ${k}`);
+    }
+    const prob = value;
     // NaN проходит оба сравнения ниже (NaN <= 0 и NaN < cutoff одинаково ложны), отравляет
     // сумму и молча уводит выбор в ветку округления, поэтому отсекается явно.
     if (!Number.isFinite(prob) || prob <= 0) continue;

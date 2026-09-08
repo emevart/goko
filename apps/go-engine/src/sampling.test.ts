@@ -35,7 +35,53 @@ describe('chooseMove', () => {
 
   it('если всё обнулилось — лучший ход поиска', () => {
     expect(chooseMove({ humanPolicy: policy({}), size: SIZE, bestMove: 'E5' })).toEqual({ move: 'E5', top: [], fallback: true });
-    expect(chooseMove({ humanPolicy: [], size: SIZE, bestMove: 'E5' }).move).toBe('E5');
+  });
+
+  it('длина ровно с доску принимается: паса в массиве просто нет', () => {
+    const p = new Array<number>(PASS).fill(0);
+    p[0] = 0.7;
+    const r = chooseMove({ humanPolicy: p, size: SIZE, bestMove: 'pass', random: () => 0.5 });
+    expect(r).toEqual({ move: 'A9', top: [{ coord: 'A9', prob: 0.7 }], fallback: false });
+  });
+
+  it('длина с местом под пас принимается', () => {
+    const p = new Array<number>(PASS + 1).fill(0);
+    p[PASS] = 0.7;
+    const r = chooseMove({ humanPolicy: p, size: SIZE, bestMove: 'pass', random: () => 0.5 });
+    expect(r).toEqual({ move: 'pass', top: [{ coord: 'pass', prob: 0.7 }], fallback: false });
+  });
+
+  it('массив короче доски отвергается', () => {
+    const p = new Array<number>(PASS - 1).fill(0.1);
+    expect(() => chooseMove({ humanPolicy: p, size: SIZE, bestMove: 'E5' })).toThrow(
+      /invalid humanPolicy length 80: expected 81 or 82 for a 9x9 board/,
+    );
+  });
+
+  it('пустой массив отвергается, а не превращается в лучший ход поиска', () => {
+    expect(() => chooseMove({ humanPolicy: [], size: SIZE, bestMove: 'E5' })).toThrow(/invalid humanPolicy length 0/);
+  });
+
+  it('массив длиннее доски отвергается', () => {
+    const p = policy({ D4: 0.6 });
+    p.push(0.9);
+    expect(() => chooseMove({ humanPolicy: p, size: SIZE, bestMove: 'D4' })).toThrow(
+      /invalid humanPolicy length 83: expected 81 or 82 for a 9x9 board/,
+    );
+  });
+
+  it('пять значений на доску 9x9 не дают хода C9', () => {
+    // Регресс: молчаливый дефолт -1 пропускал такой вход и возвращал ход не в ту точку
+    expect(() => chooseMove({ humanPolicy: [0.1, 0.2, 0.3, 0.2, 0.2], size: SIZE, bestMove: 'D4' })).toThrow(
+      /invalid humanPolicy length 5/,
+    );
+  });
+
+  it('дыра внутри доски — сломанный ответ движка, а не ноль', () => {
+    const p = new Array<number>(PASS + 1); // длина верная, значения не заполнены
+    expect(() => chooseMove({ humanPolicy: p, size: SIZE, bestMove: 'E5' })).toThrow(
+      /invalid humanPolicy: missing value at index 0/,
+    );
   });
 
   it('сэмплирует пропорционально вероятности при температуре 1', () => {
@@ -110,12 +156,6 @@ describe('chooseMove', () => {
     expect(r).toEqual({ move: 'J1', top: [{ coord: 'J1', prob: 0.5 }], fallback: false });
   });
 
-  it('хвост длиннее доски игнорируется', () => {
-    const p = policy({ D4: 0.6 });
-    p.push(0.9, 0.9, 0.9);
-    const r = chooseMove({ humanPolicy: p, size: SIZE, bestMove: 'D4', random: () => 0.5 });
-    expect(r).toEqual({ move: 'D4', top: [{ coord: 'D4', prob: 0.6 }], fallback: false });
-  });
 
   it('край интервала: остаётся последний кандидат, а не лучший ход поиска', () => {
     // r = 1 * (0.5 + 0.5): вычитания не уводят накопитель ниже нуля, срабатывает ветка округления.
