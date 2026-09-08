@@ -9,7 +9,8 @@ data/
 *.log
 .DS_Store
 Thumbs.db
-apps/go-engine/models/
+apps/go-engine/models/*
+!apps/go-engine/models/README.md
 apps/go-engine/bin/
 .superpowers/
 spike/log.jsonl
