@@ -77,6 +77,26 @@ describe('EventBus', () => {
     expect([a, b]).toEqual([1, 1]);
   });
 
+it('первая отписка дважды подписанного слушателя не отбирает канал у нового подписчика', () => {
+    // Set хранит по идентичности: одна и та же функция, подписанная дважды, лежит в
+    // наборе один раз, а замыканий отписки создано два. Первая отписка опустошает
+    // набор и убирает канал из карты, вторая держит осиротевший набор и не должна
+    // сносить канал, созданный заново.
+    const bus = new EventBus();
+    let a = 0;
+    let b = 0;
+    const listener = () => a++;
+    const off1 = bus.subscribe('game:g1', listener);
+    const off2 = bus.subscribe('game:g1', listener);
+    off1();
+    expect(bus.count('game:g1')).toBe(0);
+    bus.subscribe('game:g1', () => b++);
+    off2();
+    expect(bus.count('game:g1')).toBe(1);
+    bus.emit('game:g1', { type: 'session.game', gameId: 'g1' });
+    expect([a, b]).toEqual([0, 1]);
+  });
+
   it('отписка во время рассылки не сносит канал у остальных', () => {
     const bus = new EventBus();
     let delivered = 0;

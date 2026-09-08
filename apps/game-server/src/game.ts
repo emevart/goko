@@ -109,7 +109,6 @@ export function setRank(state: GameState, color: Color, rank: Rank): GameState {
 // Переигрывает список ходов; статус всегда playing (вызывающий решает, что делать с result).
 // [!] Результат разделяет со входом объекты `moves`, `settings` и `seats` (ссылки, не копии).
 // Пока все переходы неизменяемы, это безопасно; править их на месте нельзя.
-
 export function rebuild(state: GameState, moves: Move[]): GameState {
   const size = state.settings.boardSize;
   const pos = replay(size, moves);

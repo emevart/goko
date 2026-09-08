@@ -118,7 +118,7 @@ describe('GameStore', () => {
   it('save отвергает идентификатор, который выходит за каталог снапшотов', async () => {
     const store = new GameStore(path.join(dir, 'games'));
     await store.init();
-    for (const id of ['../escaped', '', 'a/b', 'a\b', '.', 'g1.json']) {
+    for (const id of ['../escaped', '', 'a/b', 'a\\b', '.', 'g1.json']) {
       await expect(store.save({ ...state(), id })).rejects.toMatchObject({ code: 'bad_request', status: 400 });
     }
     expect(await readdir(path.join(dir, 'games'))).toEqual([]);
