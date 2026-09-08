@@ -10,7 +10,9 @@ input{font-size:16px;padding:8px;width:70%}
 <button id="mic">Микрофон</button><span id="status">не подключено</span>
 <div id="log"></div>
 <input id="text" placeholder="текст в lk.chat"><button id="send">Отправить</button>
-<script src="https://cdn.jsdelivr.net/npm/livekit-client@2.22.3/dist/livekit-client.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/livekit-client@2.22.3/dist/livekit-client.umd.min.js"
+        integrity="sha384-MveBYLjjZe2VXnKzvBbPfyh5MEbiqNDeta9nzIGbtqnXmC+CwX/mLE5+M9PDIcPy"
+        crossorigin="anonymous"></script>
 <script>
 const { Room, RoomEvent } = LivekitClient;
 const params = new URLSearchParams(location.hash.slice(1));

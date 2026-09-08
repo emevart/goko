@@ -5,13 +5,11 @@
   "version": "0.0.0",
   "scripts": {
     "agent": "node --env-file-if-exists=../.env agent.ts dev",
-    "token": "node --env-file-if-exists=../.env token.mjs",
-    "chat": "node --env-file-if-exists=../.env chat.mjs"
+    "token": "node --env-file-if-exists=../.env token.mjs"
   },
   "dependencies": {
     "@livekit/agents": "^1.8.0",
     "@livekit/agents-plugin-openai": "^1.8.0",
-    "@livekit/protocol": "^1.50.4",
     "@livekit/rtc-node": "^0.13.34",
     "livekit-server-sdk": "^2.18.0",
     "zod": "^4.5.4"
