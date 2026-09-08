@@ -25,7 +25,7 @@ function playAll(state: GameState, coords: string[]): GameState {
 // Последний ход как значение: `!` в проекте запрещён, пустой список — ошибка теста.
 function lastMove(state: GameState) {
   const move = state.moves.at(-1);
-  if (move === undefined) throw new Error('ожидался хотя бы один ход');
+  if (move === undefined) throw new Error('expected at least one move');
   return move;
 }
 
@@ -61,6 +61,25 @@ describe('applyMove', () => {
     expect(GameState.parse(s)).toMatchObject({ id: 'g1', revision: 2 });
     // Контроль самой проверки: доска не той длины схему не проходит.
     expect(GameState.safeParse({ ...s, board: s.board.slice(1) }).success).toBe(false);
+  });
+
+  it('все переходы дают состояние, проходящее схему GameState', () => {
+    const start = fresh();
+    const played = playAll(start, ['D4', 'E5', 'F6', 'G7']);
+    const twoPasses = playAll(fresh(), ['D4', 'pass', 'pass']);
+    const cases: Record<string, GameState> = {
+      newGame: start,
+      undo: undo(played).state,
+      finishByScore: finishByScore(twoPasses, { winner: 'W', margin: 7.5, reason: 'score' }),
+      resign: resign(played, 'B'),
+      setRank: setRank(played, 'W', '3k'),
+      rebuild: rebuild(played, played.moves.slice(0, 2)),
+    };
+    for (const [name, value] of Object.entries(cases)) {
+      expect(GameState.safeParse(value), name).toMatchObject({ success: true });
+      // Контроль самой проверки: доска не той длины схему не проходит.
+      expect(GameState.safeParse({ ...value, board: value.board.slice(1) }).success, name).toBe(false);
+    }
   });
 
   it('pass считает подряд идущие пасы и не трогает доску', () => {
@@ -134,6 +153,25 @@ describe('resign / finishByScore / setRank', () => {
     expect(s.result?.margin).toBe(7.5);
     expect(s.pendingEngineMove).toBe(false);
     expect(s.revision).toBe(two.revision + 1);
+  });
+
+  it('finishByScore снимает уже поднятый pendingEngineMove', () => {
+    // После двух пасов флаг и так false: чтобы проверка была не слепой,
+    // счёт считается на состоянии, где движок ждёт хода.
+    const pendingState = applyMove(fresh(), 'B', 'D4', T).state;
+    expect(pendingState.pendingEngineMove).toBe(true);
+    const s = finishByScore(pendingState, { winner: 'B', margin: 0.5, reason: 'score' });
+    expect(s.pendingEngineMove).toBe(false);
+    expect(s.status).toBe('finished');
+  });
+
+  it('finishByScore не считает очки в завершённой партии', () => {
+    const done = resign(fresh(), 'B');
+    expect(errorOf(() => finishByScore(done, { winner: 'B', margin: 0.5, reason: 'score' }))).toMatchObject({ code: 'game_finished', status: 409 });
+    const scored = finishByScore(playAll(fresh(), ['pass', 'pass']), { winner: 'W', margin: 7.5, reason: 'score' });
+    expect(errorOf(() => finishByScore(scored, { winner: 'B', margin: 0.5, reason: 'score' }))).toMatchObject({ code: 'game_finished', status: 409 });
+    // Результат сдачи остаётся на месте: счётом его не перекрыть.
+    expect(done.result).toEqual({ winner: 'W', reason: 'resign' });
   });
 
   it('setRank меняет ранг места и revision', () => {

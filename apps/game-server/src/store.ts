@@ -1,7 +1,12 @@
 // Снапшоты партий: data/games/<id>.json, запись через временный файл и rename.
 import { mkdir, readFile, readdir, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { GameState } from '@goko/protocol';
+import { ApiError, GameState } from '@goko/protocol';
+
+// Форма идентификатора партии: только цифры и строчные латинские буквы, как у newId().
+// Проверяется до обращения к файловой системе, иначе id вида '../escaped' написал бы
+// файл за пределами каталога снапшотов.
+const ID_PATTERN = /^[0-9a-z]+$/;
 
 export class GameStore {
   readonly dir: string;
@@ -23,15 +28,16 @@ export class GameStore {
       try {
         const parsed = GameState.safeParse(JSON.parse(await readFile(file, 'utf8')));
         if (parsed.success) out.push(parsed.data);
-        else console.error(`[!] store: ${name} не по схеме, пропущен`);
+        else console.error(`[!] store: ${name} does not match the schema, skipped`);
       } catch {
-        console.error(`[!] store: ${name} не читается, пропущен`);
+        console.error(`[!] store: ${name} is not readable, skipped`);
       }
     }
     return out.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
   }
 
   async save(state: GameState): Promise<void> {
+    if (!ID_PATTERN.test(state.id)) throw new ApiError('bad_request', 'game id must match /^[0-9a-z]+$/', { id: state.id });
     const file = path.join(this.dir, `${state.id}.json`);
     const tmp = `${file}.${process.pid}.tmp`;
     await writeFile(tmp, JSON.stringify(state), 'utf8');

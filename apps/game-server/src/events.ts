@@ -13,9 +13,21 @@ export class EventBus {
     const set = existing ?? new Set<Listener>();
     if (existing === undefined) this.channels.set(channel, set);
     set.add(listener);
+    let active = true;
     return () => {
+      // Отписка действует один раз и только на свой набор: после переподписки
+      // запоздавший вызов не должен снимать чужого слушателя.
+      if (!active) return;
+      active = false;
       set.delete(listener);
-      if (set.size === 0) this.channels.delete(channel);
+      // Пустой канал убирается из карты, только если там лежит именно этот набор:
+      // иначе осиротевший набор снёс бы канал, созданный заново. При защите выше
+      // эта проверка недостижима (набор пустеет лишь когда отработали все его
+      // отписки), поэтому мутант «проверку снять» эквивалентен; оставлена как
+      // страховка на случай, если условие однократности когда-нибудь ослабят.
+      // Саму утечку пустого канала публичным API не увидеть (count пустого канала
+      // и count отсутствующего одинаковы), поэтому теста на эту строку нет.
+      if (set.size === 0 && this.channels.get(channel) === set) this.channels.delete(channel);
     };
   }
 
@@ -25,7 +37,7 @@ export class EventBus {
       try {
         listener(event);
       } catch (e) {
-        console.error(`[!] events: слушатель ${channel} упал: ${e instanceof Error ? e.message : String(e)}`);
+        console.error(`[!] events: listener for ${channel} failed: ${e instanceof Error ? e.message : String(e)}`);
       }
     }
   }

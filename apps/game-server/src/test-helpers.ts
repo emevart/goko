@@ -7,5 +7,5 @@ export function errorOf(fn: () => unknown): ApiError {
   } catch (e) {
     return e as ApiError;
   }
-  throw new Error('ожидалась ошибка');
+  throw new Error('expected an error to be thrown');
 }

@@ -57,14 +57,14 @@ function normalizeCoord(coord: string, size: number): string {
     const p = parseCoord(coord, size);
     return p === 'pass' ? 'pass' : formatCoord(p);
   } catch (e) {
-    if (e instanceof InvalidCoordError) throw new ApiError('invalid_coord', `не понял координату «${coord}»`, { coord });
+    if (e instanceof InvalidCoordError) throw new ApiError('invalid_coord', `unknown coordinate "${coord}"`, { coord });
     throw e;
   }
 }
 
 export function applyMove(state: GameState, color: Color, coord: string, at: string): { state: GameState; move: Move } {
-  if (state.status !== 'playing') throw new ApiError('game_finished', 'партия окончена');
-  if (state.toPlay !== color) throw new ApiError('not_your_turn', `сейчас ходят ${color === 'B' ? 'белые' : 'чёрные'}`, { toPlay: state.toPlay });
+  if (state.status !== 'playing') throw new ApiError('game_finished', 'game is over');
+  if (state.toPlay !== color) throw new ApiError('not_your_turn', `it is ${state.toPlay === 'B' ? 'black' : 'white'} to play`, { toPlay: state.toPlay });
   const size = state.settings.boardSize;
   const normalized = normalizeCoord(coord, size);
   let played: ReturnType<typeof play>;
@@ -91,11 +91,14 @@ export function applyMove(state: GameState, color: Color, coord: string, at: str
 }
 
 export function resign(state: GameState, color: Color): GameState {
-  if (state.status !== 'playing') throw new ApiError('game_finished', 'партия окончена');
+  if (state.status !== 'playing') throw new ApiError('game_finished', 'game is over');
   return { ...state, revision: state.revision + 1, status: 'finished', pendingEngineMove: false, result: { winner: opposite(color), reason: 'resign' } };
 }
 
 export function finishByScore(state: GameState, result: Result): GameState {
+  // Завершённую партию не пересчитываем: иначе счёт перекрыл бы результат сдачи
+  // и снова открыл откат.
+  if (state.status !== 'playing') throw new ApiError('game_finished', 'game is over');
   return { ...state, revision: state.revision + 1, status: 'finished', pendingEngineMove: false, result };
 }
 
@@ -104,6 +107,9 @@ export function setRank(state: GameState, color: Color, rank: Rank): GameState {
 }
 
 // Переигрывает список ходов; статус всегда playing (вызывающий решает, что делать с result).
+// [!] Результат разделяет со входом объекты `moves`, `settings` и `seats` (ссылки, не копии).
+// Пока все переходы неизменяемы, это безопасно; править их на месте нельзя.
+
 export function rebuild(state: GameState, moves: Move[]): GameState {
   const size = state.settings.boardSize;
   const pos = replay(size, moves);
@@ -131,9 +137,11 @@ export function rebuild(state: GameState, moves: Move[]): GameState {
 // Откат до предыдущего хода того же места (раздел 5 спеки):
 // finished по счёту — два паса; движок думает — один ход человека; иначе два хода (или один, если он единственный).
 export function undo(state: GameState): { state: GameState; removed: Move[] } {
-  if (state.status === 'finished' && state.result?.reason === 'resign') throw new ApiError('game_finished', 'после сдачи откат невозможен');
-  if (state.moves.length === 0) throw new ApiError('nothing_to_undo', 'ходов ещё не было');
+  if (state.status === 'finished' && state.result?.reason === 'resign') throw new ApiError('game_finished', 'undo is not possible after a resignation');
+  if (state.moves.length === 0) throw new ApiError('nothing_to_undo', 'there are no moves yet');
   const count = state.status === 'finished' ? 2 : state.pendingEngineMove ? 1 : Math.min(2, state.moves.length);
+  // `removed` может оказаться длиной 1 при единственном ходе: срез с отрицательным
+  // началом клампится, поэтому Math.min в ветке finished не нужен.
   const kept = state.moves.slice(0, state.moves.length - count);
   const removed = state.moves.slice(state.moves.length - count).reverse();
   return { state: rebuild(state, kept), removed };

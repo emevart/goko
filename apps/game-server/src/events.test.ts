@@ -8,7 +8,7 @@ describe('EventBus', () => {
     const got: GameEvent[] = [];
     const off = bus.subscribe('game:g1', (e) => got.push(e));
     bus.subscribe('game:g2', () => {
-      throw new Error('не тот канал');
+      throw new Error('wrong channel');
     });
     bus.emit('game:g1', { type: 'engine.thinking', color: 'W' });
     expect(got).toEqual([{ type: 'engine.thinking', color: 'W' }]);
@@ -40,6 +40,50 @@ describe('EventBus', () => {
     const off = bus.subscribe('game:g1', () => delivered++);
     off();
     off();
+    bus.subscribe('game:g1', () => delivered++);
+    bus.emit('game:g1', { type: 'session.game', gameId: 'g1' });
+    expect(delivered).toBe(1);
+    expect(bus.count('game:g1')).toBe(1);
+  });
+
+  it('устаревшая отписка не сносит канал, созданный заново', () => {
+    // Порядок off(); subscribe(); off(): старая отписка держит осиротевший набор
+    // и не должна выбрасывать из карты набор нового подписчика.
+    const bus = new EventBus();
+    let delivered = 0;
+    const off1 = bus.subscribe('game:g1', () => delivered++);
+    off1();
+    bus.subscribe('game:g1', () => delivered++);
+    off1();
+    expect(bus.count('game:g1')).toBe(1);
+    bus.emit('game:g1', { type: 'session.game', gameId: 'g1' });
+    expect(delivered).toBe(1);
+  });
+
+  it('повторная отписка не снимает заново подписанного слушателя', () => {
+    // Тот же слушатель подписан второй раз, набор в карте прежний: старая отписка
+    // уже отработала и второй раз трогать набор не должна.
+    const bus = new EventBus();
+    let a = 0;
+    let b = 0;
+    const listener = () => a++;
+    const offA = bus.subscribe('game:g1', listener);
+    bus.subscribe('game:g1', () => b++);
+    offA();
+    bus.subscribe('game:g1', listener);
+    offA();
+    expect(bus.count('game:g1')).toBe(2);
+    bus.emit('game:g1', { type: 'session.game', gameId: 'g1' });
+    expect([a, b]).toEqual([1, 1]);
+  });
+
+  it('отписка во время рассылки не сносит канал у остальных', () => {
+    const bus = new EventBus();
+    let delivered = 0;
+    const offSelf = bus.subscribe('game:g1', () => {
+      offSelf();
+      offSelf();
+    });
     bus.subscribe('game:g1', () => delivered++);
     bus.emit('game:g1', { type: 'session.game', gameId: 'g1' });
     expect(delivered).toBe(1);
