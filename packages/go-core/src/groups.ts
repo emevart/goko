@@ -15,7 +15,15 @@ export const DEAD_THRESHOLD = 0.6;
 export const UNSETTLED_THRESHOLD = 0.3;
 
 export function groupsWithOwnership(pos: Position, ownership: readonly number[]): GroupInfo[] {
+  // Массив владения приходит от движка: короткий или длинный массив — рассинхрон,
+  // а не мелочь, молча он сделал бы живые группы мёртвыми.
+  const total = pos.size * pos.size;
+  if (ownership.length !== total) {
+    throw new Error(`ownership has ${ownership.length} values, expected ${total} for the ${pos.size}x${pos.size} board`);
+  }
   return allGroups(pos).map((g) => {
+    // Индексация здесь уже наша: снизу вверх. KataGo отдаёт владение сверху вниз,
+    // разворот делается на границе с движком (go-engine), сюда массив приходит развёрнутым.
     const avg = g.stones.reduce((sum, i) => sum + (ownership[i] ?? 0), 0) / g.stones.length;
     const own = g.color === 'B' ? avg : -avg; // владение в пользу своего цвета
     const status: GroupStatus = own < -DEAD_THRESHOLD ? 'dead' : Math.abs(own) < UNSETTLED_THRESHOLD ? 'unsettled' : 'safe';

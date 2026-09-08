@@ -36,3 +36,40 @@ describe('groupsWithOwnership', () => {
     expect(deadStones(lone, own)).toEqual([]);
   });
 });
+
+describe('пороги владения', () => {
+  const lone = positionFromRows(['.....', '.....', '.....', '...O.', '.....']);
+  // Владение чужого цвета для белого камня — положительное число (в пользу чёрных).
+  const statusAt = (value: number): string | undefined => {
+    const own = new Array<number>(25).fill(0);
+    own[coordToIndex('D2', 5)] = value;
+    return groupsWithOwnership(lone, own).find((g) => g.color === 'W')?.status;
+  };
+
+  it('порог 0.6: 0.55 ещё жива, 0.65 уже мертва', () => {
+    expect(statusAt(0.55)).toBe('safe');
+    expect(statusAt(0.65)).toBe('dead');
+  });
+
+  it('порог 0.3: 0.25 unsettled, 0.35 safe', () => {
+    expect(statusAt(0.25)).toBe('unsettled');
+    expect(statusAt(0.35)).toBe('safe');
+  });
+
+  it('на самой границе сравнения строгие: ровно 0.6 и ровно 0.3 — safe', () => {
+    expect(statusAt(0.6)).toBe('safe');
+    expect(statusAt(0.3)).toBe('safe');
+  });
+});
+
+describe('длина массива владения', () => {
+  const pos = positionFromRows(['.....', '.....', '.....', '...O.', '.....']);
+
+  it('короткий массив — ошибка', () => {
+    expect(() => groupsWithOwnership(pos, new Array<number>(24).fill(0))).toThrow(/24/);
+  });
+
+  it('длинный массив — ошибка', () => {
+    expect(() => groupsWithOwnership(pos, new Array<number>(26).fill(0))).toThrow(/26/);
+  });
+});

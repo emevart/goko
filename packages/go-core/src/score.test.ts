@@ -36,3 +36,13 @@ describe('resultFromArea', () => {
     expect(resultFromArea({ areaB: 80, areaW: 73, komi: 7, dead: [] })).toEqual({ winner: 'W', margin: 0 });
   });
 });
+
+describe('areaScore не делит массив dead с вызывающим', () => {
+  it('изменение исходного массива после вызова не меняет результат', () => {
+    const pos = positionFromRows(['.X.O.', '.X.O.', '.X.OX', '.X.O.', '.X.O.']);
+    const dead = ['E3'];
+    const s = areaScore(pos, dead, 7.5);
+    dead.push('B1');
+    expect(s.dead).toEqual(['E3']);
+  });
+});

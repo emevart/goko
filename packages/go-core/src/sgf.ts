@@ -44,8 +44,13 @@ export function toSgf(g: SgfGame): string {
   return `(;${head.join('')}${moves})`;
 }
 
+// Круговой прогон замыкается по позиции и ходам, а не по объекту целиком: toSgf
+// всегда пишет RU[Chinese], а fromSgf без RU оставляет поле пустым.
 export function fromSgf(text: string): SgfGame {
-  const game: SgfGame = { size: 19, komi: 7.5, moves: [] };
+  // Доски по умолчанию в проекте нет: размер задаётся при создании партии,
+  // поэтому SGF без SZ мы не читаем, а отвергаем. Коми по умолчанию наше, 7.5.
+  const game: SgfGame = { size: 0, komi: 7.5, moves: [] };
+  let hasSize = false;
   const re = /([A-Z]+)((?:\[(?:\\.|[^\]])*\])+)/g;
   let m: RegExpExecArray | null;
   while ((m = re.exec(text))) {
@@ -55,6 +60,7 @@ export function fromSgf(text: string): SgfGame {
     switch (id) {
       case 'SZ':
         game.size = Number(v);
+        hasSize = true;
         break;
       case 'KM':
         game.komi = Number(v);
@@ -73,11 +79,13 @@ export function fromSgf(text: string): SgfGame {
         break;
       case 'B':
       case 'W':
+        if (!hasSize) throw new Error('sgf has no SZ: board size is required');
         game.moves.push({ color: id, coord: fromSgfPoint(v, game.size) });
         break;
       default:
         break;
     }
   }
+  if (!hasSize) throw new Error('sgf has no SZ: board size is required');
   return game;
 }

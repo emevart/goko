@@ -44,7 +44,8 @@ export function areaScore(pos: Position, dead: string[], komi: number): AreaScor
     if (touchesB && !touchesW) areaB += queue.length;
     else if (touchesW && !touchesB) areaW += queue.length;
   }
-  return { areaB, areaW, komi, dead };
+  // Копия: список пришёл снаружи, вызывающий не должен менять результат через свою переменную.
+  return { areaB, areaW, komi, dead: [...dead] };
 }
 
 export function resultFromArea(a: AreaScore): { winner: Color; margin: number } {

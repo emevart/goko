@@ -10,7 +10,7 @@ describe('toAscii', () => {
       ' 3  .  .  . ',
       ' 2  X (O) . ',
       ' 1  .  .  . ',
-      '     A  B  C ',
+      '    A  B  C ',
       'X чёрные, O белые, () последний ход; пленные: X 0, O 0',
     ]);
   });
@@ -19,6 +19,23 @@ describe('toAscii', () => {
     const pos = positionFromRows(['...', 'XO.', '...']);
     expect(toAscii(pos)).toBe(toAscii(pos, { lastMove: 'pass' }));
     expect(toAscii(pos).split('\n')[1]).toBe(' 2  X  O  . ');
+  });
+
+  it('пас словом скобок не ставит', () => {
+    const pos = positionFromRows(['...', 'XO.', '...']);
+    expect(toAscii(pos, { lastMove: 'пас' })).toBe(toAscii(pos));
+    expect(toAscii(pos, { lastMove: 'pass' })).toBe(toAscii(pos));
+  });
+
+  it('буквы шапки стоят ровно под столбцами', () => {
+    const pos = positionFromRows(['X.O', '...', 'X.O']);
+    const lines = toAscii(pos).split('\n');
+    const header = lines[3] ?? '';
+    const top = lines[0] ?? '';
+    const bottom = lines[2] ?? '';
+    expect(header.indexOf('A')).toBe(top.indexOf('X'));
+    expect(header.indexOf('C')).toBe(top.indexOf('O'));
+    expect(header.indexOf('A')).toBe(bottom.indexOf('X'));
   });
 
   it('печатает пленных из позиции', () => {

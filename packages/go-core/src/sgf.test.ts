@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { fromSgf, toSgf } from './sgf.ts';
+import { fromSgf, fromSgfPoint, toSgf } from './sgf.ts';
 
 describe('sgf', () => {
   const game = {
@@ -40,5 +40,37 @@ describe('sgf', () => {
     const s = toSgf({ ...game, black: 'a]b\\c', moves: [] });
     expect(s).toContain('PB[a\\]b\\\\c]');
     expect(fromSgf(s).black).toBe('a]b\\c');
+  });
+});
+
+describe('fromSgfPoint: границы доски', () => {
+  it('точка за доской бросает', () => {
+    expect(() => fromSgfPoint('ss', 13)).toThrow(/13x13/);
+  });
+
+  it('буква вне алфавита SGF бросает', () => {
+    expect(() => fromSgfPoint('zz', 13)).toThrow(/bad sgf point/);
+  });
+
+  it('fromSgf на SGF с точкой вне доски бросает', () => {
+    expect(() => fromSgf('(;FF[4]SZ[13]KM[7.5];B[ss])')).toThrow(/13x13/);
+  });
+});
+
+describe('заголовок SGF', () => {
+  it('без rules пишутся китайские правила', () => {
+    expect(toSgf({ size: 13, komi: 7.5, moves: [] })).toContain('RU[Chinese]');
+  });
+
+  it('SGF без SZ бросает: размера доски по умолчанию в проекте нет', () => {
+    expect(() => fromSgf('(;FF[4]KM[7.5];B[dd])')).toThrow(/SZ/);
+  });
+
+  it('SGF без SZ и без ходов тоже бросает', () => {
+    expect(() => fromSgf('(;FF[4]KM[7.5])')).toThrow(/SZ/);
+  });
+
+  it('коми по умолчанию 7.5', () => {
+    expect(fromSgf('(;FF[4]SZ[13];B[dj])')).toEqual({ size: 13, komi: 7.5, moves: [{ color: 'B', coord: 'D4' }] });
   });
 });
