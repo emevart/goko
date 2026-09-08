@@ -51,6 +51,11 @@ export const ENGINE_RESIGN_WINRATE = 0.03;
 export const ENGINE_RESIGN_LEAD = -25;
 export const GENMOVE_VISITS = 10;
 export const ENGINE_RETRY_MS = 5000;
+// Бюджет ожидания вопросов «кто впереди» и «оцени позицию». Цели спеки (10 с и 4 с)
+// описывают норму, бюджет обязан покрыть замер на сервере (счёт на 400 просмотрах —
+// 5,3 с) с запасом. Без бюджета вызывающий ждал бы два таймаута клиента: 60,2 и 30,2 с.
+export const SCORE_BUDGET_MS = 15_000;
+export const ANALYZE_BUDGET_MS = 10_000;
 export const DEFAULT_RANK = '10k' as const;
 
 export type GameServiceDeps = {
@@ -60,15 +65,13 @@ export type GameServiceDeps = {
   now?: () => Date;
   replyTimeoutMs?: number;
   engineRetryMs?: number;
+  scoreBudgetMs?: number;
+  analyzeBudgetMs?: number;
   log?: (line: string) => void;
 };
 
 // Ожидающий ответа движка на состояние с ревизией revision.
 type Waiter = { revision: number; resolve: (move: Move | null) => void };
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms));
-}
 
 export class GameService {
   private readonly deps: GameServiceDeps;
@@ -78,6 +81,8 @@ export class GameService {
   private readonly sessionsByGame = new Map<string, string>();
   private readonly engineTasks = new Map<string, Promise<void>>();
   private readonly scoringTasks = new Map<string, Promise<void>>();
+  // Досрочные пробуждения фоновых пауз: close не должен ждать паузу перед повтором.
+  private readonly wakeups = new Set<() => void>();
   private closed = false;
 
   constructor(deps: GameServiceDeps) {
@@ -93,6 +98,8 @@ export class GameService {
     this.closed = true;
     for (const list of this.waiters.values()) for (const w of list) w.resolve(null);
     this.waiters.clear();
+    // Пауза перед повтором обрывается: иначе остановка сервера ждала бы её целиком.
+    for (const wake of [...this.wakeups]) wake();
     await Promise.allSettled([...this.engineTasks.values(), ...this.scoringTasks.values()]);
   }
 
@@ -194,7 +201,7 @@ export class GameService {
 
   async analyze(id: string, req: AnalyzeInput): Promise<Analysis> {
     const state = this.get(id);
-    const r = await this.deps.engine.analyze({ ...this.engineRequest(state), maxVisits: req.maxVisits, includeOwnership: true });
+    const r = await this.withBudget(this.deps.engine.analyze({ ...this.engineRequest(state), maxVisits: req.maxVisits, includeOwnership: true }), this.deps.analyzeBudgetMs ?? ANALYZE_BUDGET_MS);
     const ownership = r.ownership ?? new Array<number>(state.board.length).fill(0);
     return {
       visits: r.visits,
@@ -209,7 +216,7 @@ export class GameService {
   // Счёт без завершения партии («кто впереди по площади»); автосчёт после двух пасов использует его же.
   async score(id: string): Promise<Result> {
     const state = this.get(id);
-    const r = await this.deps.engine.score(this.engineRequest(state));
+    const r = await this.withBudget(this.deps.engine.score(this.engineRequest(state)), this.deps.scoreBudgetMs ?? SCORE_BUDGET_MS);
     return {
       winner: r.winner,
       margin: r.margin,
@@ -244,6 +251,33 @@ export class GameService {
   }
 
   // ---- внутреннее ----
+
+  // Пауза, прерываемая на close.
+  private sleep(ms: number): Promise<void> {
+    return new Promise<void>((resolve) => {
+      const wake = () => {
+        clearTimeout(timer);
+        this.wakeups.delete(wake);
+        resolve();
+      };
+      const timer = setTimeout(wake, ms);
+      this.wakeups.add(wake);
+    });
+  }
+
+  // Дедлайн вызывающего: движок сам повторяет запрос, и без бюджета «кто впереди»
+  // молчал бы десятки секунд. Отказ того же вида, что и таймаут ответа движка.
+  private async withBudget<T>(work: Promise<T>, ms: number): Promise<T> {
+    let timer: NodeJS.Timeout | undefined;
+    const deadline = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new ApiError('engine_busy', `engine did not respond within ${ms} ms`)), ms);
+    });
+    try {
+      return await Promise.race([work, deadline]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
 
   private now(): string {
     return (this.deps.now?.() ?? new Date()).toISOString();
@@ -355,12 +389,28 @@ export class GameService {
   private kick(state: GameState): void {
     if (this.closed || state.status !== 'playing') return;
     if (state.consecutivePasses >= 2) {
-      if (!this.scoringTasks.has(state.id)) this.scoringTasks.set(state.id, this.runScoring(state.id).finally(() => this.scoringTasks.delete(state.id)));
+      if (!this.scoringTasks.has(state.id)) this.startTask(this.scoringTasks, state.id, this.runScoring(state.id));
       return;
     }
     if (state.pendingEngineMove && !this.engineTasks.has(state.id)) {
-      this.engineTasks.set(state.id, this.runEngine(state.id).finally(() => this.engineTasks.delete(state.id)));
+      this.startTask(this.engineTasks, state.id, this.runEngine(state.id));
     }
+  }
+
+  // Фоновую задачу никто не ждёт до close, поэтому её отказ обязан быть перехвачен здесь:
+  // иначе отказ записи снапшота (диск полон) уходит в unhandledRejection и убивает процесс.
+  private startTask(tasks: Map<string, Promise<void>>, id: string, task: Promise<void>): void {
+    tasks.set(
+      id,
+      task
+        .catch((e: unknown) => {
+          const message = e instanceof Error ? e.message : String(e);
+          const code = e instanceof ApiError ? e.code : 'internal';
+          this.deps.log?.(`[X] background engine task for game ${id} failed: ${message}`);
+          this.emitGame(id, { type: 'error', code, message });
+        })
+        .finally(() => tasks.delete(id)),
+    );
   }
 
   // Цикл хода движка: думает вне мьютекса, применяет под мьютексом только если ревизия не изменилась.
@@ -411,7 +461,7 @@ export class GameService {
     this.emitGame(id, { type: 'error', code, message });
     for (const w of this.waiters.get(id) ?? []) w.resolve(null);
     this.waiters.delete(id);
-    await sleep(retryMs);
+    await this.sleep(retryMs);
   }
 
   // Два паса: счёт и завершение. При недоступности движка — повтор, партия остаётся playing.

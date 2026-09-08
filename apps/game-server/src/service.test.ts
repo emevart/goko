@@ -1,8 +1,8 @@
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { ApiError, type Color, type GameEvent } from '@goko/protocol';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { ApiError, type Color, type GameEvent, type GameState } from '@goko/protocol';
 import type { Engine } from './engine-client.ts';
 import { EventBus } from './events.ts';
 import { createFakeEngine } from './fake-engine.ts';
@@ -18,11 +18,15 @@ beforeEach(async () => {
   opened = [];
 });
 afterEach(async () => {
+  // Тесты с управляемым временем возвращают настоящие таймеры до закрытия сервисов.
+  vi.useRealTimers();
   for (const service of opened) await service.close();
   await rm(dir, { recursive: true, force: true });
 });
 
 const HUMAN_BLACK = { black: { controller: 'human' as const }, white: { controller: 'engine' as const, rank: '10k' as const } };
+// Партия без движка: задачу движка не поднимает, поэтому годится для тестов о времени.
+const HUMAN_ONLY = { black: { controller: 'human' as const }, white: { controller: 'human' as const } };
 const ENGINE_BLACK = { black: { controller: 'engine' as const, rank: '10k' as const }, white: { controller: 'human' as const } };
 const S9 = { settings: { boardSize: 9 as const } };
 
@@ -39,6 +43,25 @@ function record(bus: EventBus, channel: string): GameEvent[] {
   const out: GameEvent[] = [];
   bus.subscribe(channel, (e) => out.push(e));
   return out;
+}
+
+// Прокрутка микрозадач и ввода-вывода без движения часов: для тестов на фейковых таймерах.
+const tick = async (times = 3): Promise<void> => {
+  for (let i = 0; i < times; i++) await new Promise((r) => setImmediate(r));
+};
+
+// Наблюдение за промисом без ожидания: «уже осел или ещё нет».
+function track<T>(p: Promise<T>): { settled: boolean } {
+  const state = { settled: false };
+  p.then(
+    () => {
+      state.settled = true;
+    },
+    () => {
+      state.settled = true;
+    },
+  );
+  return state;
 }
 
 const until = async (cond: () => boolean, ms = 2000) => {
@@ -587,5 +610,249 @@ describe('GameService: партия человек против движка', (
     const res = await pending;
     expect(res.reply).toBeUndefined();
     expect(service.get(g.state.id).moves).toHaveLength(1);
+  });
+});
+
+describe('GameService: фоновые задачи, дедлайны и мьютекс', () => {
+  // Снапшот, который отдаёт управление и умеет падать или ждать на нужном ходе.
+  function gatedStore(real: GameStore, hook: (state: GameState) => Promise<void>): GameStore {
+    return {
+      load: () => real.load(),
+      save: async (state: GameState) => {
+        await hook(state);
+        return real.save(state);
+      },
+    } as unknown as GameStore;
+  }
+
+  it('отказ записи снапшота в фоновой задаче не роняет процесс, а уходит событием error', async () => {
+    const real = new GameStore(dir);
+    // Падает ровно на коммите хода движка: этот коммит идёт из фоновой задачи,
+    // которую никто не ждёт, поэтому неперехваченный отказ убил бы процесс.
+    const store = gatedStore(real, async (state) => {
+      if (state.moves.length === 2) throw new Error('disk is full');
+    });
+    const { service, bus } = await make(createFakeEngine({ script: ['E5'] }), { store });
+    const g = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: false });
+    const events = record(bus, `game:${g.state.id}`);
+    await service.play(g.state.id, { coord: 'D4', waitForReply: false, via: 'api' });
+    await until(() => events.some((e) => e.type === 'error'));
+    expect(events.find((e) => e.type === 'error')).toMatchObject({ code: 'internal', message: 'disk is full' });
+    // Партия осталась на последнем удачно записанном состоянии.
+    expect(service.get(g.state.id).moves).toHaveLength(1);
+    await service.close();
+  });
+
+  it('close дожидается фоновой записи снапшота', async () => {
+    const real = new GameStore(dir);
+    let release: (() => void) | undefined;
+    let saved = false;
+    const store = gatedStore(real, async (state) => {
+      if (state.moves.length === 2) {
+        await new Promise<void>((r) => {
+          release = r;
+        });
+        saved = true;
+      }
+    });
+    const { service } = await make(createFakeEngine({ script: ['E5'] }), { store });
+    const g = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: false });
+    await service.play(g.state.id, { coord: 'D4', waitForReply: false, via: 'api' });
+    await until(() => release !== undefined);
+    let closed = false;
+    const closing = service.close().then(() => {
+      closed = true;
+    });
+    await tick(); // задача ещё пишет снапшот: close возвращаться не вправе
+    expect(closed).toBe(false);
+    release?.();
+    await closing;
+    expect(saved).toBe(true);
+  });
+
+  it('чужое изменение во время ожидания первого хода движка — не таймаут', async () => {
+    const { service, bus } = await make(createFakeEngine({ script: ['C3'], delayMs: 300 }), { replyTimeoutMs: 3000 });
+    let id = '';
+    // session.game публикуется до коммита, поэтому идентификатор известен раньше возврата create.
+    bus.subscribe('session:s1', (e) => {
+      if (e.type === 'session.game') id = e.gameId;
+    });
+    const creating = service.create({ ...ENGINE_BLACK, ...S9, waitForReply: true }, { sessionId: 's1' });
+    await until(() => {
+      try {
+        return id !== '' && service.get(id).pendingEngineMove;
+      } catch {
+        return false;
+      }
+    });
+    await service.resign(id, { color: 'W', via: 'api' });
+    const created = await creating;
+    expect(created.firstMove).toBeUndefined();
+    expect(created.replyTimedOut).toBeUndefined();
+    expect(created.state.status).toBe('finished');
+  });
+
+  it('мьютекс партии: два хода подряд без ожидания применяются по очереди', async () => {
+    const real = new GameStore(dir);
+    // Запись отдаёт управление: без мьютекса второй ход успел бы прочитать состояние
+    // до коммита первого и переписал бы его.
+    const store = gatedStore(real, async () => {
+      await new Promise((r) => setImmediate(r));
+    });
+    const { service } = await make(createFakeEngine(), { store });
+    const g = await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false });
+    const id = g.state.id;
+    const [first, second] = await Promise.all([
+      service.play(id, { coord: 'D4', waitForReply: false, via: 'api' }),
+      service.play(id, { coord: 'E5', waitForReply: false, via: 'api' }),
+    ]);
+    expect(first.move).toMatchObject({ n: 1, color: 'B', coord: 'D4' });
+    expect(second.move).toMatchObject({ n: 2, color: 'W', coord: 'E5' });
+    expect(service.get(id).moves.map((m) => m.coord)).toEqual(['D4', 'E5']);
+    expect(service.get(id).revision).toBe(2);
+  });
+
+  it('score не ждёт движок дольше 15 с, analyze — дольше 10 с', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const inner = createFakeEngine();
+    const stuck: Engine = { ...inner, score: () => new Promise(() => {}), analyze: () => new Promise(() => {}) };
+    const { service } = await make(stuck);
+    const g = await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false });
+    const id = g.state.id;
+
+    const scoring = service.score(id);
+    const scoringState = track(scoring);
+    const scoreFails = expect(scoring).rejects.toMatchObject({ code: 'engine_busy', message: 'engine did not respond within 15000 ms' });
+    await vi.advanceTimersByTimeAsync(14_999);
+    expect(scoringState.settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    await scoreFails;
+
+    const analyzing = service.analyze(id, { maxVisits: 50 });
+    const analyzingState = track(analyzing);
+    const analyzeFails = expect(analyzing).rejects.toMatchObject({ code: 'engine_busy', message: 'engine did not respond within 10000 ms' });
+    await vi.advanceTimersByTimeAsync(9_999);
+    expect(analyzingState.settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    await analyzeFails;
+  });
+
+  it('бюджет ожидания задаётся вызывающим и не мешает быстрому ответу', async () => {
+    const { service } = await make(createFakeEngine(), { scoreBudgetMs: 50, analyzeBudgetMs: 50 });
+    const g = await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false });
+    expect((await service.score(g.state.id)).reason).toBe('score');
+    expect((await service.analyze(g.state.id, { maxVisits: 50 })).visits).toBe(50);
+  });
+
+  it('close не ждёт паузу перед повтором', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const inner = createFakeEngine();
+    const down: Engine = {
+      ...inner,
+      genmove: async () => {
+        throw new ApiError('engine_unavailable', 'engine is unreachable');
+      },
+    };
+    // Пауза перед повтором — 5 с; часы стоят, поэтому дождаться её close не сможет.
+    const { service, bus } = await make(down, { engineRetryMs: 5000 });
+    const g = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: false });
+    const events = record(bus, `game:${g.state.id}`);
+    await service.play(g.state.id, { coord: 'D4', waitForReply: false, via: 'api' });
+    await tick(10);
+    expect(events.some((e) => e.type === 'error')).toBe(true);
+    await service.close();
+    expect(service.get(g.state.id).moves).toHaveLength(1);
+  });
+
+  it('create не ждёт ответа, когда первым ходит человек', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    // Часы стоят: ожидание ответа движка не смогло бы закончиться таймаутом.
+    const { service } = await make(createFakeEngine({ script: ['E5'] }));
+    const created = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: true });
+    expect(created.firstMove).toBeUndefined();
+    expect(created.replyTimedOut).toBeUndefined();
+    expect(created.state.pendingEngineMove).toBe(false);
+  });
+
+  it('topMoves — не больше пяти лучших ходов движка', async () => {
+    const inner = createFakeEngine();
+    const many: Engine = {
+      ...inner,
+      analyze: async () => ({
+        visits: 50,
+        winrateB: 0.5,
+        scoreLeadB: 0,
+        moveInfos: ['A1', 'B1', 'C1', 'D1', 'E1', 'F1', 'G1'].map((coord, order) => ({ coord, winrateB: 0.5, scoreLeadB: 0, visits: 7 - order, order })),
+        ownership: new Array<number>(81).fill(0),
+      }),
+    };
+    const { service } = await make(many);
+    const g = await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false });
+    const a = await service.analyze(g.state.id, { maxVisits: 50 });
+    expect(a.topMoves.map((m) => m.coord)).toEqual(['A1', 'B1', 'C1', 'D1', 'E1']);
+  });
+
+  it('движку на ход уходит maxVisits 10', async () => {
+    const inner = createFakeEngine({ script: ['E5'] });
+    const visits: (number | undefined)[] = [];
+    const spy: Engine = {
+      ...inner,
+      genmove: async (req) => {
+        visits.push(req.maxVisits);
+        return inner.genmove(req);
+      },
+    };
+    const { service } = await make(spy);
+    const g = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: true });
+    await service.play(g.state.id, { coord: 'D4', waitForReply: true, via: 'api' });
+    expect(visits).toEqual([10]);
+  });
+
+  it('коми партии уходит движку и попадает в результат', async () => {
+    const inner = createFakeEngine();
+    const komis: number[] = [];
+    const spy: Engine = {
+      ...inner,
+      genmove: async (req) => {
+        komis.push(req.komi);
+        return inner.genmove(req);
+      },
+      score: async (req) => {
+        komis.push(req.komi);
+        return inner.score(req);
+      },
+    };
+    const { service } = await make(spy);
+    const g = await service.create({ ...HUMAN_BLACK, settings: { boardSize: 9, komi: 6.5 }, waitForReply: true });
+    await service.pass(g.state.id, { waitForReply: true, via: 'api' });
+    await until(() => service.get(g.state.id).status === 'finished');
+    expect(komis).toEqual([6.5, 6.5]);
+    expect(service.get(g.state.id).result).toMatchObject({ winner: 'W', margin: 6.5 });
+    expect(service.get(g.state.id).result?.score?.komi).toBe(6.5);
+  });
+
+  it('откат во время удачного счёта не завершает партию задним числом', async () => {
+    const inner = createFakeEngine();
+    let release: (() => void) | undefined;
+    const gated: Engine = {
+      ...inner,
+      score: async (req) => {
+        await new Promise<void>((r) => {
+          release = r;
+        });
+        return inner.score(req);
+      },
+    };
+    const { service } = await make(gated);
+    const g = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: true });
+    const id = g.state.id;
+    await service.pass(id, { waitForReply: true, via: 'api' }); // пас человека и пас движка
+    await until(() => release !== undefined);
+    // Откат, пока счёт ещё считается: применять его к новой ревизии нельзя.
+    await service.undo(id, { via: 'api' });
+    release?.();
+    await tick(10);
+    expect(service.get(id).status).toBe('playing');
+    expect(service.get(id).moves).toEqual([]);
   });
 });
