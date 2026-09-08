@@ -17,3 +17,4 @@ spike/log.jsonl
 spike/last-url.txt
 .agent-artifacts/
 spike/tone.wav
+.mutants/
