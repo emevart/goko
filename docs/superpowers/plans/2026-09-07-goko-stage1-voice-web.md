@@ -16,7 +16,7 @@
 - Правила го, координаты и озвучивание координат (`speakCoord`) — только из `@goko/go-core`; веб рисует присланную строку `board`; агент не хранит позицию: каждая реплика о партии — из результата инструмента (правило 2 `CLAUDE.md`). В памяти агента только `sessionId`, `gameId`, цвет человека, ранг, коми и служебные флаги.
 - Инструменты ровно по таблице раздела 9 спеки: `start_game`, `play_move`, `correct_last_move`, `pass`, `resign`, `undo`, `get_position`, `get_assessment`, `set_rank`; `get_assessment` — `analyze` с `maxVisits: 50`; тексты `note`/`reason` для модели — по-русски; координаты в аргументах и результатах — латиницей (`D4`), рядом произношение (`дэ четыре`).
 - Речь: `VOICE_MODE=realtime` (по умолчанию) — `openai.realtime.RealtimeModel({ model: 'gpt-realtime', voice: 'marin' })`, серверный VAD с перебиванием, транскрипция входа `gpt-live-transcribe` с `language: 'ru'`; `VOICE_MODE=pipeline` — `silero.VAD` + `openai.STT` (`gpt-transcribe`, `ru`) + `openai.LLM` + `openai.TTS` (`gpt-4o-mini-tts` с инструкцией по тону). Приветствие — `generateReply` в `onEnter`.
-- Текстовые каналы LiveKit: вход `lk.chat` (стандартный `RoomIO`), выход `lk.transcription` (атрибуты `lk.segment_id`, `lk.transcription_final`, `lk.transcribed_track_id`).
+- Текстовые каналы LiveKit: вход `lk.chat` (стандартный `RoomIO`), выход `lk.transcription` (атрибуты `lk.segment_id`, `lk.transcription_final`, `lk.transcribed_track_id`). Признаком финальности реплики считается дочитанный поток, а не атрибут `lk.transcription_final`: `@livekit/agents` 1.8.0 оставляет в нём `false` навсегда (проверено на спайке 08.09).
 - Имена воркера: `AGENT_NAME=goko` на VPS, `goko-dev` на ПК; game-server кладёт то же имя в `roomConfig` токена (`AGENT_NAME` у него же). Метаданные диспетчеризации — `{ "sessionId": "<id>" }`, комната — `goko-<sessionId>`.
 - Веб: одна страница, портретный телефон, SVG-доска, тап = ближайший пункт → `play` с `via: 'tap'` и `waitForReply: false`; не ход человека — сообщение «сейчас ход Гоко» без запроса; цели касания ≥ 44 px; тёмная и светлая тема по `prefers-color-scheme`; без UI-библиотек; без агента в комнате страница играет тапами.
 - Протокол и заголовки как в ядре: `X-App-Key` на `/api/*`; ключ в веб попадает на этапе сборки (`APP_KEY` из `.env` → `import.meta.env.VITE_APP_KEY`), в git не попадает. Значения переменных не печатать в логи и не вставлять в доки.
@@ -2022,8 +2022,10 @@ async function main() {
   room.registerTextStreamHandler('lk.transcription', async (reader, info) => {
     let text = '';
     for await (const chunk of reader) text += chunk;
-    const attrs = reader.info.attributes ?? {};
-    if (attrs['lk.transcription_final'] === 'false') return;
+    // Атрибут lk.transcription_final НЕ фильтруем: @livekit/agents 1.8.0
+    // открывает транскрипт агента дельта-потоком с 'false' в заголовке и
+    // больше его не меняет (проверено на спайке 08.09). Дочитанный поток и
+    // есть финальная реплика.
     if (sent.has(text)) return; // эхо нашей же реплики из lk.chat
     console.log(`[${info.identity}] ${text}`);
   });
@@ -2731,7 +2733,10 @@ export function useSession() {
         text += chunk;
         setLines((ls) => upsertLine(ls, { id, who, text, final: false }));
       }
-      setLines((ls) => upsertLine(ls, { id, who, text, final: attrs['lk.transcription_final'] !== 'false' }));
+      // Поток дочитан — реплика финальная. На атрибут lk.transcription_final
+      // не смотрим: agents 1.8.0 оставляет в заголовке 'false' навсегда
+      // (проверено на спайке 08.09), и строка никогда не перестала бы мигать.
+      setLines((ls) => upsertLine(ls, { id, who, text, final: true }));
     });
     try {
       await room.connect(info.livekit.url, info.livekit.token);
