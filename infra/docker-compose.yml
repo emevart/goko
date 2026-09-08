@@ -1,0 +1,30 @@
+name: goko
+services:
+  caddy:
+    image: caddy:2
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      WEB_HOST: ${WEB_HOST}
+      LK_HOST: ${LK_HOST}
+      ACME_EMAIL: ${ACME_EMAIL:-admin@${WEB_HOST}}
+      API_UPSTREAM: ${API_UPSTREAM:-127.0.0.1:8787}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - /opt/goko/web:/srv/web:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+  livekit:
+    image: ${LIVEKIT_IMAGE:-livekit/livekit-server:latest}
+    network_mode: host
+    restart: unless-stopped
+    command: --config /etc/livekit.yaml
+    environment:
+      LIVEKIT_KEYS: "${LIVEKIT_API_KEY}: ${LIVEKIT_API_SECRET}"
+    volumes:
+      - /opt/goko/livekit.yaml:/etc/livekit.yaml:ro
+
+volumes:
+  caddy_data:
+  caddy_config:
