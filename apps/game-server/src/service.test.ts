@@ -2,7 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import type { Color, GameEvent } from '@goko/protocol';
+import { ApiError, type Color, type GameEvent } from '@goko/protocol';
 import type { Engine } from './engine-client.ts';
 import { EventBus } from './events.ts';
 import { createFakeEngine } from './fake-engine.ts';
@@ -418,6 +418,164 @@ describe('GameService: партия человек против движка', (
     await service.pass(g.state.id, { waitForReply: true, via: 'api' });
     await until(() => service.get(g.state.id).status === 'finished');
     expect(service.sgf(g.state.id)).toContain('RE[W+7.5]');
+  });
+
+  it('чужое изменение во время ожидания ответа не выдаётся за ход движка', async () => {
+    const { service } = await make(createFakeEngine({ script: ['E5'], delayMs: 200 }));
+    const g = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: true });
+    const id = g.state.id;
+    const pending = service.play(id, { coord: 'D4', waitForReply: true, via: 'api' });
+    await until(() => service.get(id).pendingEngineMove);
+    // setRank двигает ревизию, но ходом движка не является: ответом его выдавать нельзя.
+    await service.setRank(id, { color: 'W', rank: '5k' });
+    const res = await pending;
+    expect(res.reply).toBeUndefined();
+    expect(res.replyTimedOut).toBeUndefined();
+  });
+
+  it('движок ходит первым: сдача ровно после 60-го хода, не на 60-м', async () => {
+    const inner = createFakeEngine();
+    // Движок играет чёрными, поэтому оценивает позицию на чётной длине партии:
+    // граница «после 60-го хода» отличима от «начиная с 60-го».
+    const losing: Engine = { ...inner, genmove: async (req) => ({ ...(await inner.genmove(req)), winrateB: 0.01, scoreLeadB: -40 }) };
+    const { service } = await make(losing);
+    const g = await service.create({ ...ENGINE_BLACK, settings: { boardSize: 13 }, waitForReply: true });
+    const id = g.state.id;
+    const human = createFakeEngine({ passAfterPass: false });
+    for (let i = 0; i < 40; i++) {
+      const s = service.get(id);
+      if (s.status === 'finished') break;
+      const mv = await human.genmove({ boardSize: 13, rules: 'chinese', komi: 7.5, moves: s.moves.map((m) => [m.color, m.coord] as [Color, string]), rank: '10k' });
+      await service.play(id, { coord: mv.move, waitForReply: true, via: 'api' });
+    }
+    const state = service.get(id);
+    expect(state.result).toMatchObject({ winner: 'W', reason: 'resign' });
+    expect(state.moves).toHaveLength(62);
+  });
+
+  it('на одну партию идёт одна задача движка', async () => {
+    const engine = createFakeEngine({ script: ['E5', 'F6'], delayMs: 150 });
+    const { service, bus } = await make(engine);
+    const g = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: true });
+    const id = g.state.id;
+    const events = record(bus, `game:${id}`);
+    await service.play(id, { coord: 'D4', waitForReply: false, via: 'api' });
+    // Коммит во время раздумья не должен поднимать вторую задачу движка: ход,
+    // придуманный для устаревшей ревизии, переигрывает та же самая задача.
+    await service.setRank(id, { color: 'W', rank: '5k' });
+    await until(() => service.get(id).moves.length === 2);
+    expect(events.filter((e) => e.type === 'engine.thinking')).toHaveLength(2);
+    expect(engine.calls.genmove).toBe(2);
+  });
+
+  it('ход за движок разрешён вызывающему by engine', async () => {
+    const { service } = await make(createFakeEngine({ script: ['E5'], delayMs: 300 }));
+    const g = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: true });
+    const id = g.state.id;
+    await service.play(id, { coord: 'D4', waitForReply: false, via: 'api' });
+    const res = await service.play(id, { coord: 'F6', color: 'W', waitForReply: false, via: 'api' }, 'engine');
+    expect(res.move).toMatchObject({ n: 2, color: 'W', coord: 'F6' });
+  });
+
+  it('ход не своим цветом отвергается правилами партии, а не проверкой места', async () => {
+    const { service } = await make(createFakeEngine({ script: ['E5'], delayMs: 200 }));
+    const g = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: true });
+    const id = g.state.id;
+    await service.play(id, { coord: 'D4', waitForReply: false, via: 'api' });
+    // Место чёрных — человек, но сейчас очередь белых: отказ приходит из applyMove.
+    await expect(service.play(id, { coord: 'C3', color: 'B', waitForReply: false, via: 'api' })).rejects.toMatchObject({
+      code: 'not_your_turn',
+      message: 'it is white to play',
+    });
+  });
+
+  it('game.finished публикуется один раз', async () => {
+    const { service, bus } = await make(createFakeEngine({ script: ['E5'] }));
+    const g = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: true });
+    await service.resign(g.state.id, { color: 'B', via: 'api' });
+    const events = record(bus, `game:${g.state.id}`);
+    await service.setRank(g.state.id, { color: 'W', rank: '5k' });
+    expect(events.filter((e) => e.type === 'game.finished')).toHaveLength(0);
+  });
+
+  it('после close новые коммиты не поднимают движок', async () => {
+    const engine = createFakeEngine({ script: ['E5'] });
+    const { service } = await make(engine);
+    const g = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: true });
+    await service.close();
+    const res = await service.play(g.state.id, { coord: 'D4', waitForReply: false, via: 'api' });
+    expect(res.state.pendingEngineMove).toBe(true);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(engine.calls.genmove).toBe(0);
+    expect(service.get(g.state.id).moves).toHaveLength(1);
+  });
+
+  it('откат во время повтора счёта прекращает счёт', async () => {
+    const inner = createFakeEngine();
+    let scoreCalls = 0;
+    const flaky: Engine = {
+      ...inner,
+      score: async () => {
+        scoreCalls++;
+        throw new Error('score failed');
+      },
+    };
+    const { service, bus } = await make(flaky, { engineRetryMs: 80 });
+    const g = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: true });
+    const events = record(bus, `game:${g.state.id}`);
+    await service.pass(g.state.id, { waitForReply: true, via: 'api' });
+    await until(() => events.some((e) => e.type === 'error'));
+    await service.undo(g.state.id, { via: 'api' });
+    await new Promise((r) => setTimeout(r, 250));
+    expect(scoreCalls).toBe(1);
+    expect(service.get(g.state.id).status).toBe('playing');
+  });
+
+  it('движку уходит ранг его места', async () => {
+    const inner = createFakeEngine({ script: ['E5', 'F6'] });
+    const ranks: string[] = [];
+    const spy: Engine = {
+      ...inner,
+      genmove: async (req) => {
+        ranks.push(req.rank);
+        return inner.genmove(req);
+      },
+    };
+    const { service } = await make(spy);
+    const g = await service.create({ black: { controller: 'human' }, white: { controller: 'engine', rank: '3k' }, ...S9, waitForReply: true });
+    await service.play(g.state.id, { coord: 'D4', waitForReply: true, via: 'api' });
+    await service.setRank(g.state.id, { color: 'W', rank: '7k' });
+    await service.play(g.state.id, { coord: 'C3', waitForReply: true, via: 'api' });
+    expect(ranks).toEqual(['3k', '7k']);
+  });
+
+  it('correct во время раздумья движка: ответ всё равно приходит', async () => {
+    const { service } = await make(createFakeEngine({ script: ['E5', 'F6'], delayMs: 120 }));
+    const g = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: true });
+    const id = g.state.id;
+    await service.play(id, { coord: 'D4', waitForReply: false, via: 'api' });
+    await until(() => service.get(id).pendingEngineMove);
+    const res = await service.correct(id, { coord: 'D5', waitForReply: true, via: 'voice' });
+    expect(res.reply).toMatchObject({ coord: 'F6' });
+    expect(res.state.moves.map((m) => m.coord)).toEqual(['D5', 'F6']);
+  });
+
+  it('код ApiError движка попадает в событие error', async () => {
+    const inner = createFakeEngine({ script: ['E5'] });
+    let fail = 1;
+    const flaky: Engine = {
+      ...inner,
+      genmove: async (req) => {
+        if (fail-- > 0) throw new ApiError('engine_busy', 'queue is full');
+        return inner.genmove(req);
+      },
+    };
+    const { service, bus } = await make(flaky, { engineRetryMs: 10 });
+    const g = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: true });
+    const events = record(bus, `game:${g.state.id}`);
+    await service.play(g.state.id, { coord: 'D4', waitForReply: false, via: 'api' });
+    await until(() => events.some((e) => e.type === 'error'));
+    expect(events.find((e) => e.type === 'error')).toMatchObject({ code: 'engine_busy', message: 'queue is full' });
   });
 
   it('close останавливает движок: ожидающий получает состояние без ответа', async () => {

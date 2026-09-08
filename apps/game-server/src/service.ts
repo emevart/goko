@@ -127,7 +127,7 @@ export class GameService {
     }
     const waiter = state.pendingEngineMove && req.waitForReply ? this.registerWaiter(id, state.revision) : null;
     await this.commit(state, 'new', 'system');
-    if (!waiter) return { state: this.get(id) };
+    if (!waiter) return { state };
     const firstMove = await this.waitForReply(waiter);
     const latest = this.get(id);
     if (firstMove) return { state: latest, firstMove };

@@ -1,5 +1,5 @@
 // Фейковый движок для тестов и smoke без KataGo: легальные ходы, сценарий, задержка, наивный счёт.
-import { type Color, type Position, areaScore, deadStones, indexToCoord, neighbors, play, replay, resultFromArea } from '@goko/go-core';
+import { type Color, type Position, areaScore, indexToCoord, neighbors, play, replay, resultFromArea } from '@goko/go-core';
 import type { EngineAnalyzeRequest, EngineAnalyzeResponse, EngineGenmoveRequest, EngineGenmoveResponse, EngineScoreRequest, EngineScoreResponse } from '@goko/protocol';
 import type { Engine } from './engine-client.ts';
 
@@ -93,7 +93,9 @@ export function createFakeEngine(opts: FakeEngineOptions = {}): FakeEngine {
       await wait();
       const pos = positionOf(req);
       const ownership = naiveOwnership(pos);
-      const dead = deadStones(pos, ownership);
+      // Наивное владение даёт каждому камню +-1 в его же пользу, поэтому мёртвых групп
+      // у фейка не бывает никогда: вызов deadStones вернул бы пустой список.
+      const dead: string[] = [];
       const area = areaScore(pos, dead, req.komi);
       const { winner, margin } = resultFromArea(area);
       const scoreLeadB = area.areaB - area.areaW - req.komi;

@@ -81,6 +81,13 @@ describe('createFakeEngine', () => {
     expect(engine.calls.score).toBe(1);
   });
 
+  it('delayMs задерживает и genmove', async () => {
+    const engine = createFakeEngine({ script: ['E5'], delayMs: 30 });
+    const t0 = Date.now();
+    expect((await engine.genmove({ ...base, moves: [], rank: '10k' })).move).toBe('E5');
+    expect(Date.now() - t0).toBeGreaterThanOrEqual(25);
+  });
+
   it('analyze возвращает winrate 0.5 и ownership по камням; delayMs задерживает ответ', async () => {
     const engine = createFakeEngine({ delayMs: 30 });
     const t0 = Date.now();
