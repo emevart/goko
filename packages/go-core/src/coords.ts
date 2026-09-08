@@ -29,21 +29,35 @@ const CYRILLIC_TO_LATIN: Record<string, string> = {
   Т: 'T',
 };
 
+// Класс кириллических букв строится из карты: один источник списка, забыть
+// букву в одном из двух мест невозможно.
+const CYRILLIC_PATTERN = new RegExp(`[${Object.keys(CYRILLIC_TO_LATIN).join('')}]`, 'g');
+
+// Известная граница: разделители склеиваются, поэтому 'D 1 3' — валидный ход D13.
+// Цена — редкая неверная координата, выгода — устойчивость к транскрипту речи.
 export function normalizeCoordText(text: string): string {
   return text
     .trim()
     .toUpperCase()
     .replace(/[\s\-_.]/g, '')
-    .replace(/[АВСЕНКМОРТ]/g, (ch) => CYRILLIC_TO_LATIN[ch] ?? ch);
+    .replace(CYRILLIC_PATTERN, (ch) => CYRILLIC_TO_LATIN[ch] as string);
+}
+
+// Пас сверяется по нормализованному тексту, как и координата: из одного
+// транскрипта не должно получаться двух разных правил разбора.
+function isPassText(text: string): boolean {
+  const norm = text.toLowerCase().replace(/[\s\-_.]/g, '');
+  return norm === 'pass' || norm === 'пас';
 }
 
 export function parseCoord(text: string, size: number): Point | 'pass' {
-  const lower = text.trim().toLowerCase();
-  if (lower === 'pass' || lower === 'пас') return 'pass';
+  if (isPassText(text)) return 'pass';
   const norm = normalizeCoordText(text);
   const m = /^([A-Z])(\d{1,2})$/.exec(norm);
   if (!m) throw new InvalidCoordError(text, 'expected a letter and a number, e.g. D4');
   const letter = m[1] ?? '';
+  // Ветка существует ради понятного сообщения: буквы I нет в COLUMN_LETTERS,
+  // проверка col < 0 отсекла бы её и без этой строки.
   if (letter === 'I') throw new InvalidCoordError(text, 'column I does not exist');
   const col = COLUMN_LETTERS.indexOf(letter);
   const row = Number(m[2]) - 1;
@@ -52,15 +66,26 @@ export function parseCoord(text: string, size: number): Point | 'pass' {
   return { col, row };
 }
 
+// Размера доски здесь нет: проверяем то, что можем — столбец по списку букв
+// и неотрицательную строку.
 export function formatCoord(p: Point): string {
+  if (p.col < 0 || p.col >= COLUMN_LETTERS.length || p.row < 0) {
+    throw new InvalidCoordError(`${p.col},${p.row}`, 'point is outside the letters range');
+  }
   return `${COLUMN_LETTERS.charAt(p.col)}${p.row + 1}`;
 }
 
 export function toIndex(p: Point, size: number): number {
+  if (p.col < 0 || p.col >= size || p.row < 0 || p.row >= size) {
+    throw new InvalidCoordError(`${p.col},${p.row}`, `point is outside the ${size}x${size} board`);
+  }
   return p.row * size + p.col;
 }
 
 export function fromIndex(index: number, size: number): Point {
+  if (index < 0 || index >= size * size) {
+    throw new InvalidCoordError(String(index), `index is outside the ${size}x${size} board`);
+  }
   return { col: index % size, row: Math.floor(index / size) };
 }
 
@@ -71,6 +96,9 @@ export function coordToIndex(coord: string, size: number): number {
 }
 
 export function indexToCoord(index: number, size: number): string {
+  if (index < 0 || index >= size * size) {
+    throw new InvalidCoordError(String(index), `index is outside the ${size}x${size} board`);
+  }
   return formatCoord(fromIndex(index, size));
 }
 
