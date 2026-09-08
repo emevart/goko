@@ -28,16 +28,30 @@ else
   echo "[!] deploy: rsync не найден, синхронизация через tar+ssh; устаревшие файлы на VPS не удаляются"
 fi
 
+# Что не уезжает на VPS. Один список на обе ветки синхронизации: раньше он был
+# скопирован дважды и разъезжался при первой же правке. Ни rsync, ни tar не читают
+# .gitignore, поэтому игнорируемое в git приходится перечислять здесь заново.
+# Шаблоны не привязаны к корню: 'dist' закрывает и apps/web/dist, и любой другой.
+EXCLUDES=(
+  .git                      # история репозитория, на VPS не нужна
+  node_modules              # ставится на VPS сборкой образов
+  data                      # состояние контейнеров
+  '.env' '.env.*'           # секреты: .env живёт только в /opt/goko/.env
+  'apps/go-engine/models'   # сети KataGo, сотни МБ, качаются в образ по sha256
+  'apps/go-engine/bin'      # распакованная OpenCL-сборка KataGo для Windows
+  dist build coverage       # артефакты сборки и покрытия
+  '.superpowers'            # внутренние планы, брифы и журналы стадии
+  'spike/log.jsonl'         # журнал спайка с расшифровками речи founder'а
+  'spike/last-url.txt'      # ссылка с живым токеном
+)
+EXCLUDE_ARGS=()
+for pattern in "${EXCLUDES[@]}"; do EXCLUDE_ARGS+=(--exclude "$pattern"); done
+
 # репозиторий -> /opt/goko/src
 if [ "$SYNC" = rsync ]; then
-  rsync -az --delete \
-    --exclude .git --exclude node_modules --exclude data --exclude '.env' --exclude '.env.*' \
-    --exclude 'apps/go-engine/models' --exclude 'apps/web/dist' \
-    "$ROOT/" "$HOST:/opt/goko/src/"
+  rsync -az --delete "${EXCLUDE_ARGS[@]}" "$ROOT/" "$HOST:/opt/goko/src/"
 else
-  tar -C "$ROOT" -czf - \
-    --exclude .git --exclude node_modules --exclude data --exclude '.env' --exclude '.env.*' \
-    --exclude 'apps/go-engine/models' --exclude 'apps/web/dist' \
+  tar -C "$ROOT" -czf - "${EXCLUDE_ARGS[@]}" \
     . | ssh "$HOST" 'mkdir -p /opt/goko/src && tar -xzf - -C /opt/goko/src'
 fi
 

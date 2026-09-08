@@ -15,6 +15,11 @@ turn:
   enabled: true
   domain: __TURN_DOMAIN__  # deploy.sh подставляет $LK_HOST; TURN только UDP в v1
   udp_port: 3478
+  # Диапазон relay-аллокаций задан явно, а не унаследован от умолчания образа:
+  # ровно эти порты открывает bootstrap.sh (ufw allow 30000:40000/udp) и на них
+  # ссылается таблица портов в infra/README.md. Менять только вместе с обоими.
+  relay_range_start: 30000
+  relay_range_end: 40000
 logging:
   level: info
   json: false
