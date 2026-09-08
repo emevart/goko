@@ -65,7 +65,7 @@ describe('toAscii проверяет позицию', () => {
     expect(() => toAscii({ ...pos, board: pos.board.slice(0, 80) })).toThrow(/board has 80 cells/);
   });
 
-  it('неподдерживаемый размер — ошибка про размер', () => {
-    expect(() => toAscii({ ...pos, size: 5, board: '.'.repeat(25) })).toThrow(/9, 13, 19/);
+  it('бессмысленный размер — ошибка про размер', () => {
+    expect(() => toAscii({ ...pos, size: 0, board: '' })).toThrow(/positive integer/);
   });
 });

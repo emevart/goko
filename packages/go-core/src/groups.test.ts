@@ -136,8 +136,8 @@ describe('groupsWithOwnership проверяет позицию', () => {
     expect(() => groupsWithOwnership(broken, own)).toThrow(/board has 82 cells/);
   });
 
-  it('неподдерживаемый размер — ошибка про размер', () => {
-    const broken = { ...pos, size: 5, board: '.'.repeat(25) };
-    expect(() => groupsWithOwnership(broken, new Array<number>(25).fill(0))).toThrow(/9, 13, 19/);
+  it('бессмысленный размер — ошибка про размер', () => {
+    const broken = { ...pos, size: 0, board: '' };
+    expect(() => groupsWithOwnership(broken, [])).toThrow(/positive integer/);
   });
 });

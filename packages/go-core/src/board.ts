@@ -12,7 +12,9 @@ export type Position = {
 
 export type Group = { color: Color; stones: number[]; liberties: number[] };
 
-// Проект играет только на этих размерах: то же множество, что в протоколе.
+// Продуктовая политика, а не свойство позиции: проект играет только на этих
+// размерах, то же множество, что в протоколе. Ею пользуется разбор SZ в sgf.ts;
+// инвариант позиции про набор размеров ничего не знает.
 export const SUPPORTED_BOARD_SIZES: readonly number[] = [9, 13, 19];
 
 export function emptyPosition(size: number): Position {
@@ -84,14 +86,19 @@ export function allGroups(pos: Position): Group[] {
   return out;
 }
 
-// Position — структурный тип, и три факта о нём он не гарантирует ничем: длину
-// доски, её алфавит и поддерживаемый размер. Позиция, пришедшая извне (движок,
-// провод, чужой код), с любым из них нарушенным расходится по коду молча:
-// allGroups обходит board.length, поэтому длинная доска даёт индексы вне доски,
-// а короткая — пустые пункты там, где на настоящей доске камни.
+// Position — структурный тип, и трёх фактов о нём он не гарантирует ничем:
+// осмысленного размера, длины доски и её алфавита. Позиция, пришедшая извне
+// (движок, провод, чужой код), с любым из них нарушенным расходится по коду
+// молча: allGroups обходит board.length, поэтому длинная доска даёт индексы вне
+// доски, а короткая — пустые пункты там, где на настоящей доске камни.
+//
+// Здесь проверяется только согласованность позиции самой с собой. Какие размеры
+// доски поддерживает продукт — вопрос протокола и игрового сервера, а не правил
+// го: правила работают на любом размере. Маленькие доски (3x3, 5x5, 7x7)
+// легальны намеренно — на них удобны фикстуры тестов и эталонные прогоны правил.
 export function assertPosition(pos: Position): void {
-  if (!SUPPORTED_BOARD_SIZES.includes(pos.size)) {
-    throw new Error(`board size ${pos.size} is not supported, expected one of ${SUPPORTED_BOARD_SIZES.join(', ')}`);
+  if (!Number.isInteger(pos.size) || pos.size <= 0) {
+    throw new Error(`board size ${pos.size} is not valid, expected a positive integer`);
   }
   const expected = pos.size * pos.size;
   if (pos.board.length !== expected) {

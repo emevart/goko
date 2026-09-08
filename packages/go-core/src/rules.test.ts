@@ -210,13 +210,39 @@ describe('positionFromRows', () => {
 
 describe('assertPosition', () => {
   // Позиция приходит извне структурным типом: ни длину доски, ни её алфавит,
-  // ни размер тип не гарантирует.
+  // ни осмысленный размер тип не гарантирует.
   const valid = (): Position => emptyPosition(9);
+  const sized = (size: number, board: string): Position =>
+    ({ size, board, ko: null, captures: { B: 0, W: 0 } });
 
   it('валидная позиция проходит', () => {
     expect(() => assertPosition(valid())).not.toThrow();
     expect(() => assertPosition(positionFromRows(new Array<string>(9).fill('.........'))))
       .not.toThrow();
+  });
+
+  // Правила го работают на любом размере, а какие доски играет продукт —
+  // вопрос протокола и сервера. Маленькие доски нужны фикстурам и эталонным
+  // прогонам правил, поэтому инвариант их пропускает.
+  it('маленькие доски легальны', () => {
+    expect(() => assertPosition(sized(3, '.'.repeat(9)))).not.toThrow();
+    expect(() => assertPosition(sized(5, '.'.repeat(24) + 'B'))).not.toThrow();
+    expect(() => assertPosition(sized(7, '.'.repeat(48) + 'W'))).not.toThrow();
+  });
+
+  it('нулевой размер — ошибка', () => {
+    expect(() => assertPosition(sized(0, ''))).toThrow(/0/);
+    expect(() => assertPosition(sized(0, ''))).toThrow(/positive integer/);
+  });
+
+  it('отрицательный размер — ошибка', () => {
+    expect(() => assertPosition(sized(-3, '.'.repeat(9)))).toThrow(/-3/);
+    expect(() => assertPosition(sized(-3, '.'.repeat(9)))).toThrow(/positive integer/);
+  });
+
+  it('дробный размер — ошибка', () => {
+    expect(() => assertPosition(sized(2.5, '.'.repeat(6)))).toThrow(/2\.5/);
+    expect(() => assertPosition(sized(2.5, '.'.repeat(6)))).toThrow(/positive integer/);
   });
 
   it('укороченная доска — ошибка с обеими длинами', () => {
@@ -237,9 +263,11 @@ describe('assertPosition', () => {
     expect(() => assertPosition(pos)).toThrow(/index 7/);
   });
 
-  it('неподдерживаемый размер — ошибка с набором размеров', () => {
-    const pos = { size: 5, board: '.'.repeat(25), ko: null, captures: { B: 0, W: 0 } };
-    expect(() => assertPosition(pos)).toThrow(/5/);
-    expect(() => assertPosition(pos)).toThrow(/9, 13, 19/);
+  // Длина и алфавит проверяются и на маленькой доске: она легальна, но
+  // согласованной остаётся быть обязана.
+  it('на маленькой доске длина и алфавит по-прежнему проверяются', () => {
+    expect(() => assertPosition(sized(5, '.'.repeat(24)))).toThrow(/24/);
+    expect(() => assertPosition(sized(5, '.'.repeat(24)))).toThrow(/25/);
+    expect(() => assertPosition(sized(5, '.'.repeat(24) + 'X'))).toThrow(/"X"/);
   });
 });
