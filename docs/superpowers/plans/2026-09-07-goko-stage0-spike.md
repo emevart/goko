@@ -1030,8 +1030,68 @@ git commit -m "docs: результаты стадии 0 и решения по 
 
 ### Task 8: Удалить спайк
 
-- [ ] **Step 1:** `git rm -r spike`, убрать `"spike"` из `workspaces` в `package.json`, `npm install`, `npm run check` зелёный.
-- [ ] **Step 2:** Commit: `git commit -m "spike: удалён, выводы в docs/research/stage0-results.md"`.
+Спайк — единственное место, где записаны факты, добытые деньгами и живым
+голосом. Сначала переносим то, что иначе исчезнет, потом удаляем. Задача
+выполняется только после голосового прогона founder'а: до него `phrases.md`
+ещё не заполнен результатами.
+
+**Files:**
+- Create: `docs/research/voice-phrases.md`, `docs/decisions/2026-09-08-livekit-transcript.md`
+- Modify: `package.json`, `tsconfig.json`, `.gitignore`, `docs/research/stage0-results.md`
+- Delete: `spike/`
+
+- [ ] **Step 1: Перенести фразы.** `git mv spike/phrases.md docs/research/voice-phrases.md`.
+  В перенесённом файле поправить пути: упоминания `spike/log.jsonl` заменить на
+  описание формата журнала, который будет писать `scripts/chat.mjs` стадии 1
+  (`event: "user" | "agent" | "tool"`, по строке JSON на событие; правило подсчёта
+  делит журнал на блоки по строкам `event: "user"`). Знаменатель 45 и таблицу
+  ожиданий не трогать: это единственный воспроизводимый критерий «голос работает».
+  Если прогон founder'а уже дал результаты — они переезжают вместе с таблицей.
+
+- [ ] **Step 2: Записать решение по транскрипту.** Создать
+  `docs/decisions/2026-09-08-livekit-transcript.md` со стандартной шапкой решений
+  и двумя разделами:
+  1. «Единица высказывания — `lk.segment_id`». Почему нельзя фильтровать по
+     `lk.transcription_final`: `@livekit/agents` 1.8 открывает транскрипт агента
+     дельта-потоком, кладёт в заголовок `"false"` и больше его не трогает;
+     транскрипт человека приходит не дельта-потоком и переоткрывается на каждом
+     промежуточном результате STT с тем же `segment_id`. Отсюда правило: печатать
+     сегмент один раз — сразу по честному `final="true"`, иначе после короткой
+     тишины. Отсечение по имени участника не годится: у микрофона на телефоне имя
+     другое. Источник — `spike/chat.mjs` и `spike/public/index.html` стадии 0.
+  2. «Ошибки не печатают адрес сервера». Текст ошибки клиента LiveKit содержит
+     адрес; репозиторий публичный, поэтому в лог идёт класс ошибки, а не её текст.
+     Правило распространяется на весь код стадии 1, а не только на спайк.
+
+- [ ] **Step 3: Сверить, что остальное уже перенесено.** Прежде чем удалять,
+  проверить grep'ом по `docs/superpowers/plans/2026-09-07-goko-stage1-core.md` и
+  `docs/superpowers/plans/2026-09-07-goko-stage1-voice-web.md`, что в планах
+  присутствуют: схема токена (`roomCreate`, `RoomAgentDispatch`,
+  `RoomConfiguration`) и причина, по которой `roomCreate` обязателен
+  (`room.auto_create: false`); импорт классов протокола из реэкспорта
+  `livekit-server-sdk`; конфигурация Realtime (`gpt-realtime`, голос `marin`,
+  `server_vad` 0.5 / 300 / 500, `gpt-live-transcribe` с `language: 'ru'`);
+  русские произношения столбцов; протокол analysis engine (`id`, `isDuringSearch`,
+  `overrideSettings.humanSLProfile`, `includePolicy`, `Array.isArray(humanPolicy)`);
+  соглашения запуска (`node --env-file-if-exists`, имена агента `goko` и
+  `goko-dev`); набор версий (`@livekit/agents` 1.8.0, `@livekit/rtc-node` 0.13.34,
+  `livekit-server-sdk` 2.18.0, `livekit-client` 2.22.3, сервер `v1.13.6`).
+  Чего не нашлось — дописать в соответствующий план до удаления. Результат сверки
+  (что искали, где нашли) вписать в отчёт задачи.
+
+- [ ] **Step 4: Удалить спайк и вычистить ссылки на него.**
+  `git rm -r spike`; убрать `"spike"` из `workspaces` в `package.json`; убрать
+  `"spike/**/*.ts"` из `include` в `tsconfig.json`; убрать строки `spike/log.jsonl`
+  и `spike/last-url.txt` из `.gitignore`; проверить `grep -rn "spike" --exclude-dir=.git .`
+  и убрать оставшиеся упоминания из `infra/scripts/deploy.sh` (список исключений),
+  `README.md` и доков, кроме журналов и `docs/research/`, где они — история.
+
+- [ ] **Step 5: Проверить.** `npm install`, затем `npm run check` и `npm run doctor` —
+  оба зелёные. Отдельно убедиться, что `docs/research/stage0-results.md` не ссылается
+  на удалённые файлы: ссылку на `spike/phrases.md` заменить на
+  `docs/research/voice-phrases.md`.
+
+- [ ] **Step 6: Commit:** `git commit -m "spike: удалён, выводы перенесены в docs/"`.
 
 ---
 
