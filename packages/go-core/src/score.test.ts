@@ -2,25 +2,31 @@ import { describe, expect, it } from 'vitest';
 import { areaScore, resultFromArea } from './score.ts';
 import { positionFromRows } from './testing.ts';
 
+// Доска 9x9: чёрная стена по столбцу B, белая по столбцу D, чёрный камень E5.
+// Столбец A достаётся чёрным, столбец C ничей, восток спорный из-за E5.
+const wall = '.X.O.....';
+const wallWithStone = '.X.OX....';
+const board = (): string[] => Array.from({ length: 9 }, (_, r) => (9 - r === 5 ? wallWithStone : wall));
+const empty9 = (): string[] => new Array<string>(9).fill('.........');
+
 describe('areaScore', () => {
-  // Чёрная стена B1..B5, белая стена D1..D5, чёрный камень E3.
-  const pos = positionFromRows(['.X.O.', '.X.O.', '.X.OX', '.X.O.', '.X.O.']);
+  const pos = positionFromRows(board());
 
   it('считает камни и окружённые пустые точки, столбец C ничей', () => {
     const s = areaScore(pos, [], 7.5);
-    expect(s.areaB).toBe(11); // 5 стена + 5 столбец A + E3
-    expect(s.areaW).toBe(5); // столбец E спорный из-за E3
+    expect(s.areaB).toBe(19); // 9 стена + 9 столбец A + E5
+    expect(s.areaW).toBe(9); // восток спорный из-за E5
   });
 
   it('мёртвый камень отдаёт свою точку сопернику', () => {
-    const s = areaScore(pos, ['E3'], 7.5);
-    expect(s.areaB).toBe(10);
-    expect(s.areaW).toBe(10);
-    expect(s.dead).toEqual(['E3']);
+    const s = areaScore(pos, ['E5'], 7.5);
+    expect(s.areaB).toBe(18);
+    expect(s.areaW).toBe(54);
+    expect(s.dead).toEqual(['E5']);
   });
 
   it('пустая доска — ничья по площади, белые выигрывают коми', () => {
-    const s = areaScore(positionFromRows(['...', '...', '...']), [], 7.5);
+    const s = areaScore(positionFromRows(empty9()), [], 7.5);
     expect(s).toMatchObject({ areaB: 0, areaW: 0 });
     expect(resultFromArea(s)).toEqual({ winner: 'W', margin: 7.5 });
   });
@@ -39,10 +45,26 @@ describe('resultFromArea', () => {
 
 describe('areaScore не делит массив dead с вызывающим', () => {
   it('изменение исходного массива после вызова не меняет результат', () => {
-    const pos = positionFromRows(['.X.O.', '.X.O.', '.X.OX', '.X.O.', '.X.O.']);
-    const dead = ['E3'];
+    const pos = positionFromRows(board());
+    const dead = ['E5'];
     const s = areaScore(pos, dead, 7.5);
     dead.push('B1');
-    expect(s.dead).toEqual(['E3']);
+    expect(s.dead).toEqual(['E5']);
+  });
+});
+
+// Позицию для счёта собирает вызывающий (game-server из ответа движка): доска
+// короче размера молча дала бы пустые точки и неверный счёт.
+describe('areaScore проверяет позицию', () => {
+  const pos = positionFromRows(empty9());
+
+  it('укороченная доска — ошибка про доску', () => {
+    const broken = { ...pos, board: pos.board.slice(0, 80) };
+    expect(() => areaScore(broken, [], 7.5)).toThrow(/board has 80 cells/);
+  });
+
+  it('чужой символ на доске — ошибка про символ', () => {
+    const broken = { ...pos, board: 'X' + pos.board.slice(1) };
+    expect(() => areaScore(broken, [], 7.5)).toThrow(/"X"/);
   });
 });

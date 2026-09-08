@@ -1,10 +1,12 @@
 // Счёт по площади (китайские правила): камни на доске + окружённые только своим цветом пустые точки.
-import { type Cell, type Color, type Position, cellAt, neighbors } from './board.ts';
+import { type Cell, type Color, type Position, assertPosition, cellAt, neighbors } from './board.ts';
 import { coordToIndex } from './coords.ts';
 
 export type AreaScore = { areaB: number; areaW: number; komi: number; dead: string[] };
 
 export function areaScore(pos: Position, dead: string[], komi: number): AreaScore {
+  // Позицию для счёта собирает вызывающий: сломанная доска молча даёт неверный счёт.
+  assertPosition(pos);
   const deadIndex = new Set(dead.map((c) => coordToIndex(c, pos.size)));
   // Мёртвый камень для счёта — пустая точка: она достаётся тому, кто её окружает.
   const cell = (i: number): Cell => (deadIndex.has(i) ? '.' : cellAt(pos, i));

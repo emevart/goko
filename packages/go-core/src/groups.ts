@@ -1,5 +1,5 @@
 // Группы с оценкой владения от движка: safe / unsettled / dead.
-import { type Color, type Position, allGroups } from './board.ts';
+import { type Color, type Position, allGroups, assertPosition } from './board.ts';
 import { indexToCoord } from './coords.ts';
 
 export type GroupStatus = 'safe' | 'unsettled' | 'dead';
@@ -15,6 +15,9 @@ export const DEAD_THRESHOLD = 0.6;
 export const UNSETTLED_THRESHOLD = 0.3;
 
 export function groupsWithOwnership(pos: Position, ownership: readonly number[]): GroupInfo[] {
+  // Позиция приходит вместе с массивом владения и собрана не нами: без проверки
+  // сломанная доска даёт индексы камней вне доски, мимо проверки массива ниже.
+  assertPosition(pos);
   // Массив владения приходит от движка: короткий или длинный массив — рассинхрон,
   // а не мелочь, молча он сделал бы живые группы мёртвыми.
   const total = pos.size * pos.size;

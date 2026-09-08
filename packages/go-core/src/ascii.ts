@@ -1,8 +1,11 @@
 // Текстовая доска для агентов из CLI и для инструмента get_position.
-import { type Position, cellAt } from './board.ts';
+import { type Position, assertPosition, cellAt } from './board.ts';
 import { COLUMN_LETTERS, coordToIndex, parseCoord } from './coords.ts';
 
 export function toAscii(pos: Position, opts: { lastMove?: string | null } = {}): string {
+  // Доску по этой картинке сверяют с настоящей: молча нарисованный пустой пункт
+  // там, где стоит камень, хуже ошибки.
+  assertPosition(pos);
   // Пас разбирается тем же parseCoord, что и везде: слово "пас" тоже пас.
   const last = opts.lastMove && parseCoord(opts.lastMove, pos.size) !== 'pass' ? coordToIndex(opts.lastMove, pos.size) : -1;
   const lines: string[] = [];

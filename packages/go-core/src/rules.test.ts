@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { allGroups, cellAt, emptyPosition, groupAt, neighbors } from './board.ts';
+import { type Position, allGroups, assertPosition, cellAt, emptyPosition, groupAt, neighbors } from './board.ts';
 import { coordToIndex } from './coords.ts';
 import { replay } from './replay.ts';
 import { IllegalMoveError, play } from './rules.ts';
@@ -205,5 +205,41 @@ describe('positionFromRows', () => {
     expect(() => positionFromRows(['.B..', '....', '....', '....'])).toThrow(/line 1/);
     expect(() => positionFromRows(['....', '....', '....', '..B.'])).toThrow(/line 4/);
     expect(() => positionFromRows(['...', '....', '....', '....'])).toThrow(/line 1/);
+  });
+});
+
+describe('assertPosition', () => {
+  // Позиция приходит извне структурным типом: ни длину доски, ни её алфавит,
+  // ни размер тип не гарантирует.
+  const valid = (): Position => emptyPosition(9);
+
+  it('валидная позиция проходит', () => {
+    expect(() => assertPosition(valid())).not.toThrow();
+    expect(() => assertPosition(positionFromRows(new Array<string>(9).fill('.........'))))
+      .not.toThrow();
+  });
+
+  it('укороченная доска — ошибка с обеими длинами', () => {
+    const pos = { ...valid(), board: '.'.repeat(80) };
+    expect(() => assertPosition(pos)).toThrow(/80/);
+    expect(() => assertPosition(pos)).toThrow(/81/);
+  });
+
+  it('удлинённая доска — ошибка с обеими длинами', () => {
+    const pos = { ...valid(), board: '.'.repeat(81) + 'W' };
+    expect(() => assertPosition(pos)).toThrow(/82/);
+    expect(() => assertPosition(pos)).toThrow(/81/);
+  });
+
+  it('чужой символ на доске — ошибка с символом и индексом', () => {
+    const pos = { ...valid(), board: '.'.repeat(7) + 'X' + '.'.repeat(73) };
+    expect(() => assertPosition(pos)).toThrow(/"X"/);
+    expect(() => assertPosition(pos)).toThrow(/index 7/);
+  });
+
+  it('неподдерживаемый размер — ошибка с набором размеров', () => {
+    const pos = { size: 5, board: '.'.repeat(25), ko: null, captures: { B: 0, W: 0 } };
+    expect(() => assertPosition(pos)).toThrow(/5/);
+    expect(() => assertPosition(pos)).toThrow(/9, 13, 19/);
   });
 });

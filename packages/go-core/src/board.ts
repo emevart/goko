@@ -83,3 +83,22 @@ export function allGroups(pos: Position): Group[] {
   }
   return out;
 }
+
+// Position — структурный тип, и три факта о нём он не гарантирует ничем: длину
+// доски, её алфавит и поддерживаемый размер. Позиция, пришедшая извне (движок,
+// провод, чужой код), с любым из них нарушенным расходится по коду молча:
+// allGroups обходит board.length, поэтому длинная доска даёт индексы вне доски,
+// а короткая — пустые пункты там, где на настоящей доске камни.
+export function assertPosition(pos: Position): void {
+  if (!SUPPORTED_BOARD_SIZES.includes(pos.size)) {
+    throw new Error(`board size ${pos.size} is not supported, expected one of ${SUPPORTED_BOARD_SIZES.join(', ')}`);
+  }
+  const expected = pos.size * pos.size;
+  if (pos.board.length !== expected) {
+    throw new Error(`board has ${pos.board.length} cells, expected ${expected} for the ${pos.size}x${pos.size} board`);
+  }
+  const bad = /[^.BW]/.exec(pos.board);
+  if (bad !== null) {
+    throw new Error(`board has unexpected char "${bad[0]}" at index ${bad.index}, expected one of ".BW"`);
+  }
+}
