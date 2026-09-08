@@ -51,7 +51,7 @@ export function toSgf(g: SgfGame): string {
 function parseSize(text: string): number {
   const size = Number(text);
   if (!SUPPORTED_BOARD_SIZES.includes(size)) {
-    throw new Error(`sgf has a bad SZ "${text}": board size must be one of 9, 13, 19`);
+    throw new Error(`sgf has a bad SZ "${text}": board size must be one of ${SUPPORTED_BOARD_SIZES.join(', ')}`);
   }
   return size;
 }
