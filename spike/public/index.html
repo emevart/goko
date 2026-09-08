@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Гоко: спайк</title>
+<style>
+body{font-family:system-ui;margin:0;padding:12px;background:#111;color:#eee}
+button{font-size:18px;padding:12px 16px;margin:4px}
+#log{white-space:pre-wrap;font-size:16px;line-height:1.4;max-height:60vh;overflow:auto;border:1px solid #444;padding:8px}
+input{font-size:16px;padding:8px;width:70%}
+</style></head><body>
+<button id="mic">Микрофон</button><span id="status">не подключено</span>
+<div id="log"></div>
+<input id="text" placeholder="текст в lk.chat"><button id="send">Отправить</button>
+<script src="https://cdn.jsdelivr.net/npm/livekit-client@2.22.3/dist/livekit-client.umd.min.js"></script>
+<script>
+const { Room, RoomEvent } = LivekitClient;
+const params = new URLSearchParams(location.hash.slice(1));
+const logEl = document.getElementById('log');
+const show = (who, text) => { logEl.textContent += `${who}: ${text}\n`; logEl.scrollTop = logEl.scrollHeight; };
+const room = new Room();
+room.on(RoomEvent.TrackSubscribed, (track) => { if (track.kind === 'audio') document.body.appendChild(track.attach()); });
+room.registerTextStreamHandler('lk.transcription', async (reader, participant) => {
+  let text = '';
+  for await (const chunk of reader) text += chunk;
+  const final = reader.info.attributes?.['lk.transcription_final'];
+  if (final === 'false') return;
+  show(participant?.identity ?? '?', text);
+});
+document.getElementById('mic').onclick = async () => {
+  await room.connect(params.get('url'), params.get('token'));
+  await room.startAudio();
+  await room.localParticipant.setMicrophoneEnabled(true);
+  document.getElementById('status').textContent = 'в комнате ' + room.name;
+};
+document.getElementById('send').onclick = async () => {
+  const t = document.getElementById('text').value;
+  await room.localParticipant.sendText(t, { topic: 'lk.chat' });
+  show('я (текст)', t);
+};
+</script></body></html>
