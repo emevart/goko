@@ -14,6 +14,13 @@ services:
       - /opt/goko/web:/srv/web:ro
       - caddy_data:/data
       - caddy_config:/config
+    # админ-API Caddy слушает 127.0.0.1:2019 и отвечает конфигом, только пока сервер жив
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:2019/config/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
 
   livekit:
     image: ${LIVEKIT_IMAGE:-livekit/livekit-server:v1.13.6}
@@ -24,6 +31,13 @@ services:
       LIVEKIT_KEYS: "${LIVEKIT_API_KEY}: ${LIVEKIT_API_SECRET}"
     volumes:
       - /opt/goko/livekit.yaml:/etc/livekit.yaml:ro
+    # GET / у livekit-server отдаёт 200 OK, когда сигналинг готов принимать соединения
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:7880/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
 
 volumes:
   caddy_data:

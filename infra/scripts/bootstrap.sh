@@ -15,13 +15,30 @@ ufw allow 80/tcp
 ufw allow 443/tcp
 ufw allow 7881/tcp
 ufw allow 3478/udp
+ufw allow 30000:40000/udp   # relay-аллокации TURN (turn.relay_range_start/end в livekit.yaml)
 ufw allow 50000:60000/udp
 ufw --force enable
 
 mkdir -p /opt/goko/web /opt/goko/src /opt/goko/data
 if [ ! -f /opt/goko/.env ]; then
-  cp /opt/goko/src/infra/.env.example /opt/goko/.env 2>/dev/null || echo "# заполни по infra/.env.example" > /opt/goko/.env
+  # заготовка с пустыми значениями: примерные домены из .env.example сюда не копируем,
+  # иначе файл выглядит заполненным и деплой уедет на чужой домен
+  cat > /opt/goko/.env <<'ENV'
+# Заготовка. Заполни значения, образец и комментарии — в infra/.env.example.
+WEB_HOST=
+LK_HOST=
+ACME_EMAIL=
+LIVEKIT_IMAGE=
+LIVEKIT_API_KEY=
+LIVEKIT_API_SECRET=
+LIVEKIT_URL=
+OPENAI_API_KEY=
+APP_KEY=
+ENGINE_KEY=
+API_UPSTREAM=127.0.0.1:8787
+AGENT_NAME=goko
+ENV
   chmod 600 /opt/goko/.env
-  echo "[!] /opt/goko/.env создан пустым: заполни значения и запусти deploy.sh"
+  echo "[!] /opt/goko/.env создан пустой заготовкой: заполни значения и запусти deploy.sh"
 fi
-echo "[OK] bootstrap: docker $(docker --version | cut -d' ' -f3), ufw включён, /opt/goko готов"
+echo "[OK] bootstrap: docker $(docker version --format '{{.Server.Version}}'), ufw включён, /opt/goko готов"
