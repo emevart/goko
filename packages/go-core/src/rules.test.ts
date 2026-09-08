@@ -169,3 +169,33 @@ describe('replay', () => {
     expect(() => replay(5, [{ color: 'B', coord: 'C3' }, { color: 'W', coord: 'C3' }])).toThrow(IllegalMoveError);
   });
 });
+
+describe('play не меняет входную позицию', () => {
+  it('обычный ход', () => {
+    const pos = positionFromRows(['.....', '.....', '..X..', '.....', '.....']);
+    const before = JSON.stringify(pos);
+    play(pos, 'W', 'D3');
+    expect(JSON.stringify(pos)).toBe(before);
+  });
+
+  it('ход со взятием: не меняются ни board, ни captures, ни ko', () => {
+    // Позиция ко: белые ставят C2, снимают B2 и открывают ко.
+    const pos = positionFromRows(['.....', '.....', '.OX..', 'OX.X.', '.OX..']);
+    const before = JSON.stringify(pos);
+    const { position } = play(pos, 'W', 'C2');
+    expect(position.captures).toEqual({ B: 0, W: 1 });
+    expect(position.ko).not.toBeNull();
+    expect(JSON.stringify(pos)).toBe(before);
+  });
+});
+
+describe('positionFromRows', () => {
+  it('бросает на символе вне .XO', () => {
+    expect(() => positionFromRows(['...', '.B.', '...'])).toThrow(/line 2/);
+    expect(() => positionFromRows(['...', '.B.', '...'])).toThrow(/B/);
+  });
+
+  it('бросает на строке неверной длины', () => {
+    expect(() => positionFromRows(['...', '..', '...'])).toThrow(/line 2/);
+  });
+});
