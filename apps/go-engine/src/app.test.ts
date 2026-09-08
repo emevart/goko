@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { coordToIndex } from '@goko/go-core';
 import { SCORE_VISITS, createEngineApp } from './app.ts';
 import { KataGoError, type KataQuery, type KataResponse } from './katago.ts';
@@ -305,12 +305,13 @@ describe('createEngineApp', () => {
     // Чёрные строки 1..7 (стена на 7), белые 8..13; плюс чёрный камень M12 в белой зоне.
     const moves: [string, string][] = [...walls(7, 8), ['B', 'M12'], ['W', 'pass']];
     const katago = fakeKatago(() => ({
-      rootInfo: { winrate: 0.7, scoreLead: 5.5, visits: 400 },
+      // scoreLead движка намеренно не равен margin: иначе перепутанные поля не видны.
+      rootInfo: { winrate: 0.7, scoreLead: 4.25, visits: 400 },
       ownership: kataOwnership(7),
     }));
     const app = createEngineApp({ katago, engineKey: KEY, models: { main: 'm', human: 'h' } });
     const body = await jsonAs<ScoreShape>(await post(app, '/v1/score', { ...base, moves }));
-    expect(body).toMatchObject({ dead: ['M12'], areaB: 91, areaW: 78, scoreLeadB: 5.5, winner: 'B', margin: 5.5 });
+    expect(body).toMatchObject({ dead: ['M12'], areaB: 91, areaW: 78, scoreLeadB: 4.25, winner: 'B', margin: 5.5 });
     expect(body.ownership[coordToIndex('A1', 13)]).toBe(1);
     expect(body.ownership[coordToIndex('A13', 13)]).toBe(-1);
     expect(katago.calls[0]).toMatchObject({ maxVisits: SCORE_VISITS, includeOwnership: true });
@@ -342,6 +343,56 @@ describe('createEngineApp', () => {
     const katago = fakeKatago(() => ({ rootInfo: { winrate: 0.5, scoreLead: 0, visits: 400 }, ownership }));
     const app = createEngineApp({ katago, engineKey: KEY, models: { main: 'm', human: 'h' } });
     expect((await post(app, '/v1/score', { ...base, moves: [] })).status).toBe(500);
+  });
+
+  it('genmove: профиль берётся из запрошенного разряда', async () => {
+    const katago = fakeKatago(() => ({
+      rootInfo: { winrate: 0.5, scoreLead: 0 },
+      moveInfos: [{ move: 'K10', order: 0, winrate: 0.5, scoreLead: 0, visits: 1 }],
+    }));
+    const app = createEngineApp({ katago, engineKey: KEY, models: { main: 'm', human: 'h' } });
+    await post(app, '/v1/genmove', { ...base, moves: [], rank: '3d' });
+    expect(katago.calls[0]).toMatchObject({ overrideSettings: { humanSLProfile: 'rank_3d' } });
+  });
+
+  it('genmove: ms — настоящая длительность запроса', async () => {
+    vi.useFakeTimers({ toFake: ['performance'] });
+    try {
+      const app = createEngineApp({
+        katago: fakeKatago(() => {
+          vi.advanceTimersByTime(1234);
+          return { rootInfo: { winrate: 0.5, scoreLead: 0 }, moveInfos: [] };
+        }),
+        engineKey: KEY,
+        models: { main: 'm', human: 'h' },
+      });
+      const body = await jsonAs<GenmoveShape>(await post(app, '/v1/genmove', { ...base, moves: [], rank: '5k' }));
+      expect(body.ms).toBe(1234);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('analyze: visits без rootInfo.visits — ноль', async () => {
+    const app = createEngineApp({
+      katago: fakeKatago(() => ({ rootInfo: { winrate: 0.5, scoreLead: 0 }, moveInfos: [] })),
+      engineKey: KEY,
+      models: { main: 'm', human: 'h' },
+    });
+    const body = await jsonAs<AnalyzeShape>(await post(app, '/v1/analyze', { ...base, moves: [] }));
+    expect(body.visits).toBe(0);
+  });
+
+  it('коми из запроса доходит до движка и до счёта', async () => {
+    const katago = fakeKatago(() => ({
+      rootInfo: { winrate: 0.5, scoreLead: 0, visits: 400 },
+      ownership: kataOwnership(7),
+    }));
+    const app = createEngineApp({ katago, engineKey: KEY, models: { main: 'm', human: 'h' } });
+    const body = await jsonAs<ScoreShape>(await post(app, '/v1/score', { boardSize: 13, rules: 'chinese', komi: 0.5, moves: walls(7, 8) }));
+    expect(katago.calls[0]).toMatchObject({ komi: 0.5 });
+    // 91 - 78 - 0.5 = 12.5.
+    expect(body).toMatchObject({ winner: 'B', margin: 12.5 });
   });
 
   it('тело не по схеме — 400 bad_request', async () => {
