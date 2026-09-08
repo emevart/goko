@@ -14,4 +14,5 @@ apps/go-engine/models/*
 apps/go-engine/bin/
 .superpowers/
 spike/log.jsonl
+spike/last-url.txt
 .agent-artifacts/
