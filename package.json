@@ -1,0 +1,18 @@
+{
+  "name": "goko",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22.18" },
+  "workspaces": ["packages/*", "apps/*"],
+  "scripts": {
+    "doctor": "node scripts/doctor.mjs",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "check": "npm run typecheck && npm test"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.0",
+    "typescript": "^5.9.3",
+    "vitest": "^5.0.0"
+  }
+}
