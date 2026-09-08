@@ -1911,7 +1911,7 @@ import {
 import { parseSseStream } from './sse.ts';
 
 export type ClientOptions = {
-  baseUrl: string; // https://go.<домен> или http://127.0.0.1:8787
+  baseUrl: string; // https://<WEB_HOST> или http://127.0.0.1:8787
   appKey: string;
   fetch?: typeof globalThis.fetch;
 };

@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** За один день получить ответы на четыре вопроса спеки (голосовая петля с телефона в РФ без VPN; скорость KataGo с человеческой сетью на CX22 и на ПК; распознавание координат по-русски; текстовый канал к агенту) и оставить в репозитории каркас монорепы и `infra/` (Caddy + LiveKit на VPS). Код агента-спайка удаляется в последней задаче.
+**Goal:** За один день получить ответы на четыре вопроса спеки (голосовая петля с телефона в РФ без VPN; скорость KataGo с человеческой сетью на VPS (cx23) и на ПК; распознавание координат по-русски; текстовый канал к агенту) и оставить в репозитории каркас монорепы и `infra/` (Caddy + LiveKit на VPS). Код агента-спайка удаляется в последней задаче.
 
-**Architecture:** Один VPS (Hetzner CX22) с `docker compose`: `caddy` (host network, TLS сам) и `livekit` (host network). Всё остальное на стадии 0 крутится на ПК founder'а: воркер-спайк на `@livekit/agents` с `gpt-realtime` ходит в LiveKit на VPS и в OpenAI через VPN на ПК; страница-спайк отдаётся Caddy как статика. KataGo замеряется скриптом отдельно на ПК (OpenCL) и на VPS (образ с Eigen).
+**Architecture:** Один VPS (Hetzner cx23: 2 vCPU, 4 ГБ) с `docker compose`: `caddy` (host network, TLS сам) и `livekit` (host network). Всё остальное на стадии 0 крутится на ПК founder'а: воркер-спайк на `@livekit/agents` с `gpt-realtime` ходит в LiveKit на VPS и в OpenAI через VPN на ПК; страница-спайк отдаётся Caddy как статика. KataGo замеряется скриптом отдельно на ПК (OpenCL) и на VPS (образ с Eigen).
 
 **Tech Stack:** Node 22.22 (нативный запуск `.ts` без сборки, `erasableSyntaxOnly`), npm workspaces, TypeScript 5.9, vitest 5, `@livekit/agents` 1.8 + `@livekit/agents-plugin-openai` 1.8, `livekit-server-sdk` 2.18, `livekit-client` 2.22, LiveKit server `v1.9`+ (образ `livekit/livekit-server:latest` на момент выполнения зафиксировать тегом), Caddy 2, KataGo v1.18.1 (последний релиз с eigen/opencl-сборками), человеческая сеть `b18c384nbt-humanv0.bin.gz`.
 
@@ -33,7 +33,7 @@ vitest.config.ts             один конфиг на все workspace'ы
 .editorconfig, .gitattributes (eol=lf), .nvmrc
 scripts/doctor.mjs           проверка окружения, коды возврата
 infra/docker-compose.yml     caddy + livekit (стадия 0), сервисы приложений добавит стадия 1
-infra/Caddyfile              go.<домен>: статика + /api/* -> API_UPSTREAM; lk.<домен> -> 127.0.0.1:7880
+infra/Caddyfile              WEB_HOST: статика + /api/* -> API_UPSTREAM; LK_HOST -> 127.0.0.1:7880
 infra/livekit.yaml           порты, TURN/UDP, auto_create=false; ключи — из env LIVEKIT_KEYS
 infra/.env.example           имена всех переменных
 infra/scripts/bootstrap.sh   один раз на VPS: docker, ufw, /opt/goko
@@ -294,23 +294,26 @@ git commit -m "scaffold: каркас монорепы, vitest, doctor"
 - Create: `infra/docker-compose.yml`, `infra/Caddyfile`, `infra/livekit.yaml`, `infra/.env.example`, `infra/scripts/bootstrap.sh`, `infra/scripts/deploy.sh`, `infra/README.md`
 
 **Interfaces:**
-- Produces: переменные `.env`: `DOMAIN`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`, `OPENAI_API_KEY`, `APP_KEY`, `ENGINE_KEY`, `API_UPSTREAM` (по умолчанию `127.0.0.1:8787`), `LIVEKIT_IMAGE`; адреса `https://go.$DOMAIN` (статика из `/opt/goko/web`, `/api/*` → `API_UPSTREAM`) и `wss://lk.$DOMAIN` (LiveKit). Скрипт `deploy.sh [--web-dir DIR]`.
+- Produces: переменные `.env`: `WEB_HOST`, `LK_HOST`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`, `OPENAI_API_KEY`, `APP_KEY`, `ENGINE_KEY`, `API_UPSTREAM` (по умолчанию `127.0.0.1:8787`), `LIVEKIT_IMAGE`; адреса `https://$WEB_HOST` (статика из `/opt/goko/web`, `/api/*` → `API_UPSTREAM`) и `wss://$LK_HOST` (LiveKit). Скрипт `deploy.sh [--web-dir DIR]`.
 
 - [ ] **Step 1: `infra/.env.example`**
 
 ```
 # Скопировать в /opt/goko/.env на VPS и в .env в корне репозитория на ПК. Значения не коммитить.
-DOMAIN=example.org                 # записи go.DOMAIN и lk.DOMAIN -> адрес VPS
+WEB_HOST=goko.example.org          # страница и /api; A-запись -> адрес VPS
+LK_HOST=goko-lk.example.org        # сигналинг LiveKit и TURN; A-запись -> адрес VPS
+ACME_EMAIL=                        # почта для Let's Encrypt; по умолчанию admin@WEB_HOST
 LIVEKIT_IMAGE=livekit/livekit-server:v1.9.11   # зафиксировать актуальный тег при выполнении
 LIVEKIT_API_KEY=                   # openssl rand -hex 8
 LIVEKIT_API_SECRET=                # openssl rand -hex 32
-LIVEKIT_URL=wss://lk.example.org   # для воркера и game-server на ПК
+LIVEKIT_URL=wss://goko-lk.example.org   # = wss://LK_HOST; для воркера и game-server на ПК
 OPENAI_API_KEY=                    # только voice-agent
 APP_KEY=                           # заголовок X-App-Key для /api/*; openssl rand -hex 16
 ENGINE_KEY=                        # заголовок X-Engine-Key между game-server и go-engine
 API_UPSTREAM=127.0.0.1:8787        # prod: контейнер game-server; dev: <tailscale-ip-ПК>:8787
 AGENT_NAME=goko                    # на ПК в dev-режиме: goko-dev
 KATAGO_BIN=                        # только на ПК: путь к katago.exe (OpenCL-сборка)
+HETZNER_API=                       # только на ПК, не обязателен: токен API Hetzner (проект goko) для сервера и рескейла агентом
 ```
 
 - [ ] **Step 2: `infra/livekit.yaml`**
@@ -331,7 +334,7 @@ room:
   max_participants: 4
 turn:
   enabled: true
-  domain: __TURN_DOMAIN__  # deploy.sh подставляет lk.$DOMAIN; TURN только UDP в v1
+  domain: __TURN_DOMAIN__  # deploy.sh подставляет $LK_HOST; TURN только UDP в v1
   udp_port: 3478
 logging:
   level: info
@@ -345,7 +348,7 @@ logging:
   email {$ACME_EMAIL}
 }
 
-go.{$DOMAIN} {
+{$WEB_HOST} {
   encode zstd gzip
   handle /api/* {
     reverse_proxy {$API_UPSTREAM} {
@@ -359,7 +362,7 @@ go.{$DOMAIN} {
   }
 }
 
-lk.{$DOMAIN} {
+{$LK_HOST} {
   reverse_proxy 127.0.0.1:7880
 }
 ```
@@ -376,8 +379,9 @@ services:
     network_mode: host
     restart: unless-stopped
     environment:
-      DOMAIN: ${DOMAIN}
-      ACME_EMAIL: ${ACME_EMAIL:-admin@${DOMAIN}}
+      WEB_HOST: ${WEB_HOST}
+      LK_HOST: ${LK_HOST}
+      ACME_EMAIL: ${ACME_EMAIL:-admin@${WEB_HOST}}
       API_UPSTREAM: ${API_UPSTREAM:-127.0.0.1:8787}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
@@ -460,21 +464,21 @@ fi
 ssh "$HOST" bash -s <<'REMOTE'
 set -euo pipefail
 set -a; . /opt/goko/.env; set +a
-sed "s/__TURN_DOMAIN__/lk.${DOMAIN}/" /opt/goko/src/infra/livekit.yaml > /opt/goko/livekit.yaml
+sed "s/__TURN_DOMAIN__/${LK_HOST}/" /opt/goko/src/infra/livekit.yaml > /opt/goko/livekit.yaml
 cd /opt/goko/src/infra
 docker compose --env-file /opt/goko/.env up -d --build --remove-orphans
 docker compose --env-file /opt/goko/.env ps
 REMOTE
-echo "[OK] deploy: https://go.<DOMAIN> и wss://lk.<DOMAIN>"
+echo "[OK] deploy: страница https://<WEB_HOST>, LiveKit wss://<LK_HOST> (значения в /opt/goko/.env)"
 ```
 
 - [ ] **Step 7: `infra/README.md`**
 
-Содержание: (1) что делает founder: создать CX22 Ubuntu 24.04 в Хельсинки, добавить SSH-ключ, алиас `goko` в `~/.ssh/config`, DNS `go.` и `lk.` на адрес VPS; (2) `scp infra/scripts/bootstrap.sh goko:/root/ && ssh goko bash /root/bootstrap.sh`; (3) заполнить `/opt/goko/.env` (генерация ключей: `openssl rand -hex 8`, `openssl rand -hex 32`, `openssl rand -hex 16`); (4) `infra/scripts/deploy.sh`; (5) проверка: `curl -s https://lk.<домен>/` отдаёт `OK`, `curl -sI https://go.<домен>/` отдаёт 200; (6) порты и почему; (7) откат: `docker compose down`; (8) рескейл CX22 → CX32 в панели Hetzner без переезда (только CPU/RAM). Без адресов и личных данных.
+Содержание: (1) что делает founder: создать сервер Hetzner (cx23: 2 vCPU, 4 ГБ; Ubuntu 24.04; Хельсинки) в отдельном проекте, добавить SSH-ключ, алиас `goko` в `~/.ssh/config`, A-записи `WEB_HOST` и `LK_HOST` на адрес VPS; (2) `scp infra/scripts/bootstrap.sh goko:/root/ && ssh goko bash /root/bootstrap.sh`; (3) заполнить `/opt/goko/.env` (генерация ключей: `openssl rand -hex 8`, `openssl rand -hex 32`, `openssl rand -hex 16`); (4) `infra/scripts/deploy.sh`; (5) проверка: `curl -s https://<LK_HOST>/` отдаёт `OK`, `curl -sI https://<WEB_HOST>/` отдаёт 200; (6) порты и почему; (7) откат: `docker compose down`; (8) рескейл cx23 → cx33 в панели Hetzner без переезда (только CPU/RAM). Без адресов и личных данных.
 
 - [ ] **Step 8: Проверка compose локально**
 
-Run (на ПК, где есть Docker): `cd infra && DOMAIN=example.org LIVEKIT_API_KEY=k LIVEKIT_API_SECRET=s docker compose config >/dev/null && echo "[OK] compose"`
+Run (на ПК, где есть Docker): `cd infra && WEB_HOST=goko.example.org LK_HOST=goko-lk.example.org LIVEKIT_API_KEY=k LIVEKIT_API_SECRET=s docker compose config >/dev/null && echo "[OK] compose"`
 Expected: `[OK] compose`. `bash -n infra/scripts/bootstrap.sh infra/scripts/deploy.sh` без ошибок.
 
 - [ ] **Step 9: Commit**
@@ -484,7 +488,7 @@ git add infra
 git commit -m "infra: compose с caddy и livekit, скрипты bootstrap и deploy"
 ```
 
-- [ ] **Step 10: Передать founder'у чек-лист** (VPS, DNS, `.env`, bootstrap, deploy) и дождаться: `curl -s https://lk.<домен>/` → `OK`. Пока founder делает это, продолжать Task 3–4 (они не зависят от VPS).
+- [ ] **Step 10: Передать founder'у чек-лист** (VPS, DNS, `.env`, bootstrap, deploy) и дождаться: `curl -s https://<LK_HOST>/` → `OK`. Пока founder делает это, продолжать Task 3–4 (они не зависят от VPS).
 
 ---
 
@@ -556,7 +560,7 @@ COPY config/analysis.cfg /opt/katago/analysis.cfg
 CMD ["/opt/katago/katago", "version"]
 ```
 
-Примечание для CX22 без AVX2 (проверить `grep -c avx2 /proc/cpuinfo` на VPS): собирать с `--build-arg KATAGO_ASSET=katago-v1.18.1-eigen-linux-x64.zip`.
+Примечание для VPS без AVX2 (проверить `grep -c avx2 /proc/cpuinfo` на VPS): собирать с `--build-arg KATAGO_ASSET=katago-v1.18.1-eigen-linux-x64.zip`.
 
 - [ ] **Step 4: `spike/katago-bench.mjs`**
 
@@ -637,7 +641,7 @@ ssh goko 'docker run --rm -v /opt/goko/src/spike:/spike -v /opt/goko/src/apps/go
 
 Если `nodejs` в образе нет (ubuntu 24.04 даёт Node 18 — для скрипта достаточно), альтернатива: `docker run ... --entrypoint /opt/katago/katago goko-engine-base analysis -config ... ` и вручную вставить одну строку запроса из скрипта. Записать числа для `b10c128`; повторить сборку с `--build-arg MAIN_NET_URL=<b15c192>` и записать.
 
-Expected (цели раздела 8): genmove < 2 с, analyze < 4 с, score < 10 с. Не уложились с b10 → решение о рескейле до CX32 (перезамерить).
+Expected (цели раздела 8): genmove < 2 с, analyze < 4 с, score < 10 с. Не уложились с b10 → решение о рескейле до cx33 (перезамерить).
 
 - [ ] **Step 7: Commit**
 
@@ -768,9 +772,9 @@ at.roomConfig = new RoomConfiguration({
 });
 const token = await at.toJwt();
 const url = process.env.LIVEKIT_URL;
-const domain = process.env.DOMAIN;
+const webHost = process.env.WEB_HOST;
 console.log(`room: ${room}`);
-console.log(`https://go.${domain}/#url=${encodeURIComponent(url)}&token=${token}`);
+console.log(`https://${webHost}/#url=${encodeURIComponent(url)}&token=${token}`);
 ```
 
 - [ ] **Step 4: `spike/public/index.html`** (одна страница без сборки; livekit-client с CDN)
@@ -856,7 +860,7 @@ document.getElementById('send').onclick = async () => {
 - [ ] **Step 6: Typecheck и запуск воркера**
 
 Run: `npm run typecheck && npm run agent -w spike`
-Expected: воркер регистрируется (`registered worker` в логе) с `agentName goko`. Требует `.env` в корне с `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`, `OPENAI_API_KEY`, `DOMAIN`.
+Expected: воркер регистрируется (`registered worker` в логе) с `agentName goko`. Требует `.env` в корне с `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`, `OPENAI_API_KEY`, `WEB_HOST`.
 
 - [ ] **Step 7: Деплой страницы и проверка founder'ом**
 
@@ -962,7 +966,7 @@ const session = mode === 'pipeline'
 
 **Files:**
 - Create: `docs/research/stage0-results.md`
-- Modify: `docs/NOW.md`, спека (раздел 8 — выбранная сеть; раздел 11 — CX22/CX32; раздел 9 — realtime/pipeline)
+- Modify: `docs/NOW.md`, спека (раздел 8 — выбранная сеть; раздел 11 — cx23/cx33; раздел 9 — realtime/pipeline)
 
 - [ ] **Step 1: `docs/research/stage0-results.md`** по шаблону:
 
@@ -985,15 +989,15 @@ updated: <дата>
 ## KataGo 13x13
 | Где | Сеть | humanPolicy, мс | genmove 10, мс | analyze 50, мс | score 400, мс |
 | ПК OpenCL | b10 | | | | |
-| VPS CX22 | b10 | | | | |
-| VPS CX22 | b15 | | | | |
+| VPS cx23 | b10 | | | | |
+| VPS cx23 | b15 | | | | |
 
 ## Текстовый канал: работает / что понадобилось
 
 ## Стоимость: $ за минуту realtime; pipeline (если мерили)
 
 ## Решения
-- VPS: остаёмся на CX22 / рескейл до CX32
+- VPS: остаёмся на cx23 / рескейл до cx33
 - Основная сеть: b10c128 / b15c192
 - Речь: realtime / pipeline; turnDetection: server_vad / semantic_vad
 - Мобильные сети: нужна ли развязка TURN/TLS 443 уже на стадии 1

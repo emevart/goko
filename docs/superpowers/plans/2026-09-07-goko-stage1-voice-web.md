@@ -3362,7 +3362,7 @@ CMD ["node", "apps/go-engine/src/main.ts"]
       - game-server
 ```
 
-Почему так: `caddy` и `livekit` в `network_mode: host`, поэтому `API_UPSTREAM=127.0.0.1:8787` из плана стадии 0 попадает в опубликованный порт `game-server`; `go-engine` наружу не публикуется, `game-server` ходит к нему по имени сервиса; `voice-agent` ходит в LiveKit по публичному `LIVEKIT_URL` (`wss://lk.<домен>`, тот же адрес, что у телефона) и в `game-server` по имени сервиса (`API_BASE` задан в образе). Секретов в файле нет — только подстановки из `/opt/goko/.env`.
+Почему так: `caddy` и `livekit` в `network_mode: host`, поэтому `API_UPSTREAM=127.0.0.1:8787` из плана стадии 0 попадает в опубликованный порт `game-server`; `go-engine` наружу не публикуется, `game-server` ходит к нему по имени сервиса; `voice-agent` ходит в LiveKit по публичному `LIVEKIT_URL` (`wss://<LK_HOST>`, тот же адрес, что у телефона) и в `game-server` по имени сервиса (`API_BASE` задан в образе). Секретов в файле нет — только подстановки из `/opt/goko/.env`.
 
 - [ ] **Step 6: `infra/.env.example`** (в конец)
 
@@ -3407,7 +3407,7 @@ rsync -az --delete \
 
 - [ ] **Step 8: Проверка на ПК**
 
-Run: `cd infra && DOMAIN=example.org LIVEKIT_API_KEY=k LIVEKIT_API_SECRET=s APP_KEY=a ENGINE_KEY=e OPENAI_API_KEY=o LIVEKIT_URL=wss://lk.example.org docker compose config >/dev/null && echo "[OK] compose"`
+Run: `cd infra && WEB_HOST=goko.example.org LK_HOST=goko-lk.example.org LIVEKIT_API_KEY=k LIVEKIT_API_SECRET=s APP_KEY=a ENGINE_KEY=e OPENAI_API_KEY=o LIVEKIT_URL=wss://goko-lk.example.org docker compose config >/dev/null && echo "[OK] compose"`
 Expected: `[OK] compose` (значения подстановок в вывод не печатать: `config` их раскрывает, поэтому `>/dev/null`).
 
 Run (если на ПК есть Docker; go-engine собирать не нужно — образ тянет KataGo и сети): `docker build -f apps/game-server/Dockerfile -t goko-game-server . && docker build -f apps/voice-agent/Dockerfile -t goko-voice-agent .`
@@ -3455,7 +3455,7 @@ updated: <дата выполнения>
 
 | Сервис | Что | Порт |
 |---|---|---|
-| `caddy` | TLS, статика `go.<домен>` из `/opt/goko/web`, `/api/*` → `API_UPSTREAM`, `lk.<домен>` → LiveKit | 80, 443 (host) |
+| `caddy` | TLS, статика `<WEB_HOST>` из `/opt/goko/web`, `/api/*` → `API_UPSTREAM`, `<LK_HOST>` → LiveKit | 80, 443 (host) |
 | `livekit` | комнаты, TURN | 7880, 7881/tcp, 3478/udp, 50000–60000/udp (host) |
 | `game-server` | сессии, партии, SSE, токены | `127.0.0.1:8787` |
 | `go-engine` | KataGo: genmove / analyze / score | внутренняя сеть, `go-engine:8788` |
@@ -3489,8 +3489,8 @@ dc logs -f --tail=100 livekit
 ```bash
 curl -s http://127.0.0.1:8787/health                 # {"ok":true,"games":N,"sessions":M}
 dc exec go-engine node -e "fetch('http://127.0.0.1:8788/health').then(r=>r.text()).then(console.log)"
-curl -sI https://go.<домен>/ | head -1               # HTTP/2 200
-curl -s https://lk.<домен>/                          # OK
+curl -sI https://<WEB_HOST>/ | head -1               # HTTP/2 200
+curl -s https://<LK_HOST>/                          # OK
 dc logs --tail=20 voice-agent | grep -c "registered worker"   # 1 — воркер зарегистрирован
 ```
 
@@ -3543,7 +3543,7 @@ dc stats --no-stream                    # CPU/RAM; go-engine ограничен 
 ```
 
 Если `analyze` регулярно упирается в таймауты (`engine_busy` в логах
-game-server), поднять `ENGINE_CPUS` или сделать рескейл CX22 → CX32 в панели
+game-server), поднять `ENGINE_CPUS` или сделать рескейл cx23 → cx33 в панели
 Hetzner (только CPU/RAM, без переезда), затем `dc up -d go-engine`.
 
 ## Секреты
