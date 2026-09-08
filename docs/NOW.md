@@ -29,7 +29,8 @@ updated: 2026-09-08
   Ubuntu 24.04, отдельный проект Hetzner `goko`; SSH-алиас `goko` на ПК
   founder'а. Токен API Hetzner — в `.env` на ПК как `HETZNER_API`, не в git.
 - Домены: `goko.sdamex.com` (страница и `/api`) и `goko-lk.sdamex.com`
-  (LiveKit), A-записи в Yandex Cloud DNS зоны `sdamex.com`, TTL 300.
+  (LiveKit), A-записи в Yandex Cloud DNS зоны `sdamex.com`, TTL 300;
+  правятся с ПК founder'а через `yc dns zone list-records / add-records`.
   В `.env` это `WEB_HOST` и `LK_HOST`.
 - Репозиторий `github.com/emevart/goko`, публичный, лицензия MIT.
 - Ключ OpenAI — в `.env` на ПК. Bootstrap VPS (Docker, ufw, `/opt/goko`) и

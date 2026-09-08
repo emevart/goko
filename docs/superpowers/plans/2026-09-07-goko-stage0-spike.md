@@ -290,6 +290,8 @@ git commit -m "scaffold: каркас монорепы, vitest, doctor"
 
 ### Task 2: `infra/` — compose, Caddy, LiveKit, скрипты VPS
 
+> Состояние на 2026-09-08 (см. `docs/NOW.md`): сервер `goko` (cx23, Хельсинки, Ubuntu 24.04, AVX2) уже создан, SSH-алиас `goko` на ПК есть, A-записи `WEB_HOST` и `LK_HOST` уже указывают на него. Создавать сервер и DNS не нужно. Не сделано: bootstrap (Docker, ufw, `/opt/goko`), `/opt/goko/.env`, деплой — всё это по явной просьбе founder'а.
+
 **Files:**
 - Create: `infra/docker-compose.yml`, `infra/Caddyfile`, `infra/livekit.yaml`, `infra/.env.example`, `infra/scripts/bootstrap.sh`, `infra/scripts/deploy.sh`, `infra/README.md`
 
