@@ -1,4 +1,5 @@
 // Минимальный SGF: одна ветка, заголовок и ходы. Координаты SGF: буквы a.., строки сверху.
+import { SUPPORTED_BOARD_SIZES } from './board.ts';
 import { formatCoord, parseCoord } from './coords.ts';
 import type { MoveInput } from './replay.ts';
 
@@ -44,6 +45,27 @@ export function toSgf(g: SgfGame): string {
   return `(;${head.join('')}${moves})`;
 }
 
+// Размер приходит из чужого файла, и Number() прощает почти всё: 'abc' и '13:9'
+// (прямоугольная доска, её проект не играет) дают NaN, пустое значение — 0.
+// Такой размер молча портит всю партию, поэтому разбираем строго.
+function parseSize(text: string): number {
+  const size = Number(text);
+  if (!SUPPORTED_BOARD_SIZES.includes(size)) {
+    throw new Error(`sgf has a bad SZ "${text}": board size must be one of 9, 13, 19`);
+  }
+  return size;
+}
+
+// Коми тоже из файла: пустое значение Number() читает как 0, а нечисловое — как
+// NaN, и оба тихо уезжают в счёт. Отсутствующее KM — другое дело, там наши 7.5.
+function parseKomi(text: string): number {
+  const komi = Number(text);
+  if (text.trim() === '' || !Number.isFinite(komi)) {
+    throw new Error(`sgf has a bad KM "${text}": komi must be a number`);
+  }
+  return komi;
+}
+
 // Круговой прогон замыкается по позиции и ходам, а не по объекту целиком: toSgf
 // всегда пишет RU[Chinese], а fromSgf без RU оставляет поле пустым.
 export function fromSgf(text: string): SgfGame {
@@ -59,11 +81,11 @@ export function fromSgf(text: string): SgfGame {
     const v = values[0] ?? '';
     switch (id) {
       case 'SZ':
-        game.size = Number(v);
+        game.size = parseSize(v);
         hasSize = true;
         break;
       case 'KM':
-        game.komi = Number(v);
+        game.komi = parseKomi(v);
         break;
       case 'RU':
         game.rules = v;

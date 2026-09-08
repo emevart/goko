@@ -74,3 +74,45 @@ describe('заголовок SGF', () => {
     expect(fromSgf('(;FF[4]SZ[13];B[dj])')).toEqual({ size: 13, komi: 7.5, moves: [{ color: 'B', coord: 'D4' }] });
   });
 });
+
+describe('SZ и KM: значение проверяется, а не только наличие', () => {
+  it('поддерживаемые размеры разбираются', () => {
+    for (const size of [9, 13, 19]) {
+      expect(fromSgf(`(;FF[4]SZ[${size}]KM[7.5])`).size).toBe(size);
+    }
+  });
+
+  it('прямоугольная доска SZ[w:h] отвергается, а не читается как NaN', () => {
+    expect(() => fromSgf('(;FF[4]SZ[13:9]KM[7.5];B[dd])')).toThrow(/SZ/);
+    expect(() => fromSgf('(;FF[4]SZ[13:9]KM[7.5];B[dd])')).toThrow(/13:9/);
+  });
+
+  it('нечисловой SZ отвергается', () => {
+    expect(() => fromSgf('(;FF[4]SZ[abc];B[dd])')).toThrow(/SZ/);
+  });
+
+  it('пустой SZ отвергается', () => {
+    expect(() => fromSgf('(;FF[4]SZ[]KM[7.5])')).toThrow(/SZ/);
+  });
+
+  it('SZ[0] отвергается', () => {
+    expect(() => fromSgf('(;FF[4]SZ[0]KM[7.5])')).toThrow(/SZ/);
+  });
+
+  it('неподдерживаемый размер SZ[7] отвергается', () => {
+    expect(() => fromSgf('(;FF[4]SZ[7]KM[7.5])')).toThrow(/9, 13, 19/);
+  });
+
+  it('дробный SZ отвергается', () => {
+    expect(() => fromSgf('(;FF[4]SZ[13.5]KM[7.5])')).toThrow(/SZ/);
+  });
+
+  it('нечисловой KM отвергается, а не подставляется молча', () => {
+    expect(() => fromSgf('(;FF[4]SZ[13]KM[abc])')).toThrow(/KM/);
+    expect(() => fromSgf('(;FF[4]SZ[13]KM[])')).toThrow(/KM/);
+  });
+
+  it('коми с минусом и дробью читается', () => {
+    expect(fromSgf('(;FF[4]SZ[13]KM[-0.5])').komi).toBe(-0.5);
+  });
+});

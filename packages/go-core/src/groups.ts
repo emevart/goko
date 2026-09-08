@@ -21,10 +21,23 @@ export function groupsWithOwnership(pos: Position, ownership: readonly number[])
   if (ownership.length !== total) {
     throw new Error(`ownership has ${ownership.length} values, expected ${total} for the ${pos.size}x${pos.size} board`);
   }
+  // Значения тоже приходят от движка, и массив мог приехать разобранным JSON'ом:
+  // null или дырка раньше молча становились нулём, то есть живая группа
+  // объявлялась мёртвой при подсчёте. Каждое значение обязано быть конечным числом.
+  const valueAt = (i: number): number => {
+    const value = ownership[i];
+    if (typeof value !== 'number' || !Number.isFinite(value)) {
+      throw new Error(`ownership[${i}] is ${String(value)} (${typeof value}), expected a finite number`);
+    }
+    return value;
+  };
+  // Проверяем весь массив, а не только пункты с камнями: мусор на пустом пункте —
+  // такой же сломанный ответ движка.
+  for (let i = 0; i < total; i++) valueAt(i);
   return allGroups(pos).map((g) => {
     // Индексация здесь уже наша: снизу вверх. KataGo отдаёт владение сверху вниз,
     // разворот делается на границе с движком (go-engine), сюда массив приходит развёрнутым.
-    const avg = g.stones.reduce((sum, i) => sum + (ownership[i] ?? 0), 0) / g.stones.length;
+    const avg = g.stones.reduce((sum, i) => sum + valueAt(i), 0) / g.stones.length;
     const own = g.color === 'B' ? avg : -avg; // владение в пользу своего цвета
     const status: GroupStatus = own < -DEAD_THRESHOLD ? 'dead' : Math.abs(own) < UNSETTLED_THRESHOLD ? 'unsettled' : 'safe';
     return {

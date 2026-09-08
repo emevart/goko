@@ -12,6 +12,9 @@ export type Position = {
 
 export type Group = { color: Color; stones: number[]; liberties: number[] };
 
+// Проект играет только на этих размерах: то же множество, что в протоколе.
+export const SUPPORTED_BOARD_SIZES: readonly number[] = [9, 13, 19];
+
 export function emptyPosition(size: number): Position {
   return { size, board: '.'.repeat(size * size), ko: null, captures: { B: 0, W: 0 } };
 }

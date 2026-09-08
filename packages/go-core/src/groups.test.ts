@@ -73,3 +73,40 @@ describe('длина массива владения', () => {
     expect(() => groupsWithOwnership(pos, new Array<number>(26).fill(0))).toThrow(/26/);
   });
 });
+
+describe('значения массива владения', () => {
+  const pos = positionFromRows(['.....', '.....', '.....', '...O.', '.....']);
+
+  it('null внутри массива (путь из JSON) — ошибка с индексом', () => {
+    const own = JSON.parse('[' + new Array<string>(25).fill('null').join(',') + ']') as number[];
+    expect(() => groupsWithOwnership(pos, own)).toThrow(/ownership\[0\]/);
+  });
+
+  it('разреженный массив — ошибка с индексом первой дырки', () => {
+    const own = new Array<number>(25);
+    own[0] = 0;
+    expect(() => groupsWithOwnership(pos, own)).toThrow(/ownership\[1\]/);
+  });
+
+  it('NaN — ошибка', () => {
+    const own = new Array<number>(25).fill(0);
+    own[7] = NaN;
+    expect(() => groupsWithOwnership(pos, own)).toThrow(/ownership\[7\]/);
+  });
+
+  it('Infinity — ошибка', () => {
+    const own = new Array<number>(25).fill(0);
+    own[8] = Infinity;
+    expect(() => groupsWithOwnership(pos, own)).toThrow(/ownership\[8\]/);
+  });
+
+  it('строка вместо числа — ошибка', () => {
+    const own = JSON.parse('[' + new Array<string>(25).fill('"0"').join(',') + ']') as number[];
+    expect(() => groupsWithOwnership(pos, own)).toThrow(/ownership\[0\]/);
+  });
+
+  it('одинокий белый камень при нулевом владении остаётся unsettled', () => {
+    const own = new Array<number>(25).fill(0);
+    expect(groupsWithOwnership(pos, own).find((g) => g.color === 'W')?.status).toBe('unsettled');
+  });
+});
