@@ -90,8 +90,9 @@ function track<T>(p: Promise<T>): { settled: boolean } {
 const opts = { bin: 'katago', model: 'main', humanModel: 'human', config: 'cfg', backoffMs: [10] };
 
 beforeEach(() => {
-  // Фейковые только таймеры: доставка потоков остаётся настоящей, тесты не спят.
-  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+  // Фейковые только таймеры и часы: доставка потоков остаётся настоящей, тесты не спят.
+  // Date нужен потому, что дедлайн запроса — момент времени, а не только заведённый таймер.
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
 });
 
 afterEach(() => {
@@ -304,7 +305,8 @@ describe('KataGo', () => {
     expect(k.alive).toBe(false);
     expect(k.queueLength).toBe(1);
     expect(f.spawned).toHaveLength(1);
-    expect(vi.getTimerCount()).toBe(1); // только пауза перезапуска
+    // пауза перезапуска и дедлайн ждущего запроса: его таймаут идёт от вызова
+    expect(vi.getTimerCount()).toBe(2);
     await vi.advanceTimersByTimeAsync(10);
     expect(f.spawned).toHaveLength(2);
     expect(k.restarts).toBe(1);
@@ -544,6 +546,123 @@ describe('KataGo', () => {
     at(f.spawned, 0).stderr.write('GPU not found\n');
     await tick();
     expect(logs.some((l) => l.includes('GPU not found'))).toBe(true);
+    await k.stop();
+  });
+
+  it('запрос до start отклоняется сразу, а не виснет навсегда', async () => {
+    const f = fakeSpawner(() => undefined);
+    const k = new KataGo({ ...opts, spawn: f.spawn });
+    await expect(k.query({})).rejects.toMatchObject({ kind: 'crashed' });
+    await expect(k.query({})).rejects.toThrow(/not started/);
+    expect(k.queueLength).toBe(0);
+    expect(f.spawned).toHaveLength(0);
+  });
+
+  it('запрос во время паузы перезапуска не отклоняется, а ждёт нового процесса', async () => {
+    const f = fakeSpawner((q, reply, i) => {
+      if (i > 0) reply({ id: q.id, ok: true });
+    });
+    const k = new KataGo({ ...opts, spawn: f.spawn, backoffMs: [10] });
+    k.start();
+    at(f.spawned, 0).exit(1);
+    expect(k.alive).toBe(false);
+    const p = k.query({});
+    expect(k.queueLength).toBe(1);
+    await vi.advanceTimersByTimeAsync(10);
+    expect(await p).toMatchObject({ ok: true });
+    await k.stop();
+  });
+
+  it('дедлайн отсчитывается от вызова: третий в очереди отваливается на своём timeoutMs', async () => {
+    const f = fakeSpawner(() => undefined); // движок молчит: все три доживут до таймаута
+    const k = new KataGo({ ...opts, spawn: f.spawn, maxConcurrent: 1 });
+    k.start();
+    const a = k.query({ n: 1 }, 1000);
+    const b = k.query({ n: 2 }, 1000);
+    const c = k.query({ n: 3 }, 1000);
+    const sa = track(a);
+    const sb = track(b);
+    const sc = track(c);
+    await tick();
+    const s = at(f.spawned, 0);
+    expect(s.written).toHaveLength(1); // движку ушёл только первый
+    await vi.advanceTimersByTimeAsync(999);
+    expect([sa.settled, sb.settled, sc.settled]).toEqual([false, false, false]);
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(a).rejects.toMatchObject({ kind: 'timeout' });
+    await expect(b).rejects.toMatchObject({ kind: 'timeout' });
+    await expect(c).rejects.toMatchObject({ kind: 'timeout' });
+    await tick();
+    // движок увидел первый запрос и terminate к нему; второй и третий ему не отправлялись
+    const sent = s.written.map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(sent.filter((m) => m.n !== undefined)).toHaveLength(1);
+    expect(k.queueLength).toBe(0);
+    expect(vi.getTimerCount()).toBe(0);
+    await k.stop();
+  });
+
+  it('ждущий запрос с коротким дедлайном отклоняется в очереди и движку не уходит', async () => {
+    const f = fakeSpawner(() => undefined);
+    const k = new KataGo({ ...opts, spawn: f.spawn, maxConcurrent: 1 });
+    k.start();
+    const a = k.query({ n: 1 }, 1000);
+    const b = k.query({ n: 2 }, 400);
+    track(a);
+    track(b);
+    await tick();
+    const s = at(f.spawned, 0);
+    await vi.advanceTimersByTimeAsync(400);
+    await expect(b).rejects.toMatchObject({ kind: 'timeout' });
+    await tick();
+    // terminate ждущему не шлётся: движок его не видел
+    expect(s.written).toHaveLength(1);
+    expect(k.queueLength).toBe(1);
+    await vi.advanceTimersByTimeAsync(600);
+    await expect(a).rejects.toMatchObject({ kind: 'timeout' });
+    await tick();
+    // после освобождения места отправлять уже нечего
+    const sent = s.written.map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(sent.some((m) => m.n === 2)).toBe(false);
+    await k.stop();
+  });
+
+  it('сообщение с нестроковым id считается глобальным и уходит в лог', async () => {
+    const logs: string[] = [];
+    const f = fakeSpawner(() => undefined);
+    const k = new KataGo({ ...opts, spawn: f.spawn, log: (l) => logs.push(l) });
+    k.start();
+    const p = k.query({});
+    const state = track(p);
+    await tick();
+    const out = at(f.spawned, 0).stdout;
+    out.write('{"id":123,"error":"numeric id failure"}\n');
+    await tick();
+    expect(logs.some((l) => l.includes('numeric id failure'))).toBe(true);
+    expect(state.settled).toBe(false);
+    expect(k.queueLength).toBe(1);
+    out.write('{"id":"q1","ok":true}\n');
+    expect(await p).toMatchObject({ ok: true });
+    await k.stop();
+  });
+
+  it('недоступный bin не роняет go-engine: запрос отклоняется, причина в логе', async () => {
+    const logs: string[] = [];
+    // Настоящий spawn, без подделки: этот путь иначе не покрыт ничем.
+    const k = new KataGo({
+      bin: 'goko-no-such-binary-xyz',
+      model: 'main',
+      humanModel: 'human',
+      config: 'cfg',
+      backoffMs: [10],
+      log: (l) => logs.push(l),
+    });
+    k.start();
+    const p = k.query({ n: 1 }, 5000);
+    await expect(p).rejects.toMatchObject({ kind: 'crashed' });
+    await tick();
+    expect(k.alive).toBe(false);
+    expect(k.restarts).toBe(1); // падение учтено, перезапуск запланирован
+    expect(logs.some((l) => l.includes('spawn failed') && l.includes('ENOENT'))).toBe(true);
     await k.stop();
   });
 

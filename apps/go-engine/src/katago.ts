@@ -40,15 +40,37 @@ type Pending = {
   id: string;
   query: KataQuery;
   timeoutMs: number;
+  deadline: number;
   resolve: (r: KataResponse) => void;
   reject: (e: Error) => void;
   timer?: NodeJS.Timeout;
 };
 
+function timeoutError(p: Pending): KataGoError {
+  return new KataGoError('timeout', `katago query ${p.id} timed out after ${p.timeoutMs} ms`);
+}
+
 const DEFAULT_BACKOFF_MS = [1000, 2000, 4000, 8000, 16000, 30000];
 
-function defaultSpawn(bin: string, args: string[]): KataProcess {
+function defaultSpawn(bin: string, args: string[], log?: (line: string) => void): KataProcess {
   const child = nodeSpawn(bin, args, { stdio: ['pipe', 'pipe', 'pipe'] });
+  const exitListeners: Array<(code: number | null) => void> = [];
+  let exited = false;
+  const notifyExit = (code: number | null): void => {
+    if (exited) return; // 'error' и 'exit' не должны сложиться в два падения подряд
+    exited = true;
+    for (const cb of [...exitListeners]) cb(code);
+  };
+  // Когда процесс не удалось запустить (нет файла, нет прав, опечатка в KATAGO_BIN),
+  // Node эмитит 'error' и не эмитит 'exit' вовсе. Без этой подписки необработанное
+  // исключение убивало бы весь go-engine: ни лога, ни состояния crashed, ни перезапуска.
+  child.on('error', (err: Error) => {
+    log?.(`[katago] spawn failed: ${err.message}`);
+    notifyExit(null);
+  });
+  child.on('exit', (code) => notifyExit(code));
+  // Запись в трубу процесса, который уже мёртв, эмитит 'error' на самом потоке.
+  child.stdin.on('error', () => undefined);
   return {
     stdin: child.stdin,
     stdout: child.stdout,
@@ -56,8 +78,8 @@ function defaultSpawn(bin: string, args: string[]): KataProcess {
     kill: () => {
       child.kill();
     },
-    on: (event, cb) => {
-      child.on(event, cb);
+    on: (_event, cb) => {
+      exitListeners.push(cb);
     },
   };
 }
@@ -90,13 +112,15 @@ export class KataGo {
     return this.queue.length + this.inFlight.size;
   }
 
+  // Считает падения процесса (каждое планирует перезапуск), а не состоявшиеся запуски:
+  // stop() во время паузы оставляет счётчик увеличенным, хотя нового процесса не было.
   get restarts(): number {
     return this.restartCount;
   }
 
   start(): void {
     if (this.proc || this.stopped) return;
-    const spawnFn = this.opts.spawn ?? defaultSpawn;
+    const spawnFn = this.opts.spawn ?? ((b: string, a: string[]) => defaultSpawn(b, a, this.opts.log));
     const args = [
       'analysis',
       '-config',
@@ -121,8 +145,18 @@ export class KataGo {
         reject(new KataGoError('crashed', 'katago stopped'));
         return;
       }
+      // Процесса нет и перезапуск не запланирован (query() до start()): ждать нечего,
+      // ответ не придёт никогда — отклоняем так же, как после stop().
+      if (this.proc === null && this.restartTimer === null) {
+        reject(new KataGoError('crashed', 'katago not started'));
+        return;
+      }
       const id = `q${++this.seq}`;
-      this.queue.push({ id, query, timeoutMs, resolve, reject });
+      // Дедлайн отсчитывается от вызова, а не от отправки движку: timeoutMs — это сколько
+      // ждёт вызывающий. Иначе последний из N запросов в очереди жил бы до (N + 1) * timeoutMs.
+      const p: Pending = { id, query, timeoutMs, deadline: Date.now() + timeoutMs, resolve, reject };
+      p.timer = setTimeout(() => this.onTimeout(p), timeoutMs);
+      this.queue.push(p);
       this.pump();
     });
   }
@@ -154,17 +188,31 @@ export class KataGo {
     while (this.proc && this.inFlight.size < this.maxConcurrent && this.queue.length) {
       const p = this.queue.shift();
       if (p === undefined) return; // длина очереди проверена выше, но сузить тип надо явно
+      // Дедлайн мог истечь, пока запрос ждал места: движку он больше не нужен.
+      if (p.deadline <= Date.now()) {
+        clearTimeout(p.timer);
+        p.reject(timeoutError(p));
+        continue;
+      }
       this.inFlight.set(p.id, p);
-      p.timer = setTimeout(() => this.onTimeout(p), p.timeoutMs);
       this.proc.stdin.write(`${JSON.stringify({ id: p.id, ...p.query })}\n`);
     }
   }
 
   private onTimeout(p: Pending): void {
-    if (!this.inFlight.delete(p.id)) return;
-    this.proc?.stdin.write(`${JSON.stringify({ id: `t-${p.id}`, action: 'terminate', terminateId: p.id })}\n`);
-    p.reject(new KataGoError('timeout', `katago query ${p.id} timed out after ${p.timeoutMs} ms`));
-    this.pump();
+    const err = timeoutError(p);
+    if (this.inFlight.delete(p.id)) {
+      this.proc?.stdin.write(`${JSON.stringify({ id: `t-${p.id}`, action: 'terminate', terminateId: p.id })}\n`);
+      p.reject(err);
+      this.pump();
+      return;
+    }
+    // Дедлайн истёк, пока запрос ждал места: движок его не видел, terminate слать некому
+    // и место в полёте не освобождается — отправлять такой запрос уже незачем.
+    const index = this.queue.indexOf(p);
+    if (index === -1) return; // запрос уже завершён другим путём
+    this.queue.splice(index, 1);
+    p.reject(err);
   }
 
   private onLine(line: string): void {
