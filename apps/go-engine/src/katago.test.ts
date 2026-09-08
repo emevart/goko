@@ -1,7 +1,8 @@
+import { EventEmitter } from 'node:events';
 import readline from 'node:readline';
 import { PassThrough } from 'node:stream';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { KataGo, KataGoError, type KataProcess } from './katago.ts';
+import { KataGo, KataGoError, type KataProcess, type SpawnedChild, wrapChild } from './katago.ts';
 
 type Reply = (r: unknown) => void;
 type Handler = (query: Record<string, unknown>, reply: Reply, spawnIndex: number) => void;
@@ -67,6 +68,37 @@ function fakeSpawner(handler: Handler) {
   return { spawn, spawned };
 }
 
+// Подделка сырого дочернего процесса для wrapChild: события — через EventEmitter,
+// потоки — настоящие PassThrough (важно: emit('error') без слушателя бросает синхронно).
+type FakeChild = SpawnedChild & {
+  stdin: PassThrough;
+  stdout: PassThrough;
+  stderr: PassThrough;
+  emit: (event: string, ...args: unknown[]) => boolean;
+  kills: number;
+};
+
+function fakeChild(): FakeChild {
+  const emitter = new EventEmitter();
+  // Один обработчик на все события: перегруженную подпись SpawnedChild['on'] иначе не собрать.
+  const on = ((event: string, cb: (...args: unknown[]) => void) => {
+    emitter.on(event, cb);
+  }) as SpawnedChild['on'];
+  const entry: FakeChild = {
+    stdin: new PassThrough(),
+    stdout: new PassThrough(),
+    stderr: new PassThrough(),
+    kill: () => {
+      entry.kills++;
+      return true;
+    },
+    on,
+    emit: (event, ...args) => emitter.emit(event, ...args),
+    kills: 0,
+  };
+  return entry;
+}
+
 // Ждём только доставку данных потоками (nextTick/setImmediate), время двигаем вручную.
 const tick = async (): Promise<void> => {
   await new Promise<void>((r) => setImmediate(r));
@@ -91,8 +123,10 @@ const opts = { bin: 'katago', model: 'main', humanModel: 'human', config: 'cfg',
 
 beforeEach(() => {
   // Фейковые только таймеры и часы: доставка потоков остаётся настоящей, тесты не спят.
-  // Date нужен потому, что дедлайн запроса — момент времени, а не только заведённый таймер.
-  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+  // performance — потому что дедлайн запроса считается по монотонным часам.
+  // Date — только ради vi.setSystemTime в тесте на скачок системных часов; поведение
+  // самого класса от Date больше не зависит.
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance', 'Date'] });
 });
 
 afterEach(() => {
@@ -626,6 +660,28 @@ describe('KataGo', () => {
     await k.stop();
   });
 
+  it('скачок системных часов вперёд не отклоняет ждущий запрос досрочно', async () => {
+    const f = fakeSpawner(() => undefined);
+    const k = new KataGo({ ...opts, spawn: f.spawn, maxConcurrent: 1 });
+    k.start();
+    const a = k.query({ n: 1 }, 100_000);
+    const b = k.query({ n: 2 }, 5000);
+    const sb = track(b);
+    await tick();
+    const s = at(f.spawned, 0);
+    expect(s.written).toHaveLength(1);
+    // NTP или ручная правка времени на VPS: настенные часы прыгнули на час вперёд.
+    vi.setSystemTime(new Date(Date.now() + 3_600_000));
+    s.stdout.write(`${JSON.stringify({ id: 'q1', ok: true })}\n`);
+    await expect(a).resolves.toMatchObject({ id: 'q1' });
+    await tick();
+    // Дедлайн монотонный: место освободилось, второй запрос уходит движку, а не отклоняется.
+    expect(sb.settled).toBe(false);
+    expect(s.written).toHaveLength(2);
+    expect(JSON.parse(at(s.written, 1))).toEqual({ id: 'q2', n: 2 });
+    await k.stop();
+  });
+
   it('сообщение с нестроковым id считается глобальным и уходит в лог', async () => {
     const logs: string[] = [];
     const f = fakeSpawner(() => undefined);
@@ -674,5 +730,61 @@ describe('KataGo', () => {
     expect(k.restarts).toBe(0);
     k.start();
     expect(k.alive).toBe(true);
+  });
+});
+
+describe('wrapChild', () => {
+  it('провал запуска уходит в лог и превращается в выход с неизвестным кодом', () => {
+    const logs: string[] = [];
+    const child = fakeChild();
+    const proc = wrapChild(child, (l) => logs.push(l));
+    const codes: Array<number | null> = [];
+    proc.on('exit', (code) => codes.push(code));
+    child.emit('error', new Error('spawn goko-no-such-binary ENOENT'));
+    expect(logs).toEqual(['[katago] spawn failed: spawn goko-no-such-binary ENOENT']);
+    // Именно null, а не 0: кода выхода не было, врать вызывающему про успешное завершение нельзя.
+    expect(codes).toEqual([null]);
+  });
+
+  it('обычный выход доводит код до всех подписчиков', () => {
+    const child = fakeChild();
+    const proc = wrapChild(child);
+    const first: Array<number | null> = [];
+    const second: Array<number | null> = [];
+    proc.on('exit', (code) => first.push(code));
+    proc.on('exit', (code) => second.push(code));
+    child.emit('exit', 137);
+    expect(first).toEqual([137]);
+    expect(second).toEqual([137]);
+  });
+
+  it('error и exit подряд дают ровно одно уведомление о выходе', () => {
+    const child = fakeChild();
+    const proc = wrapChild(child);
+    const codes: Array<number | null> = [];
+    proc.on('exit', (code) => codes.push(code));
+    // Node на провале запуска эмитит 'error', но иногда следом приходит и 'exit'.
+    child.emit('error', new Error('spawn EACCES'));
+    child.emit('exit', 1);
+    expect(codes).toEqual([null]);
+  });
+
+  it('запись в поток мёртвого процесса не роняет go-engine', () => {
+    // Проба с зубами: без подписки та же ошибка потока бросает синхронно и убивает процесс.
+    const bare = fakeChild();
+    expect(() => bare.stdin.emit('error', new Error('write EPIPE'))).toThrow(/EPIPE/);
+    const child = fakeChild();
+    wrapChild(child);
+    expect(() => child.stdin.emit('error', new Error('write EPIPE'))).not.toThrow();
+  });
+
+  it('потоки и kill прокидываются в KataProcess как есть', () => {
+    const child = fakeChild();
+    const proc = wrapChild(child);
+    expect(proc.stdin).toBe(child.stdin);
+    expect(proc.stdout).toBe(child.stdout);
+    expect(proc.stderr).toBe(child.stderr);
+    proc.kill();
+    expect(child.kills).toBe(1);
   });
 });

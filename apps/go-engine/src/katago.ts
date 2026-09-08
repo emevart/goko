@@ -52,8 +52,22 @@ function timeoutError(p: Pending): KataGoError {
 
 const DEFAULT_BACKOFF_MS = [1000, 2000, 4000, 8000, 16000, 30000];
 
-function defaultSpawn(bin: string, args: string[], log?: (line: string) => void): KataProcess {
-  const child = nodeSpawn(bin, args, { stdio: ['pipe', 'pipe', 'pipe'] });
+// Минимум от дочернего процесса, который нужен обёртке. Структурный тип, а не ChildProcess:
+// в тестах сюда подаётся подделка, иначе боевой путь запуска был бы недостижим.
+export type SpawnedChild = {
+  stdin: Writable;
+  stdout: Readable;
+  stderr: Readable | null;
+  kill: (signal?: NodeJS.Signals | number) => boolean;
+  on: {
+    (event: 'error', cb: (err: Error) => void): unknown;
+    (event: 'exit', cb: (code: number | null) => void): unknown;
+  };
+};
+
+// Приводит сырой дочерний процесс к KataProcess: одно уведомление о выходе на любую причину,
+// лог провалившегося запуска, защита от записи в трубу мёртвого процесса.
+export function wrapChild(child: SpawnedChild, log?: (line: string) => void): KataProcess {
   const exitListeners: Array<(code: number | null) => void> = [];
   let exited = false;
   const notifyExit = (code: number | null): void => {
@@ -82,6 +96,10 @@ function defaultSpawn(bin: string, args: string[], log?: (line: string) => void)
       exitListeners.push(cb);
     },
   };
+}
+
+function defaultSpawn(bin: string, args: string[], log?: (line: string) => void): KataProcess {
+  return wrapChild(nodeSpawn(bin, args, { stdio: ['pipe', 'pipe', 'pipe'] }), log);
 }
 
 export class KataGo {
@@ -153,8 +171,10 @@ export class KataGo {
       }
       const id = `q${++this.seq}`;
       // Дедлайн отсчитывается от вызова, а не от отправки движку: timeoutMs — это сколько
-      // ждёт вызывающий. Иначе последний из N запросов в очереди жил бы до (N + 1) * timeoutMs.
-      const p: Pending = { id, query, timeoutMs, deadline: Date.now() + timeoutMs, resolve, reject };
+      // ждёт вызывающий. Иначе последний из N запросов в очереди жил бы до N * timeoutMs.
+      // Часы монотонные (performance.now), а не настенные: синхронизация времени на VPS
+      // не должна ни отклонять ждущих досрочно, ни оставлять после этого висящий таймер.
+      const p: Pending = { id, query, timeoutMs, deadline: performance.now() + timeoutMs, resolve, reject };
       p.timer = setTimeout(() => this.onTimeout(p), timeoutMs);
       this.queue.push(p);
       this.pump();
@@ -189,7 +209,7 @@ export class KataGo {
       const p = this.queue.shift();
       if (p === undefined) return; // длина очереди проверена выше, но сузить тип надо явно
       // Дедлайн мог истечь, пока запрос ждал места: движку он больше не нужен.
-      if (p.deadline <= Date.now()) {
+      if (p.deadline <= performance.now()) {
         clearTimeout(p.timer);
         p.reject(timeoutError(p));
         continue;
