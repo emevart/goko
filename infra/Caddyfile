@@ -3,13 +3,13 @@
 }
 
 {$WEB_HOST} {
-  encode zstd gzip
   handle /api/* {
     reverse_proxy {$API_UPSTREAM} {
       flush_interval -1
     }
   }
   handle {
+    encode zstd gzip
     root * /srv/web
     try_files {path} /index.html
     file_server

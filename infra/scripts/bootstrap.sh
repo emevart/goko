@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 # Первичная настройка VPS Гоко: Docker, ufw, каталог /opt/goko. Идемпотентен.
 set -euo pipefail
+trap 'echo "[X] bootstrap: ошибка на строке $LINENO" >&2' ERR
 
 if ! command -v docker >/dev/null 2>&1; then
   curl -fsSL https://get.docker.com | sh
 fi
 systemctl enable --now docker
 
+apt-get update -qq
 apt-get install -y -qq ufw rsync >/dev/null
 ufw allow 22/tcp
 ufw allow 80/tcp

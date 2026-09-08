@@ -16,7 +16,7 @@ services:
       - caddy_config:/config
 
   livekit:
-    image: ${LIVEKIT_IMAGE:-livekit/livekit-server:latest}
+    image: ${LIVEKIT_IMAGE:-livekit/livekit-server:v1.13.6}
     network_mode: host
     restart: unless-stopped
     command: --config /etc/livekit.yaml
