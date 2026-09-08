@@ -21,9 +21,13 @@ export function chooseMove(input: ChooseMoveInput): ChooseMoveResult {
   const random = input.random ?? Math.random;
   const passIndex = input.size * input.size;
   const candidates: Candidate[] = [];
-  for (let k = 0; k < input.humanPolicy.length; k++) {
+  // Цикл идёт по доске, а не по длине чужого массива: хвост за пасом — рассогласование
+  // size и ответа движка, из него получались бы отрицательные индексы координат.
+  for (let k = 0; k <= passIndex; k++) {
     const prob = input.humanPolicy[k] ?? -1;
-    if (prob <= 0) continue;
+    // NaN проходит оба сравнения ниже (NaN <= 0 и NaN < cutoff одинаково ложны), отравляет
+    // сумму и молча уводит выбор в ветку округления, поэтому отсекается явно.
+    if (!Number.isFinite(prob) || prob <= 0) continue;
     if (k === passIndex && input.bestMove !== 'pass') continue;
     if (prob < cutoff) continue;
     candidates.push({ coord: kataIndexToCoord(k, input.size), prob });

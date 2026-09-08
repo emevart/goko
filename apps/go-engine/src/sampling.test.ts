@@ -21,7 +21,8 @@ describe('chooseMove', () => {
 
   it('нелегальные (-1) и хвост ниже 0.5 % отбрасываются', () => {
     const p = policy({ D4: 0.6, E5: 0.004 });
-    p[coordToIndex('C3', SIZE)] = -1;
+    // -1 кладётся по индексу KataGo точки C3: наш индекс здесь пометил бы совсем другую точку
+    p[oursToKataIndex(coordToIndex('C3', SIZE), SIZE)] = -1;
     const r = chooseMove({ humanPolicy: p, size: SIZE, bestMove: 'C3', random: () => 0.999 });
     expect(r.move).toBe('D4');
     expect(r.top.map((c) => c.coord)).toEqual(['D4']);
@@ -89,8 +90,38 @@ describe('chooseMove', () => {
     const r = chooseMove({ humanPolicy: policy({ D4: 0.7, E5: 0.3 }), size: SIZE, bestMove: 'D4', random: () => 0.2 });
     expect(r.move).toBe('E5');
   });
+  it('индексы KataGo читаются как есть: 0 — A9, 80 — J1', () => {
+    // вход задан литеральными индексами KataGo, без oursToKataIndex: тест не должен
+    // опираться на ту же функцию, которую проверяет соседний файл
+    const p = new Array<number>(PASS + 1).fill(0);
+    p[0] = 0.7;
+    p[80] = 0.3;
+    const r = chooseMove({ humanPolicy: p, size: SIZE, bestMove: 'A9', random: () => 0 });
+    expect(r.move).toBe('A9');
+    expect(r.top.map((c) => c.coord)).toEqual(['A9', 'J1']);
+  });
+
+  it('NaN и бесконечность не становятся кандидатами', () => {
+    const p = new Array<number>(PASS + 1).fill(0);
+    p[0] = Number.NaN;
+    p[1] = Number.POSITIVE_INFINITY;
+    p[80] = 0.5;
+    const r = chooseMove({ humanPolicy: p, size: SIZE, bestMove: 'A9', random: () => 0.5 });
+    expect(r).toEqual({ move: 'J1', top: [{ coord: 'J1', prob: 0.5 }], fallback: false });
+  });
+
+  it('хвост длиннее доски игнорируется', () => {
+    const p = policy({ D4: 0.6 });
+    p.push(0.9, 0.9, 0.9);
+    const r = chooseMove({ humanPolicy: p, size: SIZE, bestMove: 'D4', random: () => 0.5 });
+    expect(r).toEqual({ move: 'D4', top: [{ coord: 'D4', prob: 0.6 }], fallback: false });
+  });
+
   it('край интервала: остаётся последний кандидат, а не лучший ход поиска', () => {
-    // r = 1 * (0.5 + 0.5): вычитания не уводят накопитель ниже нуля, срабатывает ветка округления
+    // r = 1 * (0.5 + 0.5): вычитания не уводят накопитель ниже нуля, срабатывает ветка округления.
+    // Единица вне контракта Math.random() (максимум 1 - 2^-53) и подана как простая замена
+    // реального триггера: ветка достижима на значениях в единицах ulp от единицы, с вероятностью
+    // порядка 1e-14 на ход, поэтому воспроизводить её настоящим случайным числом бессмысленно.
     const r = chooseMove({ humanPolicy: policy({ D4: 0.5, E5: 0.5 }), size: SIZE, bestMove: 'A1', random: () => 1 });
     expect(r).toEqual({ move: 'D4', top: [{ coord: 'E5', prob: 0.5 }, { coord: 'D4', prob: 0.5 }], fallback: false });
   });
