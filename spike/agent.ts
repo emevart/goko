@@ -1,4 +1,7 @@
 // Спайк: Гоко без движка. Проверяем голосовую петлю, русский, распознавание координат, текстовый канал.
+// [!] Вывод этого воркера содержит адрес сервера: cli.runApp при регистрации логирует поле
+// url, то есть значение LIVEKIT_URL. Скрыть это на стадии 0 нечем — логгер внутри
+// @livekit/agents. Лог целиком не вставлять в доки, задачи и чат (см. spike/README.md).
 import { appendFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { type JobContext, ServerOptions, cli, defineAgent, llm, voice } from '@livekit/agents';
