@@ -1,14 +1,19 @@
 // Операции протокола (таблица раздела 5 спеки): тела запросов и ответов.
+// Схемы запросов строгие (z.strictObject): неизвестный ключ — всегда ошибка, потому что
+// аргументы формируют наши же клиенты, в том числе языковая модель голосового агента,
+// и опечатка вроде `expectedRevison` иначе молча снимает защиту от гонки голоса и тапа.
+// Схемы ответов и событий остаются нестрогими: старый клиент должен переживать
+// добавление полей на сервере.
 import { z } from 'zod';
 import { BoardSize, Color, GameState, GameSummary, Move, Rank, Seat, Session, Via } from './game.ts';
 
 // settings описаны явно как optional, а не GameSettings.partial(): в zod 4 partial() сохраняет default,
 // и тогда клиент не смог бы отличить «не прислали» от «прислали 13».
-export const NewGameRequest = z.object({
+export const NewGameRequest = z.strictObject({
   black: Seat,
   white: Seat,
   settings: z
-    .object({ boardSize: BoardSize.optional(), rules: z.literal('chinese').optional(), komi: z.number().optional() })
+    .strictObject({ boardSize: BoardSize.optional(), rules: z.literal('chinese').optional(), komi: z.number().optional() })
     .optional(),
   waitForReply: z.boolean().default(true),
 });
@@ -21,7 +26,7 @@ export const NewGameResponse = z.object({
 });
 export type NewGameResponse = z.infer<typeof NewGameResponse>;
 
-export const PlayRequest = z.object({
+export const PlayRequest = z.strictObject({
   coord: z.string().min(1),
   color: Color.optional(),
   expectedRevision: z.number().int().optional(),
@@ -41,29 +46,29 @@ export const PlayResponse = z.object({
 });
 export type PlayResponse = z.infer<typeof PlayResponse>;
 
-export const ResignRequest = z.object({ color: Color, via: Via.default('api') });
+export const ResignRequest = z.strictObject({ color: Color, via: Via.default('api') });
 export type ResignRequest = z.input<typeof ResignRequest>;
 
 export const StateResponse = z.object({ state: GameState });
 export type StateResponse = z.infer<typeof StateResponse>;
 
-export const UndoRequest = z.object({ expectedRevision: z.number().int().optional(), via: Via.default('api') });
+export const UndoRequest = z.strictObject({ expectedRevision: z.number().int().optional(), via: Via.default('api') });
 export type UndoRequest = z.input<typeof UndoRequest>;
 
 export const UndoResponse = z.object({ state: GameState, removed: z.array(Move) });
 export type UndoResponse = z.infer<typeof UndoResponse>;
 
-export const CorrectRequest = z.object({
+export const CorrectRequest = z.strictObject({
   coord: z.string().min(1),
   waitForReply: z.boolean().default(true),
   via: Via.default('api'),
 });
 export type CorrectRequest = z.input<typeof CorrectRequest>;
 
-export const SetRankRequest = z.object({ color: Color, rank: Rank });
+export const SetRankRequest = z.strictObject({ color: Color, rank: Rank });
 export type SetRankRequest = z.input<typeof SetRankRequest>;
 
-export const AnalyzeRequest = z.object({ maxVisits: z.number().int().min(1).max(1000).default(50) });
+export const AnalyzeRequest = z.strictObject({ maxVisits: z.number().int().min(1).max(1000).default(50) });
 export type AnalyzeRequest = z.input<typeof AnalyzeRequest>;
 
 export const GroupInfo = z.object({

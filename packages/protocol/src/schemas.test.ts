@@ -1,4 +1,10 @@
+// Часть защиты этого пакета держится не на рантайме, а на типах: объявления вида
+// `const input: PlayRequest = { coord: 'D4' }` ловят подмену z.input на z.infer только
+// при `tsc`. Поэтому запускать `vitest` без `npm run typecheck` для протокола бессмысленно.
+// Правило покрытия: у каждого поля, ссылающегося на другую схему, есть негативный случай,
+// проверенный через внешнюю схему, а не только через вложенную.
 import { describe, expect, it } from 'vitest';
+import * as protocol from './index.ts';
 import {
   EngineAnalyzeRequest,
   EngineAnalyzeResponse,
@@ -100,6 +106,7 @@ describe('схемы партии', () => {
     expect(() => Rank.parse('10d')).toThrow();
     expect(() => Rank.parse('21k')).toThrow();
     expect(Seat.parse({ controller: 'engine', rank: '5k' })).toEqual({ controller: 'engine', rank: '5k' });
+    expect(() => Seat.parse({ controller: 'engine', rank: '10d' })).toThrow();
   });
 
   it('перечисления цвета, контроллера, статуса, via, by', () => {
@@ -126,6 +133,7 @@ describe('схемы партии', () => {
     expect(() => Move.parse({ ...move, n: 0 })).toThrow();
     expect(() => Move.parse({ ...move, captured: -1 })).toThrow();
     expect(() => Move.parse({ ...move, n: 1.5 })).toThrow();
+    expect(() => Move.parse({ ...move, color: 'X' })).toThrow();
     requiresKeys(Move, move, ['n', 'color', 'coord', 'captured', 'at']);
   });
 
@@ -143,6 +151,8 @@ describe('схемы партии', () => {
     expect(() => Result.parse({ winner: 'B', reason: 'timeout' })).toThrow();
     expect(() => Result.parse({ reason: 'score' })).toThrow();
     expect(() => Result.parse({ winner: 'B' })).toThrow();
+    expect(() => Result.parse({ winner: 'X', reason: 'resign' })).toThrow();
+    expect(() => Result.parse({ winner: 'B', reason: 'score', score: { ...score, areaB: 'много' } })).toThrow();
   });
 
   it('GameState принимает полное состояние и отвергает мусор', () => {
@@ -160,6 +170,28 @@ describe('схемы партии', () => {
     requiresKeys(GameState, state, Object.keys(state));
   });
 
+  it('GameState отвергает неверные значения вложенных схем', () => {
+    const badSeatW = { B: { controller: 'human' }, W: { controller: 'bot' } };
+    const badSeatB = { B: { controller: 'bot' }, W: { controller: 'human' } };
+    expect(() => GameState.parse({ ...state, seats: badSeatW })).toThrow();
+    expect(() => GameState.parse({ ...state, seats: badSeatB })).toThrow();
+    expect(() => GameState.parse({ ...state, settings: { ...state.settings, boardSize: 12 } })).toThrow();
+    expect(() => GameState.parse({ ...state, status: 'paused' })).toThrow();
+    expect(() => GameState.parse({ ...state, moves: [{ ...move, color: 'X' }] })).toThrow();
+    expect(() => GameState.parse({ ...state, result: { winner: 'X', reason: 'resign' } })).toThrow();
+  });
+
+  it('GameState сверяет доску с размером и алфавитом', () => {
+    expect(GameState.parse({ ...state, settings: { boardSize: 9 }, board: '.'.repeat(81) }).settings.boardSize).toBe(9);
+    expect(GameState.parse({ ...state, board: 'B'.repeat(84) + 'W'.repeat(85) }).board).toHaveLength(169);
+    // потеря boardSize в ответе сервера не должна молча превращать партию 9x9 в 13x13
+    expect(() => GameState.parse({ ...state, board: '.'.repeat(81) })).toThrow(/81[\s\S]*13|13[\s\S]*81/);
+    expect(() => GameState.parse({ ...state, settings: {}, board: '.'.repeat(81) })).toThrow();
+    expect(() => GameState.parse({ ...state, board: '.'.repeat(168) })).toThrow();
+    expect(() => GameState.parse({ ...state, board: 'x'.repeat(169) })).toThrow();
+    expect(() => GameState.parse({ ...state, board: '.'.repeat(168) + 'b' })).toThrow();
+  });
+
   it('GameSummary и Session', () => {
     const summary = {
       id: 'g1',
@@ -174,6 +206,12 @@ describe('схемы партии', () => {
     delete withoutResult.result;
     expect(GameSummary.parse(withoutResult)).toEqual(withoutResult);
     requiresKeys(GameSummary, summary, ['id', 'createdAt', 'status', 'moveCount', 'seats']);
+    expect(() => GameSummary.parse({ ...summary, status: 'paused' })).toThrow();
+    const badB = { B: { controller: 'bot' }, W: { controller: 'human' } };
+    const badW = { B: { controller: 'human' }, W: { controller: 'bot' } };
+    expect(() => GameSummary.parse({ ...summary, seats: badB })).toThrow();
+    expect(() => GameSummary.parse({ ...summary, seats: badW })).toThrow();
+    expect(() => GameSummary.parse({ ...summary, result: { winner: 'X', reason: 'resign' } })).toThrow();
 
     const session = { id: 's1', room: 'goko-s1', currentGameId: null, createdAt: state.createdAt };
     expect(Session.parse(session)).toEqual(session);
@@ -192,6 +230,7 @@ describe('операции', () => {
     ).toEqual({ coord: 'D4', color: 'W', expectedRevision: 3, waitForReply: false, via: 'voice' });
     expect(() => PlayRequest.parse({ coord: 'D4', via: 'sms' })).toThrow();
     expect(() => PlayRequest.parse({ coord: 'D4', expectedRevision: 1.5 })).toThrow();
+    expect(() => PlayRequest.parse({ coord: 'D4', color: 'X' })).toThrow();
     // тип запроса — z.input: поля с умолчанием необязательны у клиента
     const input: PlayRequest = { coord: 'D4' };
     expect(PlayRequest.parse(input).waitForReply).toBe(true);
@@ -199,8 +238,11 @@ describe('операции', () => {
 
   it('PassRequest — PlayRequest без coord', () => {
     expect(PassRequest.parse({})).toEqual({ waitForReply: true, via: 'api' });
-    expect(PassRequest.parse({ coord: 'D4' })).toEqual({ waitForReply: true, via: 'api' });
+    // схема строгая: coord у паса — лишний ключ, а не молча отбрасываемый
+    expect(() => PassRequest.parse({ coord: 'D4' })).toThrow();
     expect(PassRequest.parse({ via: 'voice', waitForReply: false })).toEqual({ via: 'voice', waitForReply: false });
+    expect(() => PassRequest.parse({ via: 'sms' })).toThrow();
+    expect(() => PassRequest.parse({ color: 'X' })).toThrow();
     const input: PassRequest = {};
     expect(PassRequest.parse(input).via).toBe('api');
   });
@@ -225,6 +267,10 @@ describe('операции', () => {
         settings: { boardSize: 12 },
       }),
     ).toThrow();
+    expect(() => NewGameRequest.parse({ black: { controller: 'bot' }, white: { controller: 'engine' } })).toThrow();
+    expect(() =>
+      NewGameRequest.parse({ black: { controller: 'human' }, white: { controller: 'engine', rank: '10d' } }),
+    ).toThrow();
     const input: NewGameRequest = { black: { controller: 'human' }, white: { controller: 'engine' } };
     expect(NewGameRequest.parse(input).waitForReply).toBe(true);
   });
@@ -238,6 +284,8 @@ describe('операции', () => {
     });
     expect(() => NewGameResponse.parse({ state, replyTimedOut: false })).toThrow();
     expect(() => NewGameResponse.parse({})).toThrow();
+    expect(() => NewGameResponse.parse({ state: { ...state, toPlay: 'X' } })).toThrow();
+    expect(() => NewGameResponse.parse({ state, firstMove: { ...move, color: 'X' } })).toThrow();
   });
 
   it('PlayResponse допускает replyTimedOut только true', () => {
@@ -247,21 +295,29 @@ describe('операции', () => {
     expect(PlayResponse.parse({ state, move, reply: { ...move, n: 2, color: 'W' } }).reply?.n).toBe(2);
     expect(() => PlayResponse.parse({ state })).toThrow();
     expect(() => PlayResponse.parse({ move })).toThrow();
+    expect(() => PlayResponse.parse({ state: { ...state, toPlay: 'X' }, move })).toThrow();
+    expect(() => PlayResponse.parse({ state, move: { ...move, color: 'X' } })).toThrow();
+    expect(() => PlayResponse.parse({ state, move, reply: { ...move, color: 'X' } })).toThrow();
   });
 
   it('ResignRequest, UndoRequest, CorrectRequest, SetRankRequest, AnalyzeRequest', () => {
     expect(ResignRequest.parse({ color: 'B' })).toEqual({ color: 'B', via: 'api' });
     expect(() => ResignRequest.parse({})).toThrow();
+    expect(() => ResignRequest.parse({ color: 'X' })).toThrow();
+    expect(() => ResignRequest.parse({ color: 'B', via: 'sms' })).toThrow();
 
     expect(UndoRequest.parse({})).toEqual({ via: 'api' });
     expect(UndoRequest.parse({ expectedRevision: 7, via: 'tap' })).toEqual({ expectedRevision: 7, via: 'tap' });
+    expect(() => UndoRequest.parse({ via: 'sms' })).toThrow();
 
     expect(CorrectRequest.parse({ coord: 'D4' })).toEqual({ coord: 'D4', waitForReply: true, via: 'api' });
     expect(() => CorrectRequest.parse({})).toThrow();
+    expect(() => CorrectRequest.parse({ coord: 'D4', via: 'sms' })).toThrow();
 
     expect(SetRankRequest.parse({ color: 'W', rank: '3d' })).toEqual({ color: 'W', rank: '3d' });
     expect(() => SetRankRequest.parse({ color: 'W' })).toThrow();
     expect(() => SetRankRequest.parse({ color: 'W', rank: '10d' })).toThrow();
+    expect(() => SetRankRequest.parse({ color: 'X', rank: '3d' })).toThrow();
 
     expect(AnalyzeRequest.parse({})).toEqual({ maxVisits: 50 });
     expect(() => AnalyzeRequest.parse({ maxVisits: 0 })).toThrow();
@@ -282,19 +338,25 @@ describe('операции', () => {
   it('ответы: StateResponse, UndoResponse, ListGamesResponse, CreateSessionResponse', () => {
     expect(StateResponse.parse({ state })).toEqual({ state });
     expect(() => StateResponse.parse({})).toThrow();
+    expect(() => StateResponse.parse({ state: { ...state, toPlay: 'X' } })).toThrow();
 
     expect(UndoResponse.parse({ state, removed: [move] })).toEqual({ state, removed: [move] });
     expect(() => UndoResponse.parse({ state })).toThrow();
+    expect(() => UndoResponse.parse({ state, removed: [{ ...move, color: 'X' }] })).toThrow();
+    expect(() => UndoResponse.parse({ state: { ...state, toPlay: 'X' }, removed: [] })).toThrow();
 
     const summary = { id: 'g1', createdAt: state.createdAt, status: 'playing', moveCount: 0, seats: state.seats };
     expect(ListGamesResponse.parse({ games: [summary] })).toEqual({ games: [summary] });
     expect(() => ListGamesResponse.parse({})).toThrow();
+    expect(() => ListGamesResponse.parse({ games: [{ ...summary, status: 'paused' }] })).toThrow();
 
     const session = { id: 's1', room: 'goko-s1', currentGameId: null, createdAt: state.createdAt };
     const created = { session, livekit: { url: 'wss://example', token: 'jwt' } };
     expect(CreateSessionResponse.parse(created)).toEqual(created);
     expect(() => CreateSessionResponse.parse({ session })).toThrow();
     expect(() => CreateSessionResponse.parse({ session, livekit: { url: 'wss://example' } })).toThrow();
+    const badSession = { ...session, currentGameId: undefined };
+    expect(() => CreateSessionResponse.parse({ ...created, session: badSession })).toThrow();
   });
 
   it('GroupInfo и Analysis', () => {
@@ -303,6 +365,7 @@ describe('операции', () => {
     expect(GroupInfo.parse({ ...group, status: 'unsettled' }).status).toBe('unsettled');
     expect(GroupInfo.parse({ ...group, status: 'dead' }).status).toBe('dead');
     expect(() => GroupInfo.parse({ ...group, status: 'alive' })).toThrow();
+    expect(() => GroupInfo.parse({ ...group, color: 'X' })).toThrow();
     requiresKeys(GroupInfo, group, Object.keys(group));
 
     const analysis = {
@@ -316,6 +379,8 @@ describe('операции', () => {
     expect(Analysis.parse(analysis)).toEqual(analysis);
     requiresKeys(Analysis, analysis, Object.keys(analysis));
     expect(() => Analysis.parse({ ...analysis, topMoves: [{ coord: 'D4', winrateB: 0.5, scoreLeadB: 1 }] })).toThrow();
+    expect(() => Analysis.parse({ ...analysis, groups: [{ ...group, status: 'alive' }] })).toThrow();
+    expect(() => Analysis.parse({ ...analysis, groups: [{ ...group, color: 'X' }] })).toThrow();
   });
 });
 
@@ -467,6 +532,15 @@ describe('события', () => {
     expect(() => GameEvent.parse({ type: 'state.updated', cause: 'play', by: 'human' })).toThrow();
     expect(() => GameEvent.parse({ type: 'state.updated', state, cause: 'play', by: 'human', via: 'sms' })).toThrow();
   });
+
+  it('вложенные схемы события проверяются через GameEvent', () => {
+    expect(() => GameEvent.parse({ type: 'state.updated', state, cause: 'play', by: 'robot' })).toThrow();
+    expect(() =>
+      GameEvent.parse({ type: 'state.updated', state: { ...state, toPlay: 'X' }, cause: 'play', by: 'human' }),
+    ).toThrow();
+    expect(() => GameEvent.parse({ type: 'game.finished', result: { winner: 'X', reason: 'resign' } })).toThrow();
+    expect(() => GameEvent.parse({ type: 'game.finished', result: { winner: 'B', reason: 'timeout' } })).toThrow();
+  });
 });
 
 describe('движок', () => {
@@ -484,7 +558,9 @@ describe('движок', () => {
     expect(() => EnginePositionRequest.parse({ ...p, boardSize: 20 })).toThrow();
     expect(() => EnginePositionRequest.parse({ ...p, rules: 'japanese' })).toThrow();
     requiresKeys(EnginePositionRequest, p, Object.keys(p));
+    expect(() => EnginePositionRequest.parse({ ...p, moves: [['X', 'D4']] })).toThrow();
     expect(EngineScoreRequest.parse(p)).toEqual(p);
+    expect(() => EngineScoreRequest.parse({ ...p, moves: [['X', 'D4']] })).toThrow();
   });
 
   it('genmove: maxVisits по умолчанию 10, ходы — пары', () => {
@@ -498,6 +574,7 @@ describe('движок', () => {
     expect(r.maxVisits).toBe(10);
     expect(() => EngineGenmoveRequest.parse({ ...r, moves: [['X', 'D4']] })).toThrow();
     expect(() => EngineGenmoveRequest.parse({ ...r, rank: undefined })).toThrow();
+    expect(() => EngineGenmoveRequest.parse({ ...r, rank: '10d' })).toThrow();
     expect(() => EngineGenmoveRequest.parse({ ...r, maxVisits: 1001 })).toThrow();
     const input: EngineGenmoveRequest = { boardSize: 13, rules: 'chinese', komi: 7.5, moves: [], rank: '10k' };
     expect(EngineGenmoveRequest.parse(input).maxVisits).toBe(10);
@@ -532,6 +609,7 @@ describe('движок', () => {
     expect(EngineAnalyzeResponse.parse(analyze)).toEqual(analyze);
     expect(EngineAnalyzeResponse.parse({ ...analyze, ownership: [0.1] }).ownership).toEqual([0.1]);
     requiresKeys(EngineAnalyzeResponse, analyze, Object.keys(analyze));
+    expect(() => EngineAnalyzeResponse.parse({ ...analyze, moveInfos: [{ ...info, order: 0.5 }] })).toThrow();
 
     const health = { ok: true, models: { main: 'b18', human: 'human' }, queue: 0, restarts: 2 };
     expect(EngineHealth.parse(health)).toEqual(health);
@@ -553,5 +631,71 @@ describe('движок', () => {
     const full = { ownership: [0.1], dead: ['D4'], areaB: 1, areaW: 0, scoreLeadB: -6.5, winner: 'W', margin: 6.5 };
     expect(EngineScoreResponse.parse(full)).toEqual(full);
     requiresKeys(EngineScoreResponse, full, Object.keys(full));
+    expect(() => EngineScoreResponse.parse({ ...full, winner: 'black' })).toThrow();
+  });
+});
+
+describe('строгость запросов', () => {
+  // Запросы приходят от наших клиентов (в том числе от языковой модели голосового агента):
+  // неизвестный ключ — всегда ошибка. Ответы и события остаются нестрогими: старый клиент
+  // должен переживать добавление полей на сервере.
+  it('опечатка expectedRevison в PlayRequest не проходит молча', () => {
+    expect(PlayRequest.parse({ coord: 'D4', expectedRevision: 5 }).expectedRevision).toBe(5);
+    expect(() => PlayRequest.parse({ coord: 'D4', expectedRevison: 5 })).toThrow();
+  });
+
+  it('каждая схема запроса отвергает лишний ключ', () => {
+    const cases: [string, { parse: (v: unknown) => unknown }, Record<string, unknown>][] = [
+      ['NewGameRequest', NewGameRequest, { black: { controller: 'human' }, white: { controller: 'engine' } }],
+      ['PlayRequest', PlayRequest, { coord: 'D4' }],
+      ['PassRequest', PassRequest, {}],
+      ['ResignRequest', ResignRequest, { color: 'B' }],
+      ['UndoRequest', UndoRequest, {}],
+      ['CorrectRequest', CorrectRequest, { coord: 'D4' }],
+      ['SetRankRequest', SetRankRequest, { color: 'W', rank: '3d' }],
+      ['AnalyzeRequest', AnalyzeRequest, {}],
+      ['EnginePositionRequest', EnginePositionRequest, { boardSize: 13, rules: 'chinese', komi: 7.5, moves: [] }],
+      [
+        'EngineGenmoveRequest',
+        EngineGenmoveRequest,
+        { boardSize: 13, rules: 'chinese', komi: 7.5, moves: [], rank: '10k' },
+      ],
+      ['EngineAnalyzeRequest', EngineAnalyzeRequest, { boardSize: 13, rules: 'chinese', komi: 7.5, moves: [] }],
+      ['EngineScoreRequest', EngineScoreRequest, { boardSize: 13, rules: 'chinese', komi: 7.5, moves: [] }],
+    ];
+    for (const [name, schema, sample] of cases) {
+      expect(() => schema.parse(sample), name + ': корректный запрос').not.toThrow();
+      expect(() => schema.parse({ ...sample, unexpectedKey: 1 }), name + ': лишний ключ').toThrow();
+    }
+  });
+
+  it('настройки внутри NewGameRequest тоже строгие', () => {
+    const base = { black: { controller: 'human' }, white: { controller: 'engine' } };
+    expect(NewGameRequest.parse({ ...base, settings: { komi: 6.5 } }).settings).toEqual({ komi: 6.5 });
+    expect(() => NewGameRequest.parse({ ...base, settings: { boardSise: 9 } })).toThrow();
+  });
+
+  it('ответы и события остаются нестрогими ради совместимости вперёд', () => {
+    expect(PlayResponse.parse({ state, move, futureField: 1 })).toEqual({ state, move });
+    expect(GameState.parse({ ...state, futureField: 1 })).toEqual(state);
+    expect(GameEvent.parse({ type: 'session.game', gameId: 'g1', futureField: 1 })).toEqual({
+      type: 'session.game',
+      gameId: 'g1',
+    });
+    const score = { ownership: [], dead: [], areaB: 1, areaW: 0, scoreLeadB: 1, winner: 'B', margin: 1 };
+    expect(EngineScoreResponse.parse({ ...score, futureField: 1 }).winner).toBe('B');
+  });
+});
+
+describe('публичная поверхность пакета', () => {
+  it('index.ts реэкспортирует все пять модулей', () => {
+    for (const name of ['GameState', 'ERROR_CODES', 'PlayRequest', 'GameEvent', 'EngineGenmoveRequest']) {
+      expect(Object.keys(protocol), name).toContain(name);
+    }
+    expect(protocol.ERROR_CODES).toEqual(ERROR_CODES);
+    expect(protocol.GameState).toBe(GameState);
+    expect(protocol.PlayRequest).toBe(PlayRequest);
+    expect(protocol.GameEvent).toBe(GameEvent);
+    expect(protocol.EngineGenmoveRequest).toBe(EngineGenmoveRequest);
   });
 });

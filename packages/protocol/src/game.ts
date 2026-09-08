@@ -76,6 +76,19 @@ export const GameState = z.object({
   consecutivePasses: z.number().int().min(0),
   pendingEngineMove: z.boolean(),
   result: Result.optional(),
+}).superRefine((value, ctx) => {
+  // Инвариант раздела 4 спеки: доска — строка из boardSize^2 символов '.', 'B', 'W'.
+  // Без него ответ, потерявший settings.boardSize, молча становится партией 13x13.
+  const expectedLength = value.settings.boardSize ** 2;
+  if (value.board.length !== expectedLength) {
+    const message =
+      `длина board ${value.board.length} не совпадает с boardSize ${value.settings.boardSize}` +
+      ` (ожидается ${expectedLength})`;
+    ctx.addIssue({ code: 'custom', path: ['board'], message });
+  }
+  if (!/^[.BW]*$/.test(value.board)) {
+    ctx.addIssue({ code: 'custom', path: ['board'], message: "board содержит символы вне '.', 'B', 'W'" });
+  }
 });
 export type GameState = z.infer<typeof GameState>;
 

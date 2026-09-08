@@ -5,7 +5,9 @@ import { Color, Rank } from './game.ts';
 export const EngineMove = z.tuple([Color, z.string()]);
 export type EngineMove = z.infer<typeof EngineMove>;
 
-export const EnginePositionRequest = z.object({
+// Запросы к движку строгие, как и запросы протокола; extend сохраняет строгость,
+// поэтому genmove, analyze и score наследуют её от позиции.
+export const EnginePositionRequest = z.strictObject({
   boardSize: z.number().int().min(5).max(19),
   rules: z.literal('chinese'),
   komi: z.number(),
