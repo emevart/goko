@@ -1,8 +1,31 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { type Color, replay } from '@goko/go-core';
 import { createFakeEngine } from './fake-engine.ts';
 
 const base = { boardSize: 9, rules: 'chinese' as const, komi: 7.5 };
+
+// Время управляемое: delayMs — обычный setTimeout, ждать его по-настоящему незачем.
+beforeEach(() => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+});
+
+afterEach(() => {
+  vi.useRealTimers();
+});
+
+// Наблюдение за промисом без ожидания: «уже осел или ещё нет».
+function track<T>(p: Promise<T>): { settled: boolean } {
+  const state = { settled: false };
+  p.then(
+    () => {
+      state.settled = true;
+    },
+    () => {
+      state.settled = true;
+    },
+  );
+  return state;
+}
 
 describe('createFakeEngine', () => {
   it('сценарий отдаёт ходы по порядку, потом случайные легальные', async () => {
@@ -78,23 +101,35 @@ describe('createFakeEngine', () => {
     expect(r).toMatchObject({ areaB: 36, areaW: 45, winner: 'W', margin: 16.5, dead: [] });
     expect(r.scoreLeadB).toBe(-16.5);
     expect(r.ownership).toHaveLength(81);
+    // Камень чёрных на D4 и камень белых на D5: владение противоположных знаков.
+    expect(r.ownership[3 * 9 + 3]).toBe(1);
+    expect(r.ownership[4 * 9 + 3]).toBe(-1);
     expect(engine.calls.score).toBe(1);
   });
 
-  it('delayMs задерживает и genmove', async () => {
+  it('delayMs задерживает и genmove: ответа нет до истечения задержки', async () => {
     const engine = createFakeEngine({ script: ['E5'], delayMs: 30 });
-    const t0 = Date.now();
-    expect((await engine.genmove({ ...base, moves: [], rank: '10k' })).move).toBe('E5');
-    expect(Date.now() - t0).toBeGreaterThanOrEqual(25);
+    const p = engine.genmove({ ...base, moves: [], rank: '10k' });
+    const state = track(p);
+    await vi.advanceTimersByTimeAsync(29);
+    expect(state.settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect((await p).move).toBe('E5');
   });
 
   it('analyze возвращает winrate 0.5 и ownership по камням; delayMs задерживает ответ', async () => {
     const engine = createFakeEngine({ delayMs: 30 });
-    const t0 = Date.now();
-    const a = await engine.analyze({ ...base, moves: [['B', 'D4']] });
-    expect(Date.now() - t0).toBeGreaterThanOrEqual(25);
+    const p = engine.analyze({ ...base, moves: [['B', 'D4'], ['W', 'F6']] });
+    const state = track(p);
+    await vi.advanceTimersByTimeAsync(29);
+    expect(state.settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    const a = await p;
     expect(a.winrateB).toBe(0.5);
+    // Знак владения: свой камень чёрных +1, свой камень белых -1, пустая точка 0.
+    // Этим владением кормится groupsWithOwnership в service.analyze, поэтому знак важен.
     expect(a.ownership?.[3 * 9 + 3]).toBe(1);
+    expect(a.ownership?.[5 * 9 + 5]).toBe(-1);
     expect(a.ownership?.[4 * 9 + 4]).toBe(0);
     expect(a.moveInfos.length).toBeGreaterThan(0);
     expect(a.visits).toBe(50);
