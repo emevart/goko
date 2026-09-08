@@ -192,7 +192,10 @@ describe('speakCoord', () => {
 - [ ] **Step 3: Убедиться, что тест падает**
 
 Run: `npx vitest run packages/go-core/src/coords.test.ts`
-Expected: FAIL — `Failed to resolve import "./coords.ts"`.
+Expected: FAIL — vitest 5 сообщает `Cannot find module './coords.ts'`. Это падение
+разрешения модуля, а не ассерта: оно доказывает отсутствие реализации, но ни одной
+проверки не выполняет. В задачах, где модуль уже существует, красный прогон обязан
+падать именно на ассертах.
 
 - [ ] **Step 4: Реализация `packages/go-core/src/coords.ts`**
 
