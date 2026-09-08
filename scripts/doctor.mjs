@@ -84,10 +84,16 @@ function main() {
   else if (!existsSync(kb)) fail(`KATAGO_BIN указывает на несуществующий файл`);
   else ok('KATAGO_BIN найден');
 
+  // Обе сети движка: имена переменных те же, что читает apps/go-engine/src/main.ts.
+  // Печатаются только имена переменных и вердикт: значения env не выводятся.
   const models = path.join(root, 'apps/go-engine/models');
-  if (existsSync(models)) {
-    const need = ['b18c384nbt-humanv0.bin.gz'];
-    for (const f of need) existsSync(path.join(models, f)) ? ok(`модель ${f}`) : warn(`нет модели ${f} (apps/go-engine/models/README.md)`);
+  const nets = [
+    { envName: 'KATAGO_MODEL', label: 'основная сеть', file: env.KATAGO_MODEL ?? path.join(models, 'kata1-b10c128-s1141046784-d204142634.txt.gz') },
+    { envName: 'KATAGO_HUMAN_MODEL', label: 'человеческая сеть', file: env.KATAGO_HUMAN_MODEL ?? path.join(models, 'b18c384nbt-humanv0.bin.gz') },
+  ];
+  for (const net of nets) {
+    if (existsSync(net.file)) ok(`${net.label} на месте (${net.envName})`);
+    else warn(`${net.label} не найдена (${net.envName} или apps/go-engine/models/README.md)`);
   }
 
   if (failed) console.log('[X] doctor: есть блокирующие проблемы');
