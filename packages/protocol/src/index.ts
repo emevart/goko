@@ -3,3 +3,6 @@ export * from './errors.ts';
 export * from './ops.ts';
 export * from './events.ts';
 export * from './engine.ts';
+export * from './sse.ts';
+export * from './client.ts';
+export * from './test-helpers.ts';

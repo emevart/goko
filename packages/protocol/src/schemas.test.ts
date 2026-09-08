@@ -5,6 +5,9 @@
 // проверенный через внешнюю схему, а не только через вложенную.
 import { describe, expect, it } from 'vitest';
 import * as protocol from './index.ts';
+import { createClient } from './client.ts';
+import { parseSseStream } from './sse.ts';
+import { fakeFetch } from './test-helpers.ts';
 import {
   EngineAnalyzeRequest,
   EngineAnalyzeResponse,
@@ -708,8 +711,8 @@ describe('строгость запросов', () => {
 });
 
 describe('публичная поверхность пакета', () => {
-  it('index.ts реэкспортирует все пять модулей', () => {
-    for (const name of ['GameState', 'ERROR_CODES', 'PlayRequest', 'GameEvent', 'EngineGenmoveRequest']) {
+  it('index.ts реэкспортирует все восемь модулей', () => {
+    for (const name of ['GameState', 'ERROR_CODES', 'PlayRequest', 'GameEvent', 'EngineGenmoveRequest', 'createClient', 'parseSseStream', 'fakeFetch']) {
       expect(Object.keys(protocol), name).toContain(name);
     }
     expect(protocol.ERROR_CODES).toEqual(ERROR_CODES);
@@ -717,5 +720,8 @@ describe('публичная поверхность пакета', () => {
     expect(protocol.PlayRequest).toBe(PlayRequest);
     expect(protocol.GameEvent).toBe(GameEvent);
     expect(protocol.EngineGenmoveRequest).toBe(EngineGenmoveRequest);
+    expect(protocol.createClient).toBe(createClient);
+    expect(protocol.parseSseStream).toBe(parseSseStream);
+    expect(protocol.fakeFetch).toBe(fakeFetch);
   });
 });
