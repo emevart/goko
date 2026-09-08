@@ -64,6 +64,16 @@ function track<T>(p: Promise<T>): { settled: boolean } {
   return state;
 }
 
+// Ожидание условия без часов: крутится только очередь событий, поэтому годится
+// и на фейковых таймерах, где обычное опросное ожидание не сдвинулось бы с места.
+const untilTick = async (cond: () => boolean, turns = 5000): Promise<void> => {
+  for (let i = 0; i < turns; i++) {
+    if (cond()) return;
+    await new Promise((r) => setImmediate(r));
+  }
+  throw new Error('условие не выполнилось за отведённые обороты очереди');
+};
+
 const until = async (cond: () => boolean, ms = 2000) => {
   const t0 = Date.now();
   while (!cond()) {
@@ -744,26 +754,6 @@ describe('GameService: фоновые задачи, дедлайны и мьют
     expect((await service.analyze(g.state.id, { maxVisits: 50 })).visits).toBe(50);
   });
 
-  it('close не ждёт паузу перед повтором', async () => {
-    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
-    const inner = createFakeEngine();
-    const down: Engine = {
-      ...inner,
-      genmove: async () => {
-        throw new ApiError('engine_unavailable', 'engine is unreachable');
-      },
-    };
-    // Пауза перед повтором — 5 с; часы стоят, поэтому дождаться её close не сможет.
-    const { service, bus } = await make(down, { engineRetryMs: 5000 });
-    const g = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: false });
-    const events = record(bus, `game:${g.state.id}`);
-    await service.play(g.state.id, { coord: 'D4', waitForReply: false, via: 'api' });
-    await tick(10);
-    expect(events.some((e) => e.type === 'error')).toBe(true);
-    await service.close();
-    expect(service.get(g.state.id).moves).toHaveLength(1);
-  });
-
   it('create не ждёт ответа, когда первым ходит человек', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     // Часы стоят: ожидание ответа движка не смогло бы закончиться таймаутом.
@@ -854,5 +844,55 @@ describe('GameService: фоновые задачи, дедлайны и мьют
     await tick(10);
     expect(service.get(id).status).toBe('playing');
     expect(service.get(id).moves).toEqual([]);
+  });
+
+  it('умолчание ожидания ответа — 8 с, по шагам таймера', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    // Движок думает дольше любого разумного ожидания: важно, когда вернётся play.
+    const { service } = await make(createFakeEngine({ script: ['E5'], delayMs: 60_000 }), { replyTimeoutMs: undefined });
+    const g = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: false });
+    const id = g.state.id;
+    const playing = service.play(id, { coord: 'D4', waitForReply: true, via: 'api' });
+    const state = track(playing);
+    // Таймер ожидания заводится после записи снапшота: до этого двигать часы рано.
+    await untilTick(() => service.get(id).moves.length === 1);
+    await tick();
+    await vi.advanceTimersByTimeAsync(7_999);
+    expect(state.settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect((await playing).replyTimedOut).toBe(true);
+    // Досчитываем раздумье движка, чтобы фоновая задача завершилась до close.
+    await vi.advanceTimersByTimeAsync(60_000);
+    await untilTick(() => service.get(id).moves.length === 2);
+    expect(service.get(id).moves[1]?.coord).toBe('E5');
+  });
+
+  it('умолчание паузы перед повтором — 5 с, и close её не ждёт', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const inner = createFakeEngine();
+    let calls = 0;
+    const down: Engine = {
+      ...inner,
+      genmove: async () => {
+        calls++;
+        throw new ApiError('engine_unavailable', 'engine is unreachable');
+      },
+    };
+    const { service, bus } = await make(down, { engineRetryMs: undefined });
+    const g = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: false });
+    const events = record(bus, `game:${g.state.id}`);
+    await service.play(g.state.id, { coord: 'D4', waitForReply: false, via: 'api' });
+    await tick(10);
+    expect(events.some((e) => e.type === 'error')).toBe(true);
+    expect(calls).toBe(1);
+    await vi.advanceTimersByTimeAsync(4_999);
+    await tick();
+    expect(calls).toBe(1);
+    await vi.advanceTimersByTimeAsync(1);
+    await tick();
+    expect(calls).toBe(2);
+    // Часы стоят: если бы close ждал паузу целиком, он не вернулся бы никогда.
+    await service.close();
+    expect(service.get(g.state.id).moves).toHaveLength(1);
   });
 });

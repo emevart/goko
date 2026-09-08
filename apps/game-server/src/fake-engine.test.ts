@@ -53,6 +53,16 @@ describe('createFakeEngine', () => {
     expect((await stubborn.genmove({ ...base, moves: [['B', 'pass']], rank: '10k' })).move).not.toBe('pass');
   });
 
+  it('сценарий вызывающего не расходуется движком: список копируется', async () => {
+    const script = ['E5', 'F6'];
+    const engine = createFakeEngine({ script });
+    expect((await engine.genmove({ ...base, moves: [], rank: '10k' })).move).toBe('E5');
+    // Тот же список отдан второму движку: первый не вправе был его опустошить.
+    expect(script).toEqual(['E5', 'F6']);
+    const other = createFakeEngine({ script });
+    expect((await other.genmove({ ...base, moves: [], rank: '10k' })).move).toBe('E5');
+  });
+
   it('сценарий сильнее паса соперника', async () => {
     const engine = createFakeEngine({ script: ['E5'] });
     expect((await engine.genmove({ ...base, moves: [['B', 'pass']], rank: '10k' })).move).toBe('E5');

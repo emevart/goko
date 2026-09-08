@@ -151,6 +151,11 @@ describe('createEngineClient', () => {
     await failing;
     // Тело детерминировано: вторая попытка разобрала бы его так же.
     expect(f.calls).toHaveLength(1);
+    // Сообщение обрезано: полный текст ZodError ушёл бы в событие error, в SSE и в голос.
+    const err: unknown = await engine.genmove(req).catch((e: unknown) => e);
+    const message = err instanceof Error ? err.message : String(err);
+    expect(message.startsWith('engine response does not match the protocol: ')).toBe(true);
+    expect(message.length).toBeLessThan(300);
   });
 
   it('нечитаемое тело успешного ответа тоже даёт ApiError, а не SyntaxError', async () => {
