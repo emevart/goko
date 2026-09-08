@@ -730,7 +730,6 @@ function randomGame(seed: number, size: number, maxMoves: number): Position {
     for (const g of allGroups(pos)) {
       expect(g.liberties.length, `seed ${seed} move ${n}: group without liberties`).toBeGreaterThan(0);
     }
-    expect(pos.board).toHaveLength(size * size);
     color = color === 'B' ? 'W' : 'B';
   }
   return pos;
@@ -741,8 +740,9 @@ describe('случайные партии', () => {
     for (let seed = 1; seed <= 30; seed++) randomGame(seed, 9, 150);
   });
 
-  it('пленные не отрицательны и не больше числа ходов', () => {
+  it('пленные не отрицательны и не больше числа ходов, длина доски сохраняется', () => {
     const pos = randomGame(42, 13, 200);
+    expect(pos.board).toHaveLength(13 * 13);
     expect(pos.captures.B).toBeGreaterThanOrEqual(0);
     expect(pos.captures.W).toBeGreaterThanOrEqual(0);
     expect(pos.captures.B + pos.captures.W).toBeLessThanOrEqual(200);
@@ -1119,7 +1119,7 @@ export function toAscii(pos: Position, opts: { lastMove?: string | null } = {}):
     }
     lines.push(`${String(row + 1).padStart(2)} ${cells.join('')}`);
   }
-  lines.push(`   ${[...COLUMN_LETTERS.slice(0, pos.size)].map((l) => ` ${l} `).join('')}`);
+  lines.push(`    ${[...COLUMN_LETTERS.slice(0, pos.size)].map((l) => ` ${l} `).join('')}`);
   lines.push(`X чёрные, O белые, () последний ход; пленные: X ${pos.captures.B}, O ${pos.captures.W}`);
   return lines.join('\n');
 }
@@ -1161,7 +1161,7 @@ git commit -m "go-core: счёт по площади, группы по влад
 **Interfaces:**
 - Produces (все — zod-схемы с одноимёнными типами через `z.infer`; типы запросов — `z.input`, чтобы поля с `default` были необязательны у клиента):
   - `game.ts`: `BoardSize`, `GameSettings`, `RANKS`, `Rank`, `Color`, `Controller`, `Seat`, `Move`, `Score`, `Result`, `GameStatus`, `GameState`, `GameSummary`, `Session`, `Via`, `By`.
-  - `errors.ts`: `ERROR_CODES`, `type ErrorCode`, `ERROR_STATUS: Record<ErrorCode, number>`, `ErrorBody`, `class ApiError extends Error { code; status; details?; toBody() }`, `class HttpError extends Error { status; body? }`.
+  - `errors.ts`: `ERROR_CODES`, `type ErrorCode`, `ERROR_STATUS: Record<ErrorCode, number>`, `ErrorBody`, `class ApiError extends Error { code; status; details?; toBody() }`, `apiErrorFromBody(body: string, status: number): ApiError | null`, `class HttpError extends Error { status; body? }`.
   - `ops.ts`: `NewGameRequest/NewGameResponse`, `PlayRequest/PlayResponse`, `PassRequest`, `ResignRequest`, `StateResponse`, `UndoRequest/UndoResponse`, `CorrectRequest`, `SetRankRequest`, `AnalyzeRequest`, `GroupInfo`, `Analysis`, `CreateSessionResponse`, `ListGamesResponse`.
   - `events.ts`: `StateCause`, `GameEvent` (union по `type`: `session.game | state.updated | engine.thinking | game.finished | error`).
   - `engine.ts`: `EngineMove`, `EnginePositionRequest`, `EngineGenmoveRequest/Response`, `EngineAnalyzeRequest/Response`, `EngineMoveInfo`, `EngineScoreRequest/Response`, `EngineHealth`.
@@ -1471,6 +1471,18 @@ export class ApiError extends Error {
   }
 }
 
+// Разбор тела ответа с ошибкой в ApiError: одна реализация на клиент сервера и клиент движка.
+// null — тело не по протоколу; что делать со статусом, решает вызывающий (HttpError или engine_unavailable).
+export function apiErrorFromBody(body: string, status: number): ApiError | null {
+  try {
+    const parsed = ErrorBody.safeParse(JSON.parse(body));
+    if (parsed.success) return new ApiError(parsed.data.error.code, parsed.data.error.message, parsed.data.error.details);
+  } catch {
+    // не JSON: null, дальше по статусу
+  }
+  return null;
+}
+
 // Ответ не по протоколу (прокси, падение): статус и сырое тело.
 export class HttpError extends Error {
   readonly status: number;
@@ -1714,15 +1726,38 @@ git commit -m "protocol: zod-схемы партии, операций, ошиб
 ### Task 5: `protocol` — разбор SSE и HTTP-клиент
 
 **Files:**
-- Create: `packages/protocol/src/sse.ts`, `packages/protocol/src/client.ts`
+- Create: `packages/protocol/src/sse.ts`, `packages/protocol/src/client.ts`, `packages/protocol/src/test-helpers.ts`
 - Modify: `packages/protocol/src/index.ts`
 - Test: `packages/protocol/src/sse.test.ts`, `packages/protocol/src/client.test.ts`
 
 **Interfaces:**
 - Consumes: схемы Task 4.
-- Produces: `parseSseStream(body: ReadableStream<Uint8Array>): AsyncGenerator<string>` (отдаёт склеенные `data:` каждого блока); `createClient({ baseUrl, appKey, fetch? }): GokoClient` с методами `createSession()`, `newGame(sessionId, req)`, `createGame(req)`, `getGame(id)`, `listGames()`, `play(id, req)`, `pass(id, req?)`, `resign(id, req)`, `undo(id, req?)`, `correct(id, req)`, `setRank(id, req)`, `analyze(id, req?)`, `score(id)`, `ascii(id)`, `sgf(id)`, `events(target: { sessionId } | { gameId }, signal?): AsyncGenerator<GameEvent>`; ошибки протокола — `ApiError`, прочие — `HttpError`; `type GokoClient = ReturnType<typeof createClient>`.
+- Produces: `parseSseStream(body: ReadableStream<Uint8Array>): AsyncGenerator<string>` (отдаёт склеенные `data:` каждого блока); `createClient({ baseUrl, appKey, fetch? }): GokoClient` с методами `createSession()`, `newGame(sessionId, req)`, `createGame(req)`, `getGame(id)`, `listGames()`, `play(id, req)`, `pass(id, req?)`, `resign(id, req)`, `undo(id, req?)`, `correct(id, req)`, `setRank(id, req)`, `analyze(id, req?)`, `score(id)`, `ascii(id)`, `sgf(id)`, `events(target: { sessionId } | { gameId }, signal?): AsyncGenerator<GameEvent>`; ошибки протокола — `ApiError`, прочие — `HttpError`; `type GokoClient = ReturnType<typeof createClient>`; `test-helpers.ts`: `type Call = { url: string; init: RequestInit }`, `fakeFetch(handlers: ((call: Call) => Response | Promise<Response>) | Array<(call: Call) => Response | Promise<Response>>): { calls: Call[]; fetch: typeof fetch }` — общий фейковый `fetch` для тестов протокола и game-server (реэкспортируется из `index.ts`, как `testing.ts` в `go-core`).
 
-- [ ] **Step 1: Тесты**
+- [ ] **Step 1: Общий хелпер тестов и тесты**
+
+`packages/protocol/src/test-helpers.ts` (нужен тестам, поэтому первым; тот же приём,
+что `testing.ts` в `go-core`: файл лежит в пакете и реэкспортируется из `index.ts`,
+чтобы `apps/game-server` брал его из `@goko/protocol`, а не переписывал у себя):
+
+```ts
+// Фейковый fetch для тестов: собирает вызовы, отвечает по списку обработчиков.
+// Один обработчик — отвечает на все вызовы; список — по одному на вызов, последний повторяется.
+export type Call = { url: string; init: RequestInit };
+type Handler = (call: Call) => Response | Promise<Response>;
+
+export function fakeFetch(handlers: Handler | Handler[]): { calls: Call[]; fetch: typeof globalThis.fetch } {
+  const list = Array.isArray(handlers) ? handlers : [handlers];
+  const calls: Call[] = [];
+  const fetchFn = async (input: string | URL | Request, init?: RequestInit) => {
+    const call = { url: String(input), init: init ?? {} };
+    calls.push(call);
+    const h = list[Math.min(calls.length - 1, list.length - 1)]!;
+    return h(call);
+  };
+  return { calls, fetch: fetchFn as unknown as typeof globalThis.fetch };
+}
+```
 
 `packages/protocol/src/sse.test.ts`:
 
@@ -1756,6 +1791,11 @@ describe('parseSseStream', () => {
     const data = await collect(streamOf(['data: one\r\ndata: two\r\n\r\n']));
     expect(data).toEqual(['one\ntwo']);
   });
+
+  it('CRLF, разорванный между чанками', async () => {
+    const data = await collect(streamOf(['data: one\r', '\ndata: two\r', '\n\r\n']));
+    expect(data).toEqual(['one\ntwo']);
+  });
 });
 ```
 
@@ -1764,18 +1804,7 @@ describe('parseSseStream', () => {
 ```ts
 import { describe, expect, it } from 'vitest';
 import { ApiError, HttpError, createClient } from './index.ts';
-
-type Call = { url: string; init: RequestInit };
-
-function fakeFetch(handler: (call: Call) => Response) {
-  const calls: Call[] = [];
-  const fetchFn = async (input: string | URL | Request, init?: RequestInit) => {
-    const call = { url: String(input), init: init ?? {} };
-    calls.push(call);
-    return handler(call);
-  };
-  return { calls, fetch: fetchFn as unknown as typeof fetch };
-}
+import { fakeFetch } from './test-helpers.ts';
 
 const state = {
   id: 'g1',
@@ -1863,7 +1892,9 @@ export async function* parseSseStream(body: ReadableStream<Uint8Array>): AsyncGe
     while (true) {
       const { value, done } = await reader.read();
       if (done) break;
-      buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, '\n');
+      // Нормализация переводов строк на уровне буфера, а не чанка: `\r` и `\n` могут прийти в разных чанках.
+      buffer += decoder.decode(value, { stream: true });
+      buffer = buffer.replace(/\r\n/g, '\n');
       let sep = buffer.indexOf('\n\n');
       while (sep >= 0) {
         const block = buffer.slice(0, sep);
@@ -1888,7 +1919,7 @@ export async function* parseSseStream(body: ReadableStream<Uint8Array>): AsyncGe
 ```ts
 // Типизированный клиент game-server. Им пользуются voice-agent, web, mcp-server и scripts/.
 import type { z } from 'zod';
-import { ApiError, ErrorBody, HttpError } from './errors.ts';
+import { HttpError, apiErrorFromBody } from './errors.ts';
 import { GameEvent } from './events.ts';
 import { GameState, Result } from './game.ts';
 import {
@@ -1920,13 +1951,7 @@ export type EventsTarget = { sessionId: string } | { gameId: string };
 
 async function toError(res: Response): Promise<Error> {
   const text = await res.text().catch(() => '');
-  try {
-    const parsed = ErrorBody.safeParse(JSON.parse(text));
-    if (parsed.success) return new ApiError(parsed.data.error.code, parsed.data.error.message, parsed.data.error.details);
-  } catch {
-    // не JSON — ниже HttpError
-  }
-  return new HttpError(res.status, text);
+  return apiErrorFromBody(text, res.status) ?? new HttpError(res.status, text);
 }
 
 export function createClient(opts: ClientOptions) {
@@ -1995,6 +2020,7 @@ export type GokoClient = ReturnType<typeof createClient>;
 ```ts
 export * from './sse.ts';
 export * from './client.ts';
+export * from './test-helpers.ts';
 ```
 
 - [ ] **Step 5: Тесты зелёные**
@@ -2019,9 +2045,12 @@ git commit -m "protocol: разбор SSE и типизированный HTTP-�
 
 **Interfaces:**
 - Consumes: `indexToCoord` из `@goko/go-core`.
-- Produces: `kataIndexToOurs(kataIndex, size): number`; `kataIndexToCoord(kataIndex, size): string` (`size*size` → `'pass'`); `reorderFromKata(values: readonly number[], size): number[]`; `rankToProfile(rank): string` (`'10k'` → `'rank_10k'`); `type Candidate = { coord: string; prob: number }`; `chooseMove({ humanPolicy, size, bestMove, tailCutoff?, random? }): { move: string; top: Candidate[]; fallback: boolean }`; `TAIL_CUTOFF = 0.005`.
+- Produces: `kataIndexToOurs(kataIndex, size): number`; `oursToKataIndex(index, size): number`; `kataIndexToCoord(kataIndex, size): string` (`size*size` → `'pass'`); `reorderFromKata(values: readonly number[], size): number[]`; `rankToProfile(rank): string` (`'10k'` → `'rank_10k'`); `type Candidate = { coord: string; prob: number }`; `chooseMove({ humanPolicy, size, bestMove, tailCutoff?, random? }): { move: string; top: Candidate[]; fallback: boolean }`; `TAIL_CUTOFF = 0.005`.
 
 - [ ] **Step 1: `apps/go-engine/package.json`**
+
+`package.json` пакета пишется целиком сразу; скрипт `start` заработает после
+задачи 8, где появляется `apps/go-engine/src/main.ts`.
 
 ```json
 {
@@ -2051,7 +2080,7 @@ git commit -m "protocol: разбор SSE и типизированный HTTP-�
 ```ts
 import { describe, expect, it } from 'vitest';
 import { coordToIndex } from '@goko/go-core';
-import { kataIndexToCoord, kataIndexToOurs, rankToProfile, reorderFromKata } from './mapping.ts';
+import { kataIndexToCoord, kataIndexToOurs, oursToKataIndex, rankToProfile, reorderFromKata } from './mapping.ts';
 
 describe('mapping', () => {
   it('KataGo идёт строками сверху: индекс 0 — A13, индекс 168 — N1', () => {
@@ -2061,6 +2090,10 @@ describe('mapping', () => {
     expect(kataIndexToCoord(168, 13)).toBe('N1');
     expect(kataIndexToCoord(169, 13)).toBe('pass');
     expect(kataIndexToOurs(0, 13)).toBe(coordToIndex('A13', 13));
+  });
+
+  it('oursToKataIndex обратен kataIndexToOurs', () => {
+    for (const k of [0, 12, 42, 156, 168]) expect(oursToKataIndex(kataIndexToOurs(k, 13), 13)).toBe(k);
   });
 
   it('reorderFromKata перекладывает массив в нашу индексацию', () => {
@@ -2086,13 +2119,15 @@ describe('mapping', () => {
 ```ts
 import { describe, expect, it } from 'vitest';
 import { coordToIndex } from '@goko/go-core';
+import { oursToKataIndex } from './mapping.ts';
 import { chooseMove } from './sampling.ts';
 
 const SIZE = 9;
 const PASS = SIZE * SIZE;
 function policy(entries: Record<string, number>, pass = 0): number[] {
   const p = new Array<number>(PASS + 1).fill(0);
-  for (const [coord, prob] of Object.entries(entries)) p[coordToIndex(coord, SIZE)] = prob;
+  // humanPolicy приходит в индексации KataGo, поэтому наш индекс переводится обратно
+  for (const [coord, prob] of Object.entries(entries)) p[oursToKataIndex(coordToIndex(coord, SIZE), SIZE)] = prob;
   p[PASS] = pass;
   return p;
 }
@@ -2155,6 +2190,12 @@ export function kataIndexToOurs(kataIndex: number, size: number): number {
   const rowFromTop = Math.floor(kataIndex / size);
   const col = kataIndex % size;
   return (size - 1 - rowFromTop) * size + col;
+}
+
+export function oursToKataIndex(index: number, size: number): number {
+  const row = Math.floor(index / size);
+  const col = index % size;
+  return (size - 1 - row) * size + col;
 }
 
 export function kataIndexToCoord(kataIndex: number, size: number): string {
@@ -2583,20 +2624,39 @@ git commit -m "go-engine: процесс KataGo с очередью, тайма�
 ### Task 8: `go-engine` — HTTP-обёртка, запуск, контрактный тест с настоящим KataGo
 
 **Files:**
-- Create: `apps/go-engine/src/app.ts`, `apps/go-engine/src/main.ts`
-- Modify: `infra/.env.example` (переменные движка)
+- Create: `apps/go-engine/src/app.ts`, `apps/go-engine/src/main.ts`, `apps/go-engine/src/test-helpers.ts`
+- Modify: `infra/.env.example` (переменные движка), `scripts/doctor.mjs` (проверка обеих сетей KataGo)
 - Test: `apps/go-engine/src/app.test.ts`, `apps/go-engine/src/katago.contract.test.ts`
 
 **Interfaces:**
 - Consumes: `KataGo`, `KataGoError`, `chooseMove`, `reorderFromKata`, `rankToProfile`; схемы `Engine*` из `@goko/protocol`; `replay`, `deadStones`, `areaScore`, `resultFromArea` из `@goko/go-core`.
-- Produces: `type EngineDeps = { katago: Pick<KataGo, 'query' | 'queueLength' | 'restarts' | 'alive'>; engineKey: string; models: { main: string; human: string }; random?; maxQueue?: number = 8; timeouts?: { genmove; analyze; score } = { 20000, 30000, 60000 }; log? }`; `createEngineApp(deps): Hono` с маршрутами `GET /health`, `POST /v1/genmove`, `POST /v1/analyze`, `POST /v1/score` (все `/v1/*` требуют `X-Engine-Key`); `SCORE_VISITS = 400`. Переменные окружения `main.ts`: `KATAGO_BIN`, `KATAGO_MODEL`, `KATAGO_HUMAN_MODEL`, `KATAGO_CONFIG`, `ENGINE_KEY`, `ENGINE_PORT = 8788`, `ENGINE_HOST = 127.0.0.1`.
+- Produces: `type EngineDeps = { katago: Pick<KataGo, 'query' | 'queueLength' | 'restarts' | 'alive'>; engineKey: string; models: { main: string; human: string }; random?; maxQueue?: number = 8; timeouts?: { genmove; analyze; score } = { 20000, 30000, 60000 }; log? }`; `createEngineApp(deps): Hono` с маршрутами `GET /health`, `POST /v1/genmove`, `POST /v1/analyze`, `POST /v1/score` (все `/v1/*` требуют `X-Engine-Key`); `SCORE_VISITS = 400`; `test-helpers.ts`: `walls(blackRow, whiteRow): [string, string][]` — общая для `app.test.ts` и контрактного теста последовательность ходов. Переменные окружения `main.ts`: `KATAGO_BIN`, `KATAGO_MODEL`, `KATAGO_HUMAN_MODEL`, `KATAGO_CONFIG`, `ENGINE_KEY`, `ENGINE_PORT = 8788`, `ENGINE_HOST = 127.0.0.1`.
 
-- [ ] **Step 1: Тест `apps/go-engine/src/app.test.ts`**
+- [ ] **Step 1: Общий хелпер тестов и тест `apps/go-engine/src/app.test.ts`**
+
+`apps/go-engine/src/test-helpers.ts` (нужен и `app.test.ts`, и контрактному тесту Step 6):
+
+```ts
+// Чёрная стена на строке blackRow, белая — на whiteRow; ходы чередуются, всё легально.
+import { COLUMN_LETTERS } from '@goko/go-core';
+
+export function walls(blackRow: number, whiteRow: number): [string, string][] {
+  const moves: [string, string][] = [];
+  for (let c = 0; c < 13; c++) {
+    moves.push(['B', `${COLUMN_LETTERS.charAt(c)}${blackRow}`]);
+    moves.push(['W', `${COLUMN_LETTERS.charAt(c)}${whiteRow}`]);
+  }
+  return moves;
+}
+```
+
+`apps/go-engine/src/app.test.ts`:
 
 ```ts
 import { describe, expect, it } from 'vitest';
-import { COLUMN_LETTERS, coordToIndex } from '@goko/go-core';
+import { coordToIndex } from '@goko/go-core';
 import { createEngineApp } from './app.ts';
+import { walls } from './test-helpers.ts';
 import type { KataQuery, KataResponse } from './katago.ts';
 
 function fakeKatago(reply: (q: KataQuery) => Partial<KataResponse>, extra: { alive?: boolean; queueLength?: number } = {}) {
@@ -2616,16 +2676,6 @@ function fakeKatago(reply: (q: KataQuery) => Partial<KataResponse>, extra: { ali
 const KEY = 'engine-secret';
 const headers = { 'content-type': 'application/json', 'x-engine-key': KEY };
 const base = { boardSize: 13, rules: 'chinese', komi: 7.5 };
-
-// Чёрная стена на строке blackRow, белая — на whiteRow; ходы чередуются, всё легально.
-function walls(blackRow: number, whiteRow: number): [string, string][] {
-  const moves: [string, string][] = [];
-  for (let c = 0; c < 13; c++) {
-    moves.push(['B', `${COLUMN_LETTERS.charAt(c)}${blackRow}`]);
-    moves.push(['W', `${COLUMN_LETTERS.charAt(c)}${whiteRow}`]);
-  }
-  return moves;
-}
 
 // Ownership в порядке KataGo (строки сверху): строки выше границы белые (-1), ниже — чёрные (+1).
 function kataOwnership(blackRowsFromBottom: number): number[] {
@@ -2908,9 +2958,10 @@ for (const signal of ['SIGINT', 'SIGTERM'] as const) {
 // Настоящий KataGo: сторона winrate, порядок ownership, легальность ходов, счёт известной позиции.
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { COLUMN_LETTERS, coordToIndex, parseCoord, play, replay } from '@goko/go-core';
+import { coordToIndex, parseCoord, play, replay } from '@goko/go-core';
 import { createEngineApp } from './app.ts';
 import { KataGo } from './katago.ts';
+import { walls } from './test-helpers.ts';
 
 const BIN = process.env.KATAGO_BIN;
 const root = path.resolve(import.meta.dirname, '../../..');
@@ -2920,15 +2971,6 @@ const CONFIG = process.env.KATAGO_CONFIG ?? path.join(root, 'apps/go-engine/conf
 const KEY = 'contract';
 const headers = { 'content-type': 'application/json', 'x-engine-key': KEY };
 const base = { boardSize: 13, rules: 'chinese', komi: 7.5 };
-
-function walls(blackRow: number, whiteRow: number): [string, string][] {
-  const moves: [string, string][] = [];
-  for (let c = 0; c < 13; c++) {
-    moves.push(['B', `${COLUMN_LETTERS.charAt(c)}${blackRow}`]);
-    moves.push(['W', `${COLUMN_LETTERS.charAt(c)}${whiteRow}`]);
-  }
-  return moves;
-}
 
 describe.skipIf(!BIN)('KataGo contract', () => {
   const katago = new KataGo({ bin: BIN ?? '', model: MODEL, humanModel: HUMAN, config: CONFIG, log: (l) => console.error(l) });
@@ -2941,7 +2983,8 @@ describe.skipIf(!BIN)('KataGo contract', () => {
 
   beforeAll(async () => {
     katago.start();
-    await katago.query({ ...base, boardXSize: 13, boardYSize: 13, moves: [], maxVisits: 1 }, 300_000); // прогрев, OpenCL тюнит ядра
+    // Поля перечислены руками: раскрытие `base` протащило бы наше `boardSize`, которого нет в запросе KataGo.
+    await katago.query({ id: 'warmup', rules: base.rules, komi: base.komi, boardXSize: 13, boardYSize: 13, initialStones: [], moves: [], maxVisits: 1 }, 300_000); // прогрев, OpenCL тюнит ядра
   }, 320_000);
 
   afterAll(async () => {
@@ -2987,7 +3030,7 @@ describe.skipIf(!BIN)('KataGo contract', () => {
 });
 ```
 
-- [ ] **Step 7: `infra/.env.example` — добавить переменные движка и game-server** (после строки `KATAGO_BIN=`)
+- [ ] **Step 7: `infra/.env.example` — добавить переменные движка и game-server** (после строки `KATAGO_BIN=` и перед строкой `HETZNER_API=`)
 
 ```
 KATAGO_MODEL=                      # путь к основной сети; по умолчанию apps/go-engine/models/kata1-b10c128-...txt.gz
@@ -3013,10 +3056,51 @@ Expected: 5 passed (первый запуск может идти минуты �
 Run: `node --env-file-if-exists=.env apps/go-engine/src/main.ts` в одном терминале и `curl -s http://127.0.0.1:8788/health` в другом.
 Expected: `{"ok":true,"models":{...},"queue":0,"restarts":0}`.
 
-- [ ] **Step 9: Commit**
+- [ ] **Step 9: `scripts/doctor.mjs` — проверять обе сети KataGo**
+
+Файл уже существует (стадия 0), это правка, а не создание. Сейчас блок проверки
+моделей смотрит только человеческую сеть в `apps/go-engine/models` и молчит об
+отсутствии основной. Переписать его так, чтобы проверялись обе сети и по тем же
+переменным окружения, что читает `apps/go-engine/src/main.ts`: `KATAGO_MODEL`
+(основная сеть) и `KATAGO_HUMAN_MODEL` (человеческая), с теми же значениями по
+умолчанию — `apps/go-engine/models/kata1-b10c128-s1141046784-d204142634.txt.gz` и
+`apps/go-engine/models/b18c384nbt-humanv0.bin.gz`.
+
+Заменить блок
+
+```js
+  const models = path.join(root, 'apps/go-engine/models');
+  if (existsSync(models)) {
+    const need = ['b18c384nbt-humanv0.bin.gz'];
+    for (const f of need) existsSync(path.join(models, f)) ? ok(`модель ${f}`) : warn(`нет модели ${f} (apps/go-engine/models/README.md)`);
+  }
+```
+
+на
+
+```js
+  // Обе сети движка: имена переменных те же, что читает apps/go-engine/src/main.ts.
+  // Печатаются только имена переменных и вердикт: значения env не выводятся.
+  const models = path.join(root, 'apps/go-engine/models');
+  const nets = [
+    { envName: 'KATAGO_MODEL', label: 'основная сеть', file: env.KATAGO_MODEL ?? path.join(models, 'kata1-b10c128-s1141046784-d204142634.txt.gz') },
+    { envName: 'KATAGO_HUMAN_MODEL', label: 'человеческая сеть', file: env.KATAGO_HUMAN_MODEL ?? path.join(models, 'b18c384nbt-humanv0.bin.gz') },
+  ];
+  for (const net of nets) {
+    if (existsSync(net.file)) ok(`${net.label} на месте (${net.envName})`);
+    else warn(`${net.label} не найдена (${net.envName} или apps/go-engine/models/README.md)`);
+  }
+```
+
+Run: `npm run doctor`
+Expected: две строки про сети — `[OK] ... на месте (KATAGO_MODEL)` / `[OK] ... (KATAGO_HUMAN_MODEL)`
+или `[!]` с именем переменной, если файла нет; ни одно значение переменной окружения
+в вывод не попадает.
+
+- [ ] **Step 10: Commit**
 
 ```bash
-git add apps/go-engine infra/.env.example
+git add apps/go-engine infra/.env.example scripts/doctor.mjs
 git commit -m "go-engine: HTTP-обёртка genmove/analyze/score, запуск, контрактный тест с KataGo"
 ```
 
@@ -3024,14 +3108,17 @@ git commit -m "go-engine: HTTP-обёртка genmove/analyze/score, запус�
 ### Task 9: `game-server` — чистые переходы партии, снапшоты, шина событий
 
 **Files:**
-- Create: `apps/game-server/package.json`, `apps/game-server/src/ids.ts`, `apps/game-server/src/game.ts`, `apps/game-server/src/store.ts`, `apps/game-server/src/events.ts`
+- Create: `apps/game-server/package.json`, `apps/game-server/src/ids.ts`, `apps/game-server/src/game.ts`, `apps/game-server/src/store.ts`, `apps/game-server/src/events.ts`, `apps/game-server/src/test-helpers.ts`
 - Test: `apps/game-server/src/game.test.ts`, `apps/game-server/src/store.test.ts`, `apps/game-server/src/events.test.ts`
 
 **Interfaces:**
 - Consumes: `replay`, `play`, `IllegalMoveError`, `InvalidCoordError`, `parseCoord`, `formatCoord`, `indexToCoord`, `opposite`, `type Position` из `@goko/go-core`; `GameState`, `GameSettings`, `Move`, `Seat`, `Color`, `Rank`, `Result`, `ApiError`, `type GameEvent` из `@goko/protocol`.
-- Produces: `newId(): string`; `type NewGameParams = { id: string; createdAt: string; settings: GameSettings; seats: { B: Seat; W: Seat } }`; `newGame(input: NewGameParams): GameState`; `positionOf(state): Position`; `applyMove(state, color, coord, at: string): { state: GameState; move: Move }`; `illegalMessage(reason): string`; `resign(state, color): GameState`; `finishByScore(state, result: Result): GameState`; `setRank(state, color, rank): GameState`; `undo(state): { state: GameState; removed: Move[] }`; `rebuild(state, moves: Move[]): GameState`; `class GameStore { constructor(dir: string); init(): Promise<void>; load(): Promise<GameState[]>; save(state): Promise<void> }`; `class EventBus { subscribe(channel: string, listener: (e: GameEvent) => void): () => void; emit(channel, e): void; count(channel): number }`; каналы `game:<id>` и `session:<id>`.
+- Produces: `newId(): string`; `type NewGameParams = { id: string; createdAt: string; settings: GameSettings; seats: { B: Seat; W: Seat } }`; `newGame(input: NewGameParams): GameState`; `positionOf(state): Position`; `applyMove(state, color, coord, at: string): { state: GameState; move: Move }`; `illegalMessage(reason): string`; `resign(state, color): GameState`; `finishByScore(state, result: Result): GameState`; `setRank(state, color, rank): GameState`; `undo(state): { state: GameState; removed: Move[] }`; `rebuild(state, moves: Move[]): GameState`; `class GameStore { constructor(dir: string); init(): Promise<void>; load(): Promise<GameState[]>; save(state): Promise<void> }`; `class EventBus { subscribe(channel: string, listener: (e: GameEvent) => void): () => void; emit(channel, e): void; count(channel): number }`; каналы `game:<id>` и `session:<id>`; `test-helpers.ts`: `errorOf(fn: () => unknown): ApiError` — общий хелпер тестов всех задач game-server.
 
 - [ ] **Step 1: `apps/game-server/package.json`**
+
+`package.json` пакета пишется целиком сразу; скрипт `start` заработает после
+задачи 12, где появляется `apps/game-server/src/main.ts`.
 
 ```json
 {
@@ -3056,17 +3143,16 @@ git commit -m "go-engine: HTTP-обёртка genmove/analyze/score, запус�
 Run: `npm install`
 Expected: `package-lock.json` обновлён, `node_modules/@goko/game-server` — симлинк.
 
-- [ ] **Step 2: Тест `apps/game-server/src/game.test.ts`**
+- [ ] **Step 2: Общий хелпер тестов и тест `apps/game-server/src/game.test.ts`**
+
+`apps/game-server/src/test-helpers.ts` (нужен тестам, поэтому первым; его берут
+`game.test.ts`, `sessions.test.ts` и остальные тесты game-server):
 
 ```ts
-import { describe, expect, it } from 'vitest';
-import type { ApiError, GameState } from '@goko/protocol';
-import { applyMove, finishByScore, newGame, positionOf, rebuild, resign, setRank, undo } from './game.ts';
-
-const T = '2026-09-07T10:00:00.000Z';
-
 // Ошибка синхронного вызова как значение: проверяем code и details через toMatchObject.
-function errorOf(fn: () => unknown): ApiError {
+import type { ApiError } from '@goko/protocol';
+
+export function errorOf(fn: () => unknown): ApiError {
   try {
     fn();
   } catch (e) {
@@ -3074,6 +3160,17 @@ function errorOf(fn: () => unknown): ApiError {
   }
   throw new Error('ожидалась ошибка');
 }
+```
+
+`apps/game-server/src/game.test.ts`:
+
+```ts
+import { describe, expect, it } from 'vitest';
+import type { GameState } from '@goko/protocol';
+import { applyMove, finishByScore, newGame, positionOf, rebuild, resign, setRank, undo } from './game.ts';
+import { errorOf } from './test-helpers.ts';
+
+const T = '2026-09-07T10:00:00.000Z';
 
 function fresh(overrides: Partial<Parameters<typeof newGame>[0]> = {}): GameState {
   return newGame({
@@ -3104,9 +3201,10 @@ describe('newGame', () => {
 
 describe('applyMove', () => {
   it('ставит камень, нумерует ход, меняет очередь, поднимает revision, нормализует координату', () => {
-    const { state, move } = applyMove(fresh(), 'B', 'д 4', T);
-    expect(move).toEqual({ n: 1, color: 'B', coord: 'D4', captured: 0, at: T });
-    expect(state.board.charAt(3 * 9 + 3)).toBe('B');
+    // Кириллическая `е` — гомоглиф латинской `E` и лежит в CYRILLIC_TO_LATIN; `Д` в карте нет.
+    const { state, move } = applyMove(fresh(), 'B', 'е 5', T);
+    expect(move).toEqual({ n: 1, color: 'B', coord: 'E5', captured: 0, at: T });
+    expect(state.board.charAt(4 * 9 + 4)).toBe('B');
     expect(state).toMatchObject({ toPlay: 'W', revision: 1, pendingEngineMove: true, consecutivePasses: 0 });
     expect(state.moves).toHaveLength(1);
   });
@@ -3132,15 +3230,18 @@ describe('applyMove', () => {
   });
 
   it('захват записывается в ход и в captures, ко попадает в состояние строкой', () => {
-    // 9×9: чёрные D5 E6 F5 вокруг E5, белые D4 E3 F4 вокруг E4; W E4 -> B E5 снимает E4 и создаёт ко.
-    const s = playAll(fresh(), ['D5', 'D4', 'E6', 'E3', 'F5', 'F4', 'A1', 'E4', 'E5']);
-    // Последний ход чёрных E5 снял белый E4: одиночный камень с одним дыханием.
+    // 9×9: чёрные D5 D3 C4 вокруг пустой D4, белые E5 E3 F4 вокруг пустой E4;
+    // чёрные ходят E4 (одно дыхание — D4), белые ходят D4 и снимают E4, возникает ко.
+    // Перед фиксацией ожиданий прогнать последовательность через `packages/go-core`
+    // и, если фактические значения отличаются, вписать фактические — позиция важнее чисел.
+    const s = playAll(fresh(), ['D5', 'E5', 'D3', 'E3', 'C4', 'F4', 'E4', 'D4']);
+    // Последний ход белых D4 снял чёрный E4: одиночный камень с одним дыханием.
     const last = s.moves.at(-1)!;
-    expect(last).toMatchObject({ coord: 'E5', captured: 1 });
-    expect(s.captures).toEqual({ B: 1, W: 0 });
+    expect(last).toMatchObject({ color: 'W', coord: 'D4', captured: 1 });
+    expect(s.captures).toEqual({ B: 0, W: 1 });
     expect(s.ko).toBe('E4');
     expect(positionOf(s).ko).toBe(3 * 9 + 4);
-    expect(errorOf(() => applyMove(s, 'W', 'E4', T))).toMatchObject({ code: 'illegal_move', details: { reason: 'ko', coord: 'E4' } });
+    expect(errorOf(() => applyMove(s, 'B', 'E4', T))).toMatchObject({ code: 'illegal_move', details: { reason: 'ko', coord: 'E4' } });
   });
 });
 
@@ -3222,11 +3323,13 @@ describe('undo', () => {
 
 describe('rebuild', () => {
   it('переигрывает список ходов и восстанавливает захваты, очередь и пасы', () => {
-    const s = playAll(fresh(), ['D5', 'D4', 'E6', 'E3', 'F5', 'F4', 'A1', 'E4', 'E5', 'pass']);
+    // Та же позиция со взятием и ко, что выше, плюс пас чёрных.
+    // Фактические значения сверить прогоном через `packages/go-core`.
+    const s = playAll(fresh(), ['D5', 'E5', 'D3', 'E3', 'C4', 'F4', 'E4', 'D4', 'pass']);
     const r = rebuild(fresh(), s.moves);
     expect(r.board).toBe(s.board);
-    expect(r.captures).toEqual({ B: 1, W: 0 });
-    expect(r.toPlay).toBe('B');
+    expect(r.captures).toEqual({ B: 0, W: 1 });
+    expect(r.toPlay).toBe('W');
     expect(r.consecutivePasses).toBe(1);
     expect(r.ko).toBeNull(); // pass снимает ко
   });
@@ -3584,6 +3687,7 @@ export class EventBus {
     }
   }
 
+  // Крючок для тестов: сколько слушателей у канала (проверяем, что подписка снимается).
   count(channel: string): number {
     return this.channels.get(channel)?.size ?? 0;
   }
@@ -3613,25 +3717,17 @@ git commit -m "game-server: чистые переходы партии, снап
 **Interfaces:**
 - Consumes: Task 9 целиком; `Engine*` схемы из `@goko/protocol`; `groupsWithOwnership`, `deadStones`, `areaScore`, `resultFromArea`, `toAscii`, `toSgf`, `replay`, `play`, `indexToCoord` из `@goko/go-core`.
 - Produces: `interface Engine { genmove(req: EngineGenmoveRequest): Promise<EngineGenmoveResponse>; analyze(req: EngineAnalyzeRequest): Promise<EngineAnalyzeResponse>; score(req: EngineScoreRequest): Promise<EngineScoreResponse> }`; `createEngineClient({ baseUrl, engineKey, fetch?, timeouts? = { genmove: 10000, analyze: 15000, score: 30000 }, retryDelayMs? = 200 }): Engine`; `createFakeEngine({ script?: string[]; delayMs?: number; random?: () => number; passAfterPass?: boolean = true }): Engine & { calls: { genmove: number; analyze: number; score: number } }`; `class GameService` с методами `init()`, `close()`, `list(): GameSummary[]`, `get(id): GameState`, `create(req: NewGameInput, opts?: { sessionId?: string }): Promise<NewGameResponse>`, `play(id, req: PlayInput, by?: By): Promise<PlayResponse>`, `pass(id, req: PassInput): Promise<PlayResponse>`, `resign(id, req: ResignInput): Promise<StateResponse>`, `undo(id, req: UndoInput): Promise<UndoResponse>`, `correct(id, req: CorrectInput): Promise<PlayResponse>`, `setRank(id, req: SetRankInput): Promise<StateResponse>`, `analyze(id, req: AnalyzeInput): Promise<Analysis>`, `score(id): Promise<Result>`, `ascii(id): string`, `sgf(id): string`; типы `*Input` — `z.output` соответствующих схем `ops.ts`; константы `REPLY_TIMEOUT_MS = 8000`, `ENGINE_RESIGN_AFTER_MOVE = 60`, `ENGINE_RESIGN_WINRATE = 0.03`, `ENGINE_RESIGN_LEAD = -25`, `GENMOVE_VISITS = 10`.
+- Оговорка: типы `*Input` берутся как `z.output` от схем-значений, поэтому эти схемы
+  (`NewGameRequest`, `PlayRequest`, `PassRequest`, `ResignRequest`, `UndoRequest`,
+  `CorrectRequest`, `SetRankRequest`, `AnalyzeRequest`) импортируются в `service.ts`
+  как значения, а не через `import type`.
 
 - [ ] **Step 1: Тест `apps/game-server/src/engine-client.test.ts`**
 
 ```ts
 import { describe, expect, it } from 'vitest';
+import { fakeFetch } from '@goko/protocol';
 import { createEngineClient } from './engine-client.ts';
-
-type Call = { url: string; init: RequestInit };
-
-function fakeFetch(handlers: Array<(call: Call) => Response | Promise<Response>>) {
-  const calls: Call[] = [];
-  const fetchFn = async (input: string | URL | Request, init?: RequestInit) => {
-    const call = { url: String(input), init: init ?? {} };
-    calls.push(call);
-    const h = handlers[Math.min(calls.length - 1, handlers.length - 1)]!;
-    return h(call);
-  };
-  return { calls, fetch: fetchFn as unknown as typeof fetch };
-}
 
 const req = { boardSize: 13, rules: 'chinese' as const, komi: 7.5, moves: [], rank: '10k' as const };
 const ok = { move: 'D4', winrateB: 0.5, scoreLeadB: 0, humanPolicyTop: [], ms: 12 };
@@ -3717,7 +3813,7 @@ import {
   EngineGenmoveResponse,
   type EngineScoreRequest,
   EngineScoreResponse,
-  ErrorBody,
+  apiErrorFromBody,
 } from '@goko/protocol';
 
 export interface Engine {
@@ -3773,14 +3869,7 @@ export function createEngineClient(opts: EngineClientOptions): Engine {
     }
     if (res.ok) return schema.parse(await res.json());
     const text = await res.text().catch(() => '');
-    let api: ApiError | undefined;
-    try {
-      const parsed = ErrorBody.safeParse(JSON.parse(text));
-      if (parsed.success) api = new ApiError(parsed.data.error.code, parsed.data.error.message, parsed.data.error.details);
-    } catch {
-      // не JSON
-    }
-    api ??= new ApiError('engine_unavailable', `движок ответил ${res.status}`);
+    const api = apiErrorFromBody(text, res.status) ?? new ApiError('engine_unavailable', `движок ответил ${res.status}`);
     throw new AttemptError(api.message, res.status >= 500, api);
   }
 
@@ -3821,7 +3910,6 @@ import { replay } from '@goko/go-core';
 import { createFakeEngine } from './fake-engine.ts';
 
 const base = { boardSize: 9, rules: 'chinese' as const, komi: 7.5 };
-const engine = createFakeEngine();
 
 describe('createFakeEngine', () => {
   it('сценарий отдаёт ходы по порядку, потом случайные легальные', async () => {
@@ -3842,6 +3930,7 @@ describe('createFakeEngine', () => {
   });
 
   it('score считает площадь по наивному владению: камни +-1, пустые точки по флуд-филлу go-core', async () => {
+    const engine = createFakeEngine();
     const moves: [string, string][] = [];
     for (const c of 'ABCDEFGHJ') moves.push(['B', `${c}4`], ['W', `${c}5`]);
     const r = await engine.score({ ...base, moves });
@@ -4240,27 +4329,27 @@ import type { z } from 'zod';
 import { groupsWithOwnership, toAscii, toSgf } from '@goko/go-core';
 import {
   type Analysis,
-  type AnalyzeRequest,
+  AnalyzeRequest,
   ApiError,
   type By,
   type Color,
-  type CorrectRequest,
+  CorrectRequest,
   type GameEvent,
   type GameState,
   type GameSummary,
   GameSettings,
   type Move,
-  type NewGameRequest,
+  NewGameRequest,
   type NewGameResponse,
-  type PassRequest,
-  type PlayRequest,
+  PassRequest,
+  PlayRequest,
   type PlayResponse,
-  type ResignRequest,
+  ResignRequest,
   type Result,
-  type SetRankRequest,
+  SetRankRequest,
   type StateCause,
   type StateResponse,
-  type UndoRequest,
+  UndoRequest,
   type UndoResponse,
   type Via,
 } from '@goko/protocol';
@@ -4283,6 +4372,7 @@ export type AnalyzeInput = z.output<typeof AnalyzeRequest>;
 export const REPLY_TIMEOUT_MS = 8000;
 export const ENGINE_RESIGN_AFTER_MOVE = 60;
 export const ENGINE_RESIGN_WINRATE = 0.03;
+// ENGINE_RESIGN_LEAD: число не из спеки, решение реализации; фиксируется в `docs/decisions/` после стадии 1.
 export const ENGINE_RESIGN_LEAD = -25;
 export const GENMOVE_VISITS = 10;
 export const DEFAULT_RANK = '10k' as const;
@@ -4615,7 +4705,8 @@ export class GameService {
         if (this.closed || !current || current.revision !== state.revision) return false; // партия изменилась, пока движок думал
         const engineWinrate = color === 'B' ? reply.winrateB : 1 - reply.winrateB;
         const engineLead = color === 'B' ? reply.scoreLeadB : -reply.scoreLeadB;
-        if (current.moves.length >= ENGINE_RESIGN_AFTER_MOVE && engineWinrate < ENGINE_RESIGN_WINRATE && engineLead < ENGINE_RESIGN_LEAD) {
+        // Спека говорит «после 60-го хода», поэтому строгое `>`, а не `>=`.
+        if (current.moves.length > ENGINE_RESIGN_AFTER_MOVE && engineWinrate < ENGINE_RESIGN_WINRATE && engineLead < ENGINE_RESIGN_LEAD) {
           await this.commit(resignGame(current, color), 'resign', 'engine');
           return true;
         }
@@ -4660,6 +4751,7 @@ export class GameService {
       await this.locked(id, async () => {
         const current = this.games.get(id);
         if (this.closed || !current || current.revision !== state.revision) return;
+        // причина `pass`: спека не вводит отдельной причины для автосчёта
         await this.commit(finishByScore(current, result), 'pass', 'system');
       });
       return;
@@ -4700,17 +4792,8 @@ git commit -m "game-server: клиент движка, фейковый движ
 
 ```ts
 import { describe, expect, it } from 'vitest';
-import type { ApiError } from '@goko/protocol';
 import { SessionManager, roomName } from './sessions.ts';
-
-function errorOf(fn: () => unknown): ApiError {
-  try {
-    fn();
-  } catch (e) {
-    return e as ApiError;
-  }
-  throw new Error('ожидалась ошибка');
-}
+import { errorOf } from './test-helpers.ts';
 
 describe('SessionManager', () => {
   it('создаёт сессию с комнатой goko-<id>, лимит -> limit_reached', () => {
@@ -4933,7 +5016,9 @@ async function make(opts: { script?: string[]; delayMs?: number; maxSessions?: n
   const service = new GameService({ store: new GameStore(dir), engine: createFakeEngine({ script: opts.script, delayMs: opts.delayMs }), bus, replyTimeoutMs: 500 });
   await service.init();
   const sessions = new SessionManager({ max: opts.maxSessions ?? 3, ttlMs: 60_000 });
-  const app = createApp({ service, sessions, bus, appKey: KEY, livekit: LK, heartbeatMs: 20 });
+  // heartbeat крупный: при 20 мс пинг SSE успевает раньше события и тест ловит ': ping'.
+  // Проверка heartbeat, если понадобится, — отдельный `it` со своим createApp({ ..., heartbeatMs: 20 }).
+  const app = createApp({ service, sessions, bus, appKey: KEY, livekit: LK, heartbeatMs: 5_000 });
   // Клиент протокола поверх app.request: без сети.
   const fetchFn = ((input: string | URL | Request, init?: RequestInit) => app.request(String(input).replace('http://app.test', ''), init)) as unknown as typeof fetch;
   const client = createClient({ baseUrl: 'http://app.test', appKey: KEY, fetch: fetchFn });
@@ -5007,7 +5092,8 @@ describe('createApp', () => {
     expect(bus.count(`game:${state.id}`)).toBe(1);
 
     await service.play(state.id, { coord: 'D4', waitForReply: true, via: 'api' });
-    const chunk = new TextDecoder().decode((await reader.read()).value);
+    let chunk = '';
+    while (!chunk.includes('data: ')) chunk = new TextDecoder().decode((await reader.read()).value);
     expect(chunk).toContain('"cause":"play"');
 
     ac.abort();
@@ -5168,6 +5254,7 @@ export function createApp(deps: AppDeps): Hono {
   app.post('/api/sessions/:sid/games', async (c) => {
     const sid = c.req.param('sid');
     sessions.get(sid);
+    sessions.touch(sid); // операция с sessionId продлевает TTL сессии
     const req = NewGameRequest.parse(await body(c));
     const res = await service.create(req, { sessionId: sid });
     sessions.setGame(sid, res.state.id);
@@ -5177,6 +5264,7 @@ export function createApp(deps: AppDeps): Hono {
   app.get('/api/sessions/:sid/events', (c) => {
     const sid = c.req.param('sid');
     const session = sessions.get(sid);
+    sessions.touch(sid); // поток открыт — сессия живая, TTL продлевается до открытия потока
     const gameId = session.currentGameId;
     return sse(c, `session:${sid}`, gameId ? [{ type: 'session.game', gameId }, syncEvent(gameId)] : []);
   });
@@ -5288,7 +5376,7 @@ git commit -m "game-server: HTTP-приложение по таблице про
 
 **Files:**
 - Create: `scripts/smoke.mjs`, `scripts/dev.mjs`
-- Modify: `package.json` (корень: скрипты `smoke`, `dev`), `CLAUDE.md` (строка «Стадия» и раздел «Команды»), `README.md` (раздел «Запуск»), `docs/README.md` (строка `superpowers/plans/`), `docs/NOW.md`
+- Modify: `package.json` (корень: скрипты `smoke`, `dev`), `CLAUDE.md` (строка «Стадия» и раздел «Команды»), `README.md` (раздел «Запуск»), `docs/README.md` (строка `superpowers/plans/`), `docs/NOW.md`, `docs/superpowers/specs/2026-09-07-goko-voice-go-opponent-design.md` (`replyTimedOut` в разделе 5, `via: "tap"` в разделе 3)
 
 **Interfaces:**
 - Consumes: `createClient` из `@goko/protocol`; `apps/game-server/src/main.ts` и `apps/go-engine/src/main.ts` с их переменными окружения (Task 8, Task 12).
@@ -5515,6 +5603,12 @@ peer-зависимость vitest 5, и её лучше зафиксирова�
     "vite": "^8.2.2"
 ```
 
+Раздел `workspaces` корневого `package.json` уже равен
+`["packages/*", "apps/*", "spike"]` и в этом плане не правится. Удаление
+`"spike"` из `workspaces` и `"spike/**/*.ts"` из `include` корневого
+`tsconfig.json` относится к отдельной задаче удаления спайка: здесь
+`npm run check` прогоняется вместе с кодом спайка, вслепую его не править.
+
 - [ ] **Step 3: Запустить smoke с фейковым движком**
 
 Run: `npm run smoke`
@@ -5652,7 +5746,13 @@ voice-agent (план голоса и веба). KataGo и сети — `apps/go
 
 - [ ] **Step 9: `docs/NOW.md`**
 
-В `## Фокус` первый абзац заменить на:
+Прочитать текущий `docs/NOW.md` и заменить содержимое разделов `## Фокус` и
+`## Следующий шаг` на текст ниже; сверять по заголовкам разделов, а не по
+дословному совпадению исходного текста — он к этому моменту устарел
+(`## Фокус` описывает закрытую стадию 0 и три плана, `## Следующий шаг` —
+голосовой прогон с телефона и удаление `spike/`).
+
+Содержимое `## Фокус`:
 
 ```
 Стадия 1. Ядро готово: `go-core`, `protocol`, `go-engine`, `game-server`,
@@ -5661,7 +5761,7 @@ voice-agent (план голоса и веба). KataGo и сети — `apps/go
 план — голос и веб: `superpowers/plans/2026-09-07-goko-stage1-voice-web.md`.
 ```
 
-В `## Следующий шаг` текст заменить на:
+Содержимое `## Следующий шаг`:
 
 ```
 Выполнить план голоса и веба: voice-agent (инструменты, промпт, события,
@@ -5671,14 +5771,53 @@ compose, `deploy.sh` со статикой, runbook. Затем приёмка f
 
 В `## Сделано` добавить строку с сегодняшней датой: `- <дата>: стадия 1, ядро: правила и счёт, протокол и клиент, обёртка KataGo, game-server с сессиями и SSE, smoke и dev.`
 
-- [ ] **Step 10: Полная проверка и commit**
+- [ ] **Step 10: Спека — `replyTimedOut` в ответе на создание партии и `via: "tap"` в разделе 3**
+
+Две строки в `docs/superpowers/specs/2026-09-07-goko-voice-go-opponent-design.md`.
+Обе — приведение спеки к тому, что уже написано в её же разделе 5 и в протоколе
+(Task 4). Правка спеки согласована при предполётной сверке плана.
+
+1. Раздел 5, строка таблицы `session_new_game` (`create_game` ниже ссылается на неё
+   словами «то же»): в колонке ответа заменить
+
+```
+`{ state, firstMove? }`; сессия переключается, событие `session.game`; если первым ходит движок, его ход ждётся как в `play`
+```
+
+на
+
+```
+`{ state, firstMove?, replyTimedOut?: true }`; сессия переключается, событие `session.game`; если первым ходит движок, его ход ждётся как в `play`, и `replyTimedOut: true` означает, что движок не успел ответить в отведённое время
+```
+
+(в строке `play` поле `replyTimedOut?: true` уже есть, править её не нужно).
+
+2. Раздел 3, строка про тап: заменить
+
+```
+`state.updated` с `by: "human"` и `cause: "tap"` и просит модель озвучить ответ
+```
+
+на
+
+```
+`state.updated` с `by: "human"` и `via: "tap"` и просит модель озвучить ответ
+```
+
+Канонический список раздела 5 знает `tap` только как значение `via`; среди причин
+`cause` его нет.
+
+Run: `grep -n 'cause: "tap"' docs/superpowers/specs/2026-09-07-goko-voice-go-opponent-design.md`
+Expected: пусто.
+
+- [ ] **Step 11: Полная проверка и commit**
 
 Run: `npm run check && npm run smoke`
 Expected: оба `[OK]`, код 0.
 
 ```bash
-git add scripts/smoke.mjs scripts/dev.mjs package.json CLAUDE.md README.md docs/README.md docs/NOW.md
-git commit -m "scripts: smoke и dev одной командой; доки: команды стадии 1"
+git add scripts/smoke.mjs scripts/dev.mjs package.json CLAUDE.md README.md docs/README.md docs/NOW.md docs/superpowers/specs/2026-09-07-goko-voice-go-opponent-design.md
+git commit -m "scripts: smoke и dev одной командой; доки: команды стадии 1, правки спеки"
 ```
 
 ---
