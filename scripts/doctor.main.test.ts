@@ -44,18 +44,22 @@ const PASS_THROUGH = [
 ];
 
 let dir = '';
+let anyFile = '';
 
 beforeEach(() => {
   dir = mkdtempSync(path.join(tmpdir(), 'goko-doctor-main-'));
   mkdirSync(path.join(dir, 'scripts'));
-  copyFileSync(path.join(HERE, 'doctor.mjs'), path.join(dir, 'scripts', 'doctor.mjs'));
+  anyFile = path.join(dir, 'scripts', 'doctor.mjs');
+  copyFileSync(path.join(HERE, 'doctor.mjs'), anyFile);
 });
 
 afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-function runDoctor(vars: Record<string, string>): { lines: string[]; status: number | null } {
+type Options = { extraEnv?: Record<string, string>; withoutPath?: boolean };
+
+function runDoctor(vars: Record<string, string>, options: Options = {}): { lines: string[]; status: number | null } {
   writeFileSync(
     path.join(dir, '.env'),
     Object.entries(vars)
@@ -67,8 +71,15 @@ function runDoctor(vars: Record<string, string>): { lines: string[]; status: num
     const value = process.env[key];
     if (value !== undefined) env[key] = value;
   }
-  const script = path.join(dir, 'scripts', 'doctor.mjs');
-  const res = spawnSync(process.execPath, [script], { env, encoding: 'utf8' });
+  if (options.withoutPath === true) {
+    // Пустой PATH вместо снятого: cmd.exe без переменной берёт системный список каталогов.
+    env.PATH = path.join(dir, 'empty');
+    env.Path = env.PATH;
+  }
+  const res = spawnSync(process.execPath, [path.join(dir, 'scripts', 'doctor.mjs')], {
+    env: { ...env, ...options.extraEnv },
+    encoding: 'utf8',
+  });
   return { lines: (res.stdout ?? '').split(/\r?\n/).filter((l) => l !== ''), status: res.status };
 }
 
@@ -76,7 +87,7 @@ describe('doctor: боевой запуск', () => {
   it(
     'без ENGINE_KEY и WEB_HOST не говорит «можно работать» и называет обе переменные',
     () => {
-      const { WEB_HOST: _omit, ...withoutWebHost } = SPIKE;
+      const { WEB_HOST: _webHost, ...withoutWebHost } = SPIKE;
       const { lines, status } = runDoctor(withoutWebHost);
       const joined = lines.join('\n');
       // Итог: обе недостающие переменные, и та, что ломает спайк, и та, что ломает движок.
@@ -85,7 +96,15 @@ describe('doctor: боевой запуск', () => {
       // Отдельные строки-подсказки: без них у founder'а нет имени файла, куда смотреть.
       expect(lines).toContain('[!] env отсутствуют: WEB_HOST — спайк не запустится (см. infra/.env.example)');
       expect(lines).toContain('[!] env отсутствуют: ENGINE_KEY — go-engine не запустится (см. infra/.env.example)');
+      expect(lines).toContain('[!] env для стадии 1 отсутствуют: APP_KEY (сейчас не нужны)');
       expect(lines).toContain('[OK] env: LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET, OPENAI_API_KEY');
+      expect(lines).toContain("[!] AGENT_NAME не задан: спайк возьмёт продовое имя 'goko', на ПК нужен 'goko-dev'");
+      expect(lines).toContain('[!] KATAGO_BIN не задан: движок будет недоступен, тесты движка пропускаются');
+      expect(lines).toContain('[!] основная сеть не найдена (KATAGO_MODEL или apps/go-engine/models/README.md)');
+      expect(lines).toContain('[!] человеческая сеть не найдена (KATAGO_HUMAN_MODEL или apps/go-engine/models/README.md)');
+      // Инструменты на месте — иначе вердикт был бы другим, и строка про env потеряла бы смысл.
+      expect(lines).toContain('[OK] npm');
+      expect(lines).toContain('[OK] git');
       // Значений переменных нет нигде в выводе: репозиторий публичный.
       expect(joined).not.toContain(MARKER);
       expect(status).toBe(0); // не запустится ещё не значит «сломан инструмент»
@@ -96,12 +115,48 @@ describe('doctor: боевой запуск', () => {
   it(
     'когда всё на месте, говорит «можно работать» и молчит про отсутствующие',
     () => {
-      const { lines, status } = runDoctor({ ...SPIKE, ENGINE_KEY: `${MARKER}-engine`, APP_KEY: `${MARKER}-app` });
+      const { lines, status } = runDoctor(
+        {
+          ...SPIKE,
+          WEB_HOST: '', // пусто в .env, но задано в окружении: process.env должен победить
+          ENGINE_KEY: `${MARKER}-engine`,
+          APP_KEY: `${MARKER}-app`,
+          AGENT_NAME: 'goko-dev',
+          KATAGO_BIN: anyFile,
+          KATAGO_MODEL: anyFile,
+          KATAGO_HUMAN_MODEL: anyFile,
+        },
+        { extraEnv: { WEB_HOST: `${MARKER}.invalid` } },
+      );
       const joined = lines.join('\n');
       expect(lines).toContain('[OK] doctor: можно работать');
+      expect(lines).toContain('[OK] AGENT_NAME задан');
+      expect(lines).toContain('[OK] KATAGO_BIN найден');
+      expect(lines).toContain('[OK] основная сеть на месте (KATAGO_MODEL)');
+      expect(lines).toContain('[OK] человеческая сеть на месте (KATAGO_HUMAN_MODEL)');
       expect(joined).not.toContain('не запустится');
+      expect(joined).not.toContain('отсутствуют');
       expect(joined).not.toContain(MARKER);
       expect(status).toBe(0);
+    },
+    60_000,
+  );
+
+  it(
+    'сломанный инструмент — это [X] и код возврата 1, а не «не запустится»',
+    () => {
+      // Без PATH не находятся ни npm, ни git, ни docker; KATAGO_BIN указывает в никуда.
+      const { lines, status } = runDoctor(
+        { ...SPIKE, ENGINE_KEY: `${MARKER}-engine`, KATAGO_BIN: path.join(dir, 'no-such-katago') },
+        { withoutPath: true },
+      );
+      expect(lines).toContain('[X] npm not found');
+      expect(lines).toContain('[X] git not found');
+      expect(lines).toContain('[!] docker не найден: образ движка не собрать, для dev не нужен');
+      expect(lines).toContain('[X] KATAGO_BIN указывает на несуществующий файл');
+      expect(lines).toContain('[X] doctor: есть блокирующие проблемы');
+      expect(lines.join('\n')).not.toContain(MARKER);
+      expect(status).toBe(1);
     },
     60_000,
   );

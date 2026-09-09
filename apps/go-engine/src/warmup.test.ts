@@ -66,9 +66,20 @@ describe('прогрев движка при старте', () => {
     expect(WARMUP_TIMEOUT_MS).toBeGreaterThan(DEFAULT_TIMEOUTS.score * 10);
   });
 
-  it('запрос прогрева не несёт своего id: его подставляет KataGo.query', () => {
-    expect(Object.keys(WARMUP_QUERY)).not.toContain('id');
-    expect(WARMUP_QUERY.maxVisits).toBe(1); // прогрев не считает позицию, а будит движок
+  it('запрос прогрева: пустая доска 13x13, один просмотр и без своего id', () => {
+    // Свой id перезаписал бы служебный, и ответ движка не нашёл бы ждущего прогрев.
+    expect(WARMUP_QUERY).toEqual({
+      rules: 'chinese',
+      komi: 7.5,
+      boardXSize: 13,
+      boardYSize: 13,
+      moves: [],
+      maxVisits: 1,
+    });
+  });
+
+  it('код выхода при провале не равен нулю: иначе оркестратор сочтёт запуск успешным', () => {
+    expect(WARMUP_EXIT_CODE).toBeGreaterThan(0);
   });
 
   it('сообщение об отказе понимает и не-Error причину', async () => {

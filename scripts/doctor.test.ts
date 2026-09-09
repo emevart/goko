@@ -51,9 +51,10 @@ describe('doctor', () => {
     const dir = mkdtempSync(path.join(tmpdir(), 'goko-doctor-'));
     const file = path.join(dir, '.env');
     try {
-      const lines = ['# ENGINE_KEY=commented', '', 'APP_KEY="quoted"', 'ENGINE_KEY=plain', 'broken-line'];
+      // Знак = внутри значения — обычное дело для токенов: строка делится по первому, а не последнему.
+      const lines = ['# ENGINE_KEY=commented', '', 'APP_KEY="quoted"', 'ENGINE_KEY=plain', 'broken-line', 'APP_URL=a=b'];
       writeFileSync(file, lines.join('\n'));
-      expect(readDotEnv(file)).toEqual({ APP_KEY: 'quoted', ENGINE_KEY: 'plain' });
+      expect(readDotEnv(file)).toEqual({ APP_KEY: 'quoted', ENGINE_KEY: 'plain', APP_URL: 'a=b' });
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -64,5 +65,6 @@ describe('doctor', () => {
     expect(checkNodeVersion('v22.22.0').ok).toBe(true);
     expect(checkNodeVersion('v22.12.0').ok).toBe(false);
     expect(checkNodeVersion('v20.19.0').ok).toBe(false);
+    expect(checkNodeVersion('unknown').ok).toBe(false); // неразобранная версия не считается годной
   });
 });

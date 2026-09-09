@@ -1,5 +1,5 @@
 import type { Hono } from 'hono';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { KataGoOptions, KataQuery, KataResponse } from './katago.ts';
 import { type EngineLike, type Listen, type StartDeps, startEngine } from './main.ts';
 import { WARMUP_EXIT_CODE } from './warmup.ts';
@@ -12,6 +12,7 @@ type Recorder = {
   exits: number[];
   logs: string[];
   ports: number[];
+  hostnames: string[];
   options: KataGoOptions[];
   closes: number;
   signals: Array<'SIGINT' | 'SIGTERM'>;
@@ -24,6 +25,7 @@ function harness(answer: () => Promise<KataResponse>): { deps: StartDeps; rec: R
     exits: [],
     logs: [],
     ports: [],
+    hostnames: [],
     options: [],
     closes: 0,
     signals: [],
@@ -59,6 +61,7 @@ function harness(answer: () => Promise<KataResponse>): { deps: StartDeps; rec: R
     },
     listen: (app, port, hostname, onReady) => {
       rec.ports.push(port);
+      rec.hostnames.push(hostname);
       return listen(app, port, hostname, onReady);
     },
     on: (signal, handler) => {
@@ -78,6 +81,7 @@ describe('запуск go-engine', () => {
     expect(rec.events).toEqual(['engine.start', 'engine.query', 'listen']);
     expect(rec.exits).toEqual([]);
     expect(rec.ports).toEqual([18788]);
+    expect(rec.hostnames).toEqual(['127.0.0.1']);
     expect(rec.logs.some((l) => l.includes('прогрет'))).toBe(true);
   });
 
@@ -96,7 +100,10 @@ describe('запуск go-engine', () => {
     expect(rec.exits).toEqual([2]);
     await startEngine({ ...deps, env: { KATAGO_BIN: 'katago' } });
     expect(rec.exits).toEqual([2, 2]);
-    expect(rec.logs.every((l) => !l.includes('katago'))).toBe(true); // значений env в логе нет
+    expect(rec.logs).toEqual([
+      '[X] go-engine: нужны KATAGO_BIN и ENGINE_KEY (см. infra/.env.example)',
+      '[X] go-engine: нужны KATAGO_BIN и ENGINE_KEY (см. infra/.env.example)',
+    ]); // отказ виден и не печатает значений переменных
   });
 
   it('сигнал закрывает сервер и останавливает движок', async () => {
@@ -113,13 +120,36 @@ describe('запуск go-engine', () => {
     expect(rec.exits).toEqual([0]);
   });
 
+  it('боевой listen действительно поднимает сервер и сообщает порт', async () => {
+    // Единственный путь, где участвует настоящий @hono/node-server: порт 0 — эфемерный,
+    // движок подделан, поэтому тест не трогает ни KataGo, ни фиксированный порт спайка.
+    const { deps, rec } = harness(async () => ({ id: 'q1' }));
+    const say = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    try {
+      await startEngine({ ...deps, listen: undefined, env: { KATAGO_BIN: 'x', ENGINE_KEY: 'k', ENGINE_PORT: '0' } });
+      // Готовность сервера приходит событием, а не возвратом startEngine: ждём саму строку.
+      const line = await vi.waitFor(() => {
+        const found = say.mock.calls.map((c) => String(c[0])).find((l) => l.includes('go-engine на порту'));
+        expect(found).toBeDefined();
+        return found;
+      });
+      expect(line).toMatch(/^\[OK\] go-engine на порту \d+; сети .+ \+ .+$/);
+    } finally {
+      say.mockRestore();
+      rec.handlers[0]?.(); // закрываем сервер: иначе процесс теста останется слушать порт
+    }
+  });
+
   it('порт и хост берутся из env, пути к сетям — от корня репозитория', async () => {
     const { deps, rec } = harness(async () => ({ id: 'q1' }));
     await startEngine({ ...deps, env: { KATAGO_BIN: 'katago', ENGINE_KEY: 'k' } });
     expect(rec.ports).toEqual([8788]); // умолчание раздела 8 спеки
+    // Движок слушает петлю: наружу его пускает только Caddy, снаружи он безключевой /health.
+    expect(rec.hostnames).toEqual(['127.0.0.1']);
     const options = rec.options[0];
     expect(options?.model).toContain('kata1-b10c128');
     expect(options?.humanModel).toContain('b18c384nbt-humanv0');
     expect(options?.config).toContain('analysis.cfg');
+    expect(options?.log).toBeDefined(); // без этого stderr движка не доходит до лога сервиса
   });
 });
