@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError, type Color, type GameEvent, type GameState } from '@goko/protocol';
 import type { Engine } from './engine-client.ts';
 import { EventBus } from './events.ts';
-import { createFakeEngine } from './fake-engine.ts';
+import { type FakeEngine, createFakeEngine } from './fake-engine.ts';
 import { GameService } from './service.ts';
 import { GameStore } from './store.ts';
 
@@ -74,12 +74,12 @@ const untilTick = async (cond: () => boolean, turns = 5000): Promise<void> => {
   throw new Error('условие не выполнилось за отведённые обороты очереди');
 };
 
-const until = async (cond: () => boolean, ms = 2000) => {
-  const t0 = Date.now();
-  while (!cond()) {
-    if (Date.now() - t0 > ms) throw new Error('таймаут ожидания');
-    await new Promise((r) => setTimeout(r, 5));
-  }
+// Раздумье фейкового движка целиком: дождаться нужного по счёту вызова genmove и
+// досчитать его задержку. Таймер задержки заводится внутри движка, поэтому до вызова
+// двигать часы рано: сдвинутое раньше времени модельное время движок не увидит.
+const thinkThrough = async (engine: FakeEngine, genmoveCalls: number, delayMs: number): Promise<void> => {
+  await untilTick(() => engine.calls.genmove >= genmoveCalls);
+  await vi.advanceTimersByTimeAsync(delayMs);
 };
 
 describe('GameService: партия человек против движка', () => {
@@ -114,19 +114,31 @@ describe('GameService: партия человек против движка', (
   });
 
   it('create без ожидания ответа возвращается сразу, ход движка приходит позже', async () => {
-    const { service } = await make(createFakeEngine({ script: ['C3'], delayMs: 50 }));
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const engine = createFakeEngine({ script: ['C3'], delayMs: 50 });
+    const { service } = await make(engine);
     const created = await service.create({ ...ENGINE_BLACK, ...S9, waitForReply: false });
     expect(created.firstMove).toBeUndefined();
     expect(created.replyTimedOut).toBeUndefined();
     expect(created.state.moves).toHaveLength(0);
-    await until(() => service.get(created.state.id).moves.length === 1);
+    await thinkThrough(engine, 1, 50);
+    await untilTick(() => service.get(created.state.id).moves.length === 1);
   });
 
   it('create с медленным движком отдаёт replyTimedOut', async () => {
-    const { service } = await make(createFakeEngine({ script: ['C3'], delayMs: 200 }), { replyTimeoutMs: 30 });
-    const created = await service.create({ ...ENGINE_BLACK, ...S9, waitForReply: true });
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const engine = createFakeEngine({ script: ['C3'], delayMs: 200 });
+    const { service } = await make(engine, { replyTimeoutMs: 30 });
+    const creating = service.create({ ...ENGINE_BLACK, ...S9, waitForReply: true });
+    // Движок думает 200 мс, ожидание ответа кончается на 30-й: create возвращается по таймауту.
+    await untilTick(() => engine.calls.genmove === 1);
+    await vi.advanceTimersByTimeAsync(30);
+    const created = await creating;
     expect(created.firstMove).toBeUndefined();
     expect(created.replyTimedOut).toBe(true);
+    // Досчитываем раздумье движка, чтобы фоновая задача завершилась до close.
+    await vi.advanceTimersByTimeAsync(170);
+    await untilTick(() => service.get(created.state.id).moves.length === 1);
   });
 
   it('места по умолчанию: движку без ранга ставится 10k', async () => {
@@ -152,7 +164,7 @@ describe('GameService: партия человек против движка', (
     const events = record(bus, `game:${g.state.id}`);
     const res = await service.pass(g.state.id, { waitForReply: true, via: 'api' });
     expect(res.reply?.coord).toBe('pass');
-    await until(() => service.get(g.state.id).status === 'finished');
+    await untilTick(() => service.get(g.state.id).status === 'finished');
     const state = service.get(g.state.id);
     expect(state.result).toMatchObject({ reason: 'score', winner: 'W', margin: 7.5 });
     expect(state.result?.score).toMatchObject({ areaB: 0, areaW: 0, komi: 7.5, dead: [] });
@@ -176,10 +188,17 @@ describe('GameService: партия человек против движка', (
   });
 
   it('undo снимает пару ходов; при думающем движке — один и отменяет ответ', async () => {
-    const { service } = await make(createFakeEngine({ script: ['E5', 'F6'], delayMs: 150 }));
-    const g = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: true });
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const engine = createFakeEngine({ script: ['E5', 'F6'], delayMs: 150 });
+    const { service } = await make(engine);
+    const g = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: false });
     const id = g.state.id;
-    await service.play(id, { coord: 'D4', waitForReply: true, via: 'api' }); // B D4, W E5
+    const first = service.play(id, { coord: 'D4', waitForReply: true, via: 'api' }); // B D4, W E5
+    // Таймер раздумья заводится внутри движка: до его вызова двигать часы рано.
+    await untilTick(() => engine.calls.genmove === 1);
+    await vi.advanceTimersByTimeAsync(150);
+    await untilTick(() => service.get(id).moves.length === 2);
+    await first;
     const u1 = await service.undo(id, { via: 'api' });
     expect(u1.removed.map((m) => m.coord)).toEqual(['E5', 'D4']);
     expect(u1.state.moves).toEqual([]);
@@ -189,7 +208,11 @@ describe('GameService: партия человек против движка', (
     expect(p.state.pendingEngineMove).toBe(true);
     const u2 = await service.undo(id, { via: 'api' });
     expect(u2.removed.map((m) => m.coord)).toEqual(['C3']);
-    await new Promise((r) => setTimeout(r, 250));
+    await untilTick(() => engine.calls.genmove === 2);
+    await vi.advanceTimersByTimeAsync(150);
+    await tick(5);
+    // Движок додумал ход, но применять его к изменившейся ревизии не стал.
+    expect(engine.calls.genmove).toBe(2);
     expect(service.get(id).moves).toEqual([]);
     expect(service.get(id).pendingEngineMove).toBe(false);
   });
@@ -199,15 +222,15 @@ describe('GameService: партия человек против движка', (
     const g = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: true });
     await service.play(g.state.id, { coord: 'D4', waitForReply: false, via: 'api' });
     // По сценарию ответ движка на D4 — pass; затем пас человека даёт два паса подряд.
-    await until(() => service.get(g.state.id).moves.length === 2);
+    await untilTick(() => service.get(g.state.id).moves.length === 2);
     await service.pass(g.state.id, { waitForReply: false, via: 'api' });
-    await until(() => service.get(g.state.id).status === 'finished');
+    await untilTick(() => service.get(g.state.id).status === 'finished');
     const u = await service.undo(g.state.id, { via: 'api' });
     expect(u.removed.map((m) => m.coord)).toEqual(['pass', 'pass']);
     expect(u.state.status).toBe('playing');
     expect(u.state.toPlay).toBe('W');
     // Ход движка после отката: ставится заново, по сценарию E5.
-    await until(() => service.get(g.state.id).moves.length === 2);
+    await untilTick(() => service.get(g.state.id).moves.length === 2);
     expect(service.get(g.state.id).moves[1]?.coord).toBe('E5');
   });
 
@@ -224,13 +247,19 @@ describe('GameService: партия человек против движка', (
   });
 
   it('waitForReply с медленным движком: replyTimedOut, ход приходит событием', async () => {
-    const { service, bus } = await make(createFakeEngine({ script: ['E5'], delayMs: 200 }), { replyTimeoutMs: 50 });
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const engine = createFakeEngine({ script: ['E5'], delayMs: 200 });
+    const { service, bus } = await make(engine, { replyTimeoutMs: 50 });
     const g = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: true });
     const events = record(bus, `game:${g.state.id}`);
-    const res = await service.play(g.state.id, { coord: 'D4', waitForReply: true, via: 'api' });
+    const playing = service.play(g.state.id, { coord: 'D4', waitForReply: true, via: 'api' });
+    // Движок думает 200 мс, ожидание ответа кончается на 50-й.
+    await thinkThrough(engine, 1, 50);
+    const res = await playing;
     expect(res.replyTimedOut).toBe(true);
     expect(res.reply).toBeUndefined();
-    await until(() => service.get(g.state.id).moves.length === 2);
+    await vi.advanceTimersByTimeAsync(150);
+    await untilTick(() => service.get(g.state.id).moves.length === 2);
     expect(events.at(-1)).toMatchObject({ type: 'state.updated', cause: 'engine' });
   });
 
@@ -248,7 +277,8 @@ describe('GameService: партия человек против движка', (
     const g = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: true });
     const id = g.state.id;
     const pending = service.play(id, { coord: 'D4', waitForReply: true, via: 'api' });
-    await until(() => service.get(id).pendingEngineMove);
+    // Ход человека уже применён, ответа движка ещё нет: часы для этого двигать не нужно.
+    await untilTick(() => service.get(id).pendingEngineMove);
     await service.undo(id, { via: 'api' });
     const res = await pending;
     expect(res.replyTimedOut).toBeUndefined();
@@ -274,23 +304,31 @@ describe('GameService: партия человек против движка', (
   });
 
   it('рестарт: партии загружаются из снапшотов, ожидающий ход движка доигрывается', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     const slow = createFakeEngine({ script: ['E5'], delayMs: 100 });
     const first = await make(slow);
     const g = await first.service.create({ ...HUMAN_BLACK, ...S9, waitForReply: true });
     await first.service.play(g.state.id, { coord: 'D4', waitForReply: false, via: 'api' });
-    await first.service.close(); // ответ движка не успел
+    const closing = first.service.close(); // ответ движка не успел
+    // Раздумье досчитывается уже после close: ход к закрытой партии не применяется.
+    await thinkThrough(slow, 1, 100);
+    await closing;
 
-    const second = await make(createFakeEngine({ script: ['G7'], delayMs: 50 }));
+    const fast = createFakeEngine({ script: ['G7'], delayMs: 50 });
+    const second = await make(fast);
     expect(second.service.get(g.state.id).moves.map((m) => m.coord)).toEqual(['D4']);
-    await until(() => second.service.get(g.state.id).moves.length === 2);
+    await thinkThrough(fast, 1, 50);
+    await untilTick(() => second.service.get(g.state.id).moves.length === 2);
     expect(second.service.get(g.state.id).moves[1]?.coord).toBe('G7');
     expect(second.service.list()[0]).toMatchObject({ id: g.state.id, moveCount: 2, status: 'playing' });
   });
 
   it('list отдаёт партии новыми вперёд и с результатом', async () => {
-    const { service } = await make(createFakeEngine({ script: ['E5'] }));
+    // Часы партии задаются явно: две партии подряд иначе попадают в одну миллисекунду
+    // и порядок в list становится произвольным.
+    let clock = Date.parse('2026-09-07T10:00:00.000Z');
+    const { service } = await make(createFakeEngine({ script: ['E5'] }), { now: () => new Date((clock += 1000)) });
     const a = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: true });
-    await new Promise((r) => setTimeout(r, 5));
     const b = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: true });
     await service.resign(a.state.id, { color: 'B', via: 'api' });
     const list = service.list();
@@ -309,13 +347,17 @@ describe('GameService: партия человек против движка', (
         return inner.genmove(req);
       },
     };
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     const { service, bus } = await make(flaky, { engineRetryMs: 10 });
     const g = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: true });
     const events = record(bus, `game:${g.state.id}`);
     const res = await service.play(g.state.id, { coord: 'D4', waitForReply: true, via: 'api' });
     expect(res.replyTimedOut).toBe(true);
     expect(events.some((e) => e.type === 'error')).toBe(true);
-    await until(() => service.get(g.state.id).moves.length === 2);
+    // Две неудачи подряд: ход приходит только после двух пауз перед повтором.
+    await vi.advanceTimersByTimeAsync(10);
+    await vi.advanceTimersByTimeAsync(10);
+    await untilTick(() => service.get(g.state.id).moves.length === 2);
     expect(service.get(g.state.id).moves[1]?.coord).toBe('E5');
   });
 
@@ -338,11 +380,14 @@ describe('GameService: партия человек против движка', (
         return inner.score(req);
       },
     };
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     const { service, bus } = await make(flaky, { engineRetryMs: 10 });
     const g = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: true });
     const events = record(bus, `game:${g.state.id}`);
     await service.pass(g.state.id, { waitForReply: true, via: 'api' });
-    await until(() => service.get(g.state.id).status === 'finished');
+    await untilTick(() => events.some((e) => e.type === 'error'));
+    await vi.advanceTimersByTimeAsync(10); // пауза перед повтором счёта
+    await untilTick(() => service.get(g.state.id).status === 'finished');
     expect(events.some((e) => e.type === 'error')).toBe(true);
     expect(service.get(g.state.id).result?.reason).toBe('score');
   });
@@ -451,7 +496,7 @@ describe('GameService: партия человек против движка', (
     const { service } = await make(createFakeEngine());
     const g = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: true });
     await service.pass(g.state.id, { waitForReply: true, via: 'api' });
-    await until(() => service.get(g.state.id).status === 'finished');
+    await untilTick(() => service.get(g.state.id).status === 'finished');
     expect(service.sgf(g.state.id)).toContain('RE[W+7.5]');
   });
 
@@ -460,7 +505,8 @@ describe('GameService: партия человек против движка', (
     const g = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: true });
     const id = g.state.id;
     const pending = service.play(id, { coord: 'D4', waitForReply: true, via: 'api' });
-    await until(() => service.get(id).pendingEngineMove);
+    // Ход человека уже применён, ответа движка ещё нет: часы для этого двигать не нужно.
+    await untilTick(() => service.get(id).pendingEngineMove);
     // setRank двигает ревизию, но ходом движка не является: ответом его выдавать нельзя.
     await service.setRank(id, { color: 'W', rank: '5k' });
     const res = await pending;
@@ -489,6 +535,7 @@ describe('GameService: партия человек против движка', (
   });
 
   it('на одну партию идёт одна задача движка', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     const engine = createFakeEngine({ script: ['E5', 'F6'], delayMs: 150 });
     const { service, bus } = await make(engine);
     const g = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: true });
@@ -498,7 +545,9 @@ describe('GameService: партия человек против движка', (
     // Коммит во время раздумья не должен поднимать вторую задачу движка: ход,
     // придуманный для устаревшей ревизии, переигрывает та же самая задача.
     await service.setRank(id, { color: 'W', rank: '5k' });
-    await until(() => service.get(id).moves.length === 2);
+    await thinkThrough(engine, 1, 150); // ход для устаревшей ревизии
+    await thinkThrough(engine, 2, 150); // повтор той же задачей
+    await untilTick(() => service.get(id).moves.length === 2);
     expect(events.filter((e) => e.type === 'engine.thinking')).toHaveLength(2);
     expect(engine.calls.genmove).toBe(2);
   });
@@ -534,13 +583,14 @@ describe('GameService: партия человек против движка', (
   });
 
   it('после close новые коммиты не поднимают движок', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     const engine = createFakeEngine({ script: ['E5'] });
     const { service } = await make(engine);
     const g = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: true });
     await service.close();
     const res = await service.play(g.state.id, { coord: 'D4', waitForReply: false, via: 'api' });
     expect(res.state.pendingEngineMove).toBe(true);
-    await new Promise((r) => setTimeout(r, 50));
+    await tick(10);
     expect(engine.calls.genmove).toBe(0);
     expect(service.get(g.state.id).moves).toHaveLength(1);
   });
@@ -555,13 +605,16 @@ describe('GameService: партия человек против движка', (
         throw new Error('score failed');
       },
     };
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     const { service, bus } = await make(flaky, { engineRetryMs: 80 });
     const g = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: true });
     const events = record(bus, `game:${g.state.id}`);
     await service.pass(g.state.id, { waitForReply: true, via: 'api' });
-    await until(() => events.some((e) => e.type === 'error'));
+    await untilTick(() => events.some((e) => e.type === 'error'));
     await service.undo(g.state.id, { via: 'api' });
-    await new Promise((r) => setTimeout(r, 250));
+    // Три паузы повтора подряд: задача счёта должна была прекратиться на первой же.
+    await vi.advanceTimersByTimeAsync(240);
+    await tick(5);
     expect(scoreCalls).toBe(1);
     expect(service.get(g.state.id).status).toBe('playing');
   });
@@ -585,12 +638,20 @@ describe('GameService: партия человек против движка', (
   });
 
   it('correct во время раздумья движка: ответ всё равно приходит', async () => {
-    const { service } = await make(createFakeEngine({ script: ['E5', 'F6'], delayMs: 120 }));
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const engine = createFakeEngine({ script: ['E5', 'F6'], delayMs: 120 });
+    const { service } = await make(engine);
     const g = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: true });
     const id = g.state.id;
     await service.play(id, { coord: 'D4', waitForReply: false, via: 'api' });
-    await until(() => service.get(id).pendingEngineMove);
-    const res = await service.correct(id, { coord: 'D5', waitForReply: true, via: 'voice' });
+    await untilTick(() => service.get(id).pendingEngineMove);
+    const correcting = service.correct(id, { coord: 'D5', waitForReply: true, via: 'voice' });
+    // Часы двигаются только после того, как исправление записано: иначе первое
+    // раздумье успело бы примениться к ещё не изменившейся ревизии.
+    await untilTick(() => service.get(id).moves.map((m) => m.coord).join() === 'D5');
+    await vi.advanceTimersByTimeAsync(120); // первое раздумье кончается впустую
+    await thinkThrough(engine, 2, 120);
+    const res = await correcting;
     expect(res.reply).toMatchObject({ coord: 'F6' });
     expect(res.state.moves.map((m) => m.coord)).toEqual(['D5', 'F6']);
   });
@@ -609,7 +670,7 @@ describe('GameService: партия человек против движка', (
     const g = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: true });
     const events = record(bus, `game:${g.state.id}`);
     await service.play(g.state.id, { coord: 'D4', waitForReply: false, via: 'api' });
-    await until(() => events.some((e) => e.type === 'error'));
+    await untilTick(() => events.some((e) => e.type === 'error'));
     expect(events.find((e) => e.type === 'error')).toMatchObject({ code: 'engine_busy', message: 'queue is full' });
   });
 
@@ -617,7 +678,7 @@ describe('GameService: партия человек против движка', (
     const { service } = await make(createFakeEngine({ script: ['E5'], delayMs: 100 }));
     const g = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: true });
     const pending = service.play(g.state.id, { coord: 'D4', waitForReply: true, via: 'api' });
-    await until(() => service.get(g.state.id).pendingEngineMove);
+    await untilTick(() => service.get(g.state.id).pendingEngineMove);
     await service.close();
     const res = await pending;
     expect(res.reply).toBeUndefined();
@@ -648,7 +709,7 @@ describe('GameService: фоновые задачи, дедлайны и мьют
     const g = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: false });
     const events = record(bus, `game:${g.state.id}`);
     await service.play(g.state.id, { coord: 'D4', waitForReply: false, via: 'api' });
-    await until(() => events.some((e) => e.type === 'error'));
+    await untilTick(() => events.some((e) => e.type === 'error'));
     expect(events.find((e) => e.type === 'error')).toMatchObject({ code: 'internal', message: 'disk is full' });
     // Партия осталась на последнем удачно записанном состоянии.
     expect(service.get(g.state.id).moves).toHaveLength(1);
@@ -670,7 +731,7 @@ describe('GameService: фоновые задачи, дедлайны и мьют
     const { service } = await make(createFakeEngine({ script: ['E5'] }), { store });
     const g = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: false });
     await service.play(g.state.id, { coord: 'D4', waitForReply: false, via: 'api' });
-    await until(() => release !== undefined);
+    await untilTick(() => release !== undefined);
     let closed = false;
     const closing = service.close().then(() => {
       closed = true;
@@ -690,7 +751,7 @@ describe('GameService: фоновые задачи, дедлайны и мьют
       if (e.type === 'session.game') id = e.gameId;
     });
     const creating = service.create({ ...ENGINE_BLACK, ...S9, waitForReply: true }, { sessionId: 's1' });
-    await until(() => {
+    await untilTick(() => {
       try {
         return id !== '' && service.get(id).pendingEngineMove;
       } catch {
@@ -817,7 +878,7 @@ describe('GameService: фоновые задачи, дедлайны и мьют
     const { service } = await make(spy);
     const g = await service.create({ ...HUMAN_BLACK, settings: { boardSize: 9, komi: 6.5 }, waitForReply: true });
     await service.pass(g.state.id, { waitForReply: true, via: 'api' });
-    await until(() => service.get(g.state.id).status === 'finished');
+    await untilTick(() => service.get(g.state.id).status === 'finished');
     expect(komis).toEqual([6.5, 6.5]);
     expect(service.get(g.state.id).result).toMatchObject({ winner: 'W', margin: 6.5 });
     expect(service.get(g.state.id).result?.score?.komi).toBe(6.5);
@@ -842,7 +903,7 @@ describe('GameService: фоновые задачи, дедлайны и мьют
     const g = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: true });
     const id = g.state.id;
     await service.pass(id, { waitForReply: true, via: 'api' }); // пас человека и пас движка
-    await until(() => release !== undefined);
+    await untilTick(() => release !== undefined);
     // Откат, пока счёт ещё считается: применять его к новой ревизии нельзя.
     await service.undo(id, { via: 'api' });
     release?.();
