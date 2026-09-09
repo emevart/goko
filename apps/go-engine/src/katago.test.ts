@@ -542,6 +542,26 @@ describe('KataGo', () => {
     await k.stop();
   });
 
+  it('ошибка движка на служебный terminate не теряется: уходит в лог', async () => {
+    // Ответ на `t-<id>` не завершает ничей запрос: без лога отказ движка исчезал бы целиком.
+    const logs: string[] = [];
+    const f = fakeSpawner(() => undefined);
+    const k = new KataGo({ ...opts, spawn: f.spawn, log: (l) => logs.push(l) });
+    k.start();
+    const p = k.query({});
+    const state = track(p);
+    await tick();
+    const out = at(f.spawned, 0).stdout;
+    out.write('{"id":"t-q1","error":"Could not find terminateId"}\n');
+    await tick();
+    expect(logs.some((l) => l.includes('t-q1') && l.includes('Could not find terminateId'))).toBe(true);
+    expect(state.settled).toBe(false);
+    expect(k.queueLength).toBe(1);
+    out.write('{"id":"q1","ok":true}\n');
+    expect(await p).toMatchObject({ ok: true });
+    await k.stop();
+  });
+
   it('warning логируется и не завершает запрос', async () => {
     const logs: string[] = [];
     const f = fakeSpawner(() => undefined);

@@ -292,7 +292,13 @@ export class KataGo {
     if (msg.action === 'terminate') return; // эхо нашего terminate
     if (msg.isDuringSearch === true) return;
     const p = this.inFlight.get(id);
-    if (p === undefined) return; // ответ на уже отклонённый (таймаут) запрос
+    if (p === undefined) {
+      // Завершать некого: это либо ответ на уже отклонённый (таймаут, отмена) запрос, либо
+      // отказ движка на наш служебный `t-<id>` — терминировать было нечего. Обе ошибки молча
+      // терять нельзя: без них диагностика движка пропадает целиком.
+      if (msg.error !== undefined) this.opts.log?.(`[katago] error ${id}: ${String(msg.error)}`);
+      return;
+    }
     if (msg.warning !== undefined && msg.error === undefined) {
       this.opts.log?.(`[katago] warning ${id}: ${String(msg.warning)} (${String(msg.field ?? '')})`);
       return; // предупреждение не завершает запрос: ответ придёт следом
