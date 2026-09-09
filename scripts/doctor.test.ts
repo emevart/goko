@@ -16,6 +16,17 @@ describe('doctor', () => {
     expect(REQUIRED_ENV.later).not.toContain('ENGINE_KEY');
   });
 
+  it('список переменных спайка закреплён: doctor не должен «забыть» WEB_HOST', () => {
+    // Исходная боль: doctor писал «можно работать», а npm run token падал на WEB_HOST.
+    expect(REQUIRED_ENV.spike).toEqual([
+      'LIVEKIT_URL',
+      'LIVEKIT_API_KEY',
+      'LIVEKIT_API_SECRET',
+      'OPENAI_API_KEY',
+      'WEB_HOST',
+    ]);
+  });
+
   it('вердикт не говорит «можно работать», если сервис без переменной не запустится', () => {
     expect(verdict({ failed: false, blockers: [] })).toBe('[OK] doctor: можно работать');
     const withEngineKey = verdict({ failed: false, blockers: ['ENGINE_KEY'] });
