@@ -146,6 +146,25 @@ describe('createFakeEngine', () => {
     expect(engine.calls.analyze).toBe(1);
   });
 
+  it('ответ genmove ровный: winrate 0.5, перевес 0, в humanPolicyTop сам ход', async () => {
+    // Ровные числа — договор фейка: на них опирается проверка сдачи в сервисе,
+    // и партия против фейкового движка не должна кончаться сдачей сама собой.
+    const engine = createFakeEngine({ script: ['E5'] });
+    const r = await engine.genmove({ ...base, moves: [['B', 'D4']], rank: '10k' });
+    expect(r.winrateB).toBe(0.5);
+    expect(r.scoreLeadB).toBe(0);
+    expect(r.humanPolicyTop).toEqual([{ coord: 'E5', prob: 1 }]);
+    expect(r.ms).toBeGreaterThanOrEqual(0);
+  });
+
+  it('лучший ход analyze берётся из легальных, а не выдумывается', async () => {
+    // random 0 указывает на первого кандидата: на пустой доске это A1.
+    const engine = createFakeEngine({ random: () => 0 });
+    const a = await engine.analyze({ ...base, moves: [] });
+    expect(a.moveInfos[0]?.coord).toBe('A1');
+    expect(a.moveInfos[0]).toMatchObject({ winrateB: 0.5, scoreLeadB: 0, visits: 1, order: 0 });
+  });
+
   it('analyze без владения по includeOwnership: false; maxVisits попадает в ответ', async () => {
     const engine = createFakeEngine();
     const a = await engine.analyze({ ...base, moves: [], includeOwnership: false, maxVisits: 7 });

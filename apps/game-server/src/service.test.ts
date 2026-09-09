@@ -234,6 +234,15 @@ describe('GameService: партия человек против движка', (
     expect(service.get(g.state.id).moves[1]?.coord).toBe('E5');
   });
 
+  it('correct за движок отвергается проверкой места', async () => {
+    const { service } = await make(createFakeEngine({ script: ['C3'] }));
+    // Движок ходит чёрными: откат его единственного хода возвращает очередь ему же,
+    // и правка человека сыграла бы за движок.
+    const g = await service.create({ ...ENGINE_BLACK, ...S9, waitForReply: true });
+    await expect(service.correct(g.state.id, { coord: 'D4', waitForReply: false, via: 'voice' })).rejects.toMatchObject({ code: 'not_your_turn' });
+    expect(service.get(g.state.id).moves.map((m) => m.coord)).toEqual(['C3']);
+  });
+
   it('correct атомарен: откат пары, новый ход, новый ответ, одно событие correct', async () => {
     const { service, bus } = await make(createFakeEngine({ script: ['E5', 'F6'] }));
     const g = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: true });
@@ -333,6 +342,9 @@ describe('GameService: партия человек против движка', (
     await service.resign(a.state.id, { color: 'B', via: 'api' });
     const list = service.list();
     expect(list.map((x) => x.id)).toEqual([b.state.id, a.state.id]);
+    // Время создания взято у переданных часов, а не у системных: иначе две партии
+    // подряд легли бы в одну миллисекунду и порядок держался бы на удаче.
+    expect(list.map((x) => x.createdAt)).toEqual(['2026-09-07T10:00:02.000Z', '2026-09-07T10:00:01.000Z']);
     expect(list[1]).toMatchObject({ result: { winner: 'W', reason: 'resign' }, moveCount: 0 });
     expect(list[0]?.result).toBeUndefined();
   });
@@ -716,6 +728,22 @@ describe('GameService: фоновые задачи, дедлайны и мьют
     await service.close();
   });
 
+  it('код ApiError из фоновой задачи попадает в событие error как есть', async () => {
+    const real = new GameStore(dir);
+    const store = gatedStore(real, async (state) => {
+      if (state.moves.length === 2) throw new ApiError('bad_request', 'snapshot rejected');
+    });
+    const { service, bus } = await make(createFakeEngine({ script: ['E5'] }), { store });
+    const g = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: false });
+    const events = record(bus, `game:${g.state.id}`);
+    await service.play(g.state.id, { coord: 'D4', waitForReply: false, via: 'api' });
+    await untilTick(() => events.some((e) => e.type === 'error'));
+    // Свой код ошибки не подменяется на internal: по нему вызывающий отличает
+    // отказ движка от внутренней поломки.
+    expect(events.find((e) => e.type === 'error')).toMatchObject({ code: 'bad_request', message: 'snapshot rejected' });
+    await service.close();
+  });
+
   it('close дожидается фоновой записи снапшота', async () => {
     const real = new GameStore(dir);
     let release: (() => void) | undefined;
@@ -1063,5 +1091,122 @@ describe('GameService: фоновые задачи, дедлайны и мьют
     release?.();
     await closing;
     expect(service.get(id).moves).toHaveLength(1);
+  });
+
+  it('после ответа движка таймер ожидания снят', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const { service } = await make(createFakeEngine({ script: ['E5'] }));
+    const g = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: true });
+    await service.play(g.state.id, { coord: 'D4', waitForReply: true, via: 'api' });
+    // Незакрытый таймер ожидания висел бы ещё 8 с после пришедшего ответа.
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('close снимает таймер паузы перед повтором, а не только будит её', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const inner = createFakeEngine({ script: ['E5'] });
+    const down: Engine = {
+      ...inner,
+      genmove: async () => {
+        throw new ApiError('engine_unavailable', 'engine is unreachable');
+      },
+    };
+    const { service, bus } = await make(down, { engineRetryMs: 1000 });
+    const g = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: false });
+    const events = record(bus, `game:${g.state.id}`);
+    await service.play(g.state.id, { coord: 'D4', waitForReply: false, via: 'api' });
+    await untilTick(() => events.some((e) => e.type === 'error'));
+    await service.close();
+    // Разбуженная пауза обязана снять свой таймер: иначе он держал бы событийный
+    // цикл ещё секунду после остановки сервера.
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('close дожидается задачи счёта', async () => {
+    let release: (() => void) | undefined;
+    let scored = false;
+    const inner = createFakeEngine();
+    const gated: Engine = {
+      ...inner,
+      score: async (req) => {
+        await new Promise<void>((r) => {
+          release = r;
+        });
+        const r = await inner.score(req);
+        scored = true;
+        return r;
+      },
+    };
+    const { service } = await make(gated);
+    const g = await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false });
+    const id = g.state.id;
+    await service.pass(id, { waitForReply: false, via: 'api' });
+    await service.pass(id, { waitForReply: false, via: 'api' });
+    await untilTick(() => release !== undefined);
+    let closed = false;
+    const closing = service.close().then(() => {
+      closed = true;
+    });
+    await tick(); // счёт ещё идёт: close возвращаться не вправе
+    expect(closed).toBe(false);
+    release?.();
+    await closing;
+    expect(scored).toBe(true);
+  });
+
+  it('на партию идёт одна задача счёта', async () => {
+    let release: (() => void) | undefined;
+    let calls = 0;
+    const inner = createFakeEngine();
+    const gated: Engine = {
+      ...inner,
+      score: async (req) => {
+        calls++;
+        await new Promise<void>((r) => {
+          release = r;
+        });
+        return inner.score(req);
+      },
+    };
+    const { service } = await make(gated);
+    const g = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: true });
+    const id = g.state.id;
+    await service.pass(id, { waitForReply: true, via: 'api' }); // пас человека и пас движка
+    await untilTick(() => release !== undefined);
+    // Коммит во время счёта не должен поднимать вторую задачу счёта.
+    await service.setRank(id, { color: 'W', rank: '5k' });
+    await tick(5);
+    expect(calls).toBe(1);
+    release?.();
+    await tick(5);
+    // Ревизия изменилась, пока счёт считался: результат к ней не применяется.
+    expect(service.get(id).status).toBe('playing');
+  });
+
+  it('счёт не возобновляется, когда пасов осталось меньше двух', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    let calls = 0;
+    const inner = createFakeEngine();
+    const flaky: Engine = {
+      ...inner,
+      score: async () => {
+        calls++;
+        throw new Error('score failed');
+      },
+    };
+    const { service, bus } = await make(flaky, { engineRetryMs: 50 });
+    const g = await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false });
+    const id = g.state.id;
+    const events = record(bus, `game:${id}`);
+    await service.pass(id, { waitForReply: false, via: 'api' });
+    await service.pass(id, { waitForReply: false, via: 'api' });
+    await untilTick(() => events.some((e) => e.type === 'error'));
+    // Исправление второго паса: пас остаётся один, и возобновлять счёт не на чем.
+    await service.correct(id, { coord: 'pass', waitForReply: false, via: 'voice' });
+    await vi.advanceTimersByTimeAsync(50);
+    await tick(5);
+    expect(calls).toBe(1);
+    expect(service.get(id).consecutivePasses).toBe(1);
+    expect(service.get(id).status).toBe('playing');
   });
 });
