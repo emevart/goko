@@ -52,6 +52,20 @@ export function devPlan(parentEnv, exists, makeKey = () => randomBytes(24).toStr
   return { procs, notes, ready };
 }
 
+/**
+ * Опции запуска одного процесса dev.
+ * POSIX: процесс — лидер своей группы, SIGTERM от dev уходит всему дереву (npm -> vite).
+ * Windows: windowsHide: false — ребёнок остаётся в консоли терминала и сам получает Ctrl+C. Со скрытием
+ * libuv ставит CREATE_NO_WINDOW (stdio без наследования), у ребёнка своя консоль, и мягкой остановки нет.
+ * Окно при этом не появляется, если у dev есть консоль (запуск из терминала): ребёнок наследует её.
+ * @param {{ env: Record<string, string>, shell?: boolean }} p
+ * @param {string} root
+ * @param {boolean} [windows]
+ */
+export function devStartOptions(p, root, windows = isWindows) {
+  return { cwd: root, env: p.env, shell: p.shell, detached: !windows, windowsHide: false };
+}
+
 async function main() {
   const root = path.resolve(import.meta.dirname, '..');
   loadRootEnv(root);
@@ -62,8 +76,7 @@ async function main() {
   const running = [];
   let stopping = false;
   for (const p of plan.procs) {
-    // На POSIX каждый процесс — лидер своей группы: сигнал остановки уходит всему дереву (npm -> vite).
-    const child = startLogged(p.name, p.cmd, p.args, { cwd: root, env: p.env, shell: p.shell, detached: !isWindows });
+    const child = startLogged(p.name, p.cmd, p.args, devStartOptions(p, root));
     child.on('exit', (code, signal) => {
       console.log(`[${p.name}] завершился (${signal ?? code})`);
       if (code === 2) console.log(`[!] ${p.name}: не хватает переменных окружения, см. npm run doctor и infra/.env.example`);
@@ -78,9 +91,11 @@ async function main() {
 
   async function stopAll() {
     stopping = true;
-    console.log(`[WIP] dev: останавливаю, каждый процесс ждём не дольше ${STOP_CEILING_MS} мс`);
-    // Windows: мягкого сигнала другому процессу нет, но Ctrl+C консоли дети получили сами — ждём их,
-    // а по потолку гасим дерево taskkill. POSIX: дети в своих группах, SIGTERM им шлём мы.
+    console.log(`[!] dev: останавливаю, каждый процесс ждём не дольше ${STOP_CEILING_MS} мс`);
+    // Windows: мягкого сигнала другому процессу нет. Ctrl+C терминала дети получили сами (они в консоли
+    // dev, см. devStartOptions) — ждём их, а по потолку гасим дерево taskkill. SIGTERM без консоли
+    // (например, от другого процесса) детям не доходит: тогда это ожидание потолка и taskkill.
+    // POSIX: дети в своих группах, SIGTERM им шлём мы.
     const results = await Promise.all(running.map(async ({ name, child }) => ({ name, result: await stopWithCeiling(child, { soft: isWindows ? null : 'SIGTERM' }) })));
     let bad = false;
     for (const { name, result } of results) {

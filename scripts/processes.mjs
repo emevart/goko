@@ -16,9 +16,9 @@ export function loadRootEnv(root) {
   if (existsSync(file)) process.loadEnvFile(file);
 }
 
-// Пустая переменная — то же, что не заданная (так читает конфигурацию game-server). go-engine и doctor
-// читают `env.X ?? умолчание`, и пустая строка из infra/.env.example (`KATAGO_MODEL=`) подставилась бы
-// вместо пути по умолчанию, а `ENGINE_PORT=` дала бы порт 0. Поэтому детям пустые значения не передаём.
+// Пустая переменная — то же, что не заданная: так читают конфигурацию game-server, go-engine и doctor.
+// Детям пустые значения всё равно не передаём: план dev сам решает по env (`KATAGO_BIN`, `ENGINE_KEY`,
+// `ENGINE_PORT`), и пустая строка там не должна считаться заданным значением.
 /**
  * @param {Record<string, string | undefined>} env
  * @returns {Record<string, string>}
@@ -48,16 +48,26 @@ function pipeLines(stream, print) {
   });
 }
 
-// opts: { cwd, env, prefix, shell, detached }. Возвращает ChildProcess.
-export function startLogged(name, cmd, args, opts) {
-  const child = spawn(cmd, args, {
+// Опции spawn для startLogged. windowsHide по умолчанию true: при stdio без наследования libuv ставит
+// CREATE_NO_WINDOW, и у ребёнка своя скрытая консоль — окна не появляются, но и Ctrl+C консоли
+// родителя ребёнок не получает. dev передаёт windowsHide: false, чтобы дети остались в консоли терминала.
+/**
+ * @param {{ cwd: string, env: Record<string, string>, shell?: boolean, detached?: boolean, windowsHide?: boolean }} opts
+ */
+export function spawnOptions(opts) {
+  return {
     cwd: opts.cwd,
     env: opts.env,
-    stdio: ['ignore', 'pipe', 'pipe'],
+    stdio: /** @type {['ignore', 'pipe', 'pipe']} */ (['ignore', 'pipe', 'pipe']),
     shell: opts.shell ?? false,
     detached: opts.detached ?? false,
-    windowsHide: true,
-  });
+    windowsHide: opts.windowsHide ?? true,
+  };
+}
+
+// opts: { cwd, env, prefix, shell, detached, windowsHide }. Возвращает ChildProcess.
+export function startLogged(name, cmd, args, opts) {
+  const child = spawn(cmd, args, spawnOptions(opts));
   const print = (line) => console.log(`${opts.prefix ?? ''}[${name}] ${line}`);
   pipeLines(child.stdout, print);
   pipeLines(child.stderr, print);
@@ -101,8 +111,9 @@ export function killTree(child, signal = 'SIGKILL') {
 }
 
 // Остановка с потолком: мягкий сигнал (если он есть), ожидание не дольше ceilingMs, затем силой.
-// soft: 'SIGTERM' — послать сигнал; null — ничего не слать и только ждать (на Windows Ctrl+C
-// в консоли уже получили сами дети, а мягкого сигнала другому процессу там нет).
+// soft: 'SIGTERM' — послать сигнал (на Windows killTree с любым сигналом — taskkill /T /F, то есть силой);
+// null — ничего не слать и только ждать. null годится только для детей, запущенных в консоли родителя
+// (windowsHide: false, как в dev): Ctrl+C терминала они получили сами. Скрытый ребёнок его не получает.
 // Возвращает 'exited' | 'killed' | 'stuck'.
 export async function stopWithCeiling(child, { soft, ceilingMs = STOP_CEILING_MS }) {
   if (hasExited(child)) return 'exited';

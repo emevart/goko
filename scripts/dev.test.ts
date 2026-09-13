@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { DEV_AGENT_NAME, devPlan } from './dev.mjs';
+import { DEV_AGENT_NAME, devPlan, devStartOptions } from './dev.mjs';
 
 const secretEnv = {
   APP_KEY: 'secret-app',
@@ -42,5 +42,21 @@ describe('dev: план запуска', () => {
     const printed = [...plan.notes, plan.ready].join('\n');
     for (const value of ['secret-', '/opt/katago']) expect(printed).not.toContain(value);
     expect(plan.ready).toContain('goko-dev');
+  });
+});
+
+describe('dev: опции запуска детей', () => {
+  const plan = devPlan({ KATAGO_BIN: '/opt/katago' }, () => true, () => 'k');
+
+  it('Windows: дети в консоли dev (windowsHide: false) и не detached — Ctrl+C терминала доходит до них самих', () => {
+    // libuv при windowsHide и stdio без наследования ставит CREATE_NO_WINDOW: у ребёнка своя скрытая
+    // консоль, и CTRL_C_EVENT терминала до него не доходит (отчёт задачи 13, круг правок 1, пункт 3).
+    for (const p of plan.procs) {
+      expect(devStartOptions(p, '/repo', true)).toEqual({ cwd: '/repo', env: p.env, shell: p.shell, detached: false, windowsHide: false });
+    }
+  });
+
+  it('POSIX: каждый ребёнок — лидер своей группы, SIGTERM уходит дереву', () => {
+    for (const p of plan.procs) expect(devStartOptions(p, '/repo', false)).toMatchObject({ cwd: '/repo', env: p.env, detached: true });
   });
 });
