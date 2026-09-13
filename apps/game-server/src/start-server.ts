@@ -198,17 +198,21 @@ export async function startServer(deps: StartDeps = {}): Promise<StartedServer |
     });
   }
 
+  // До готовности ошибка сокета — это ошибка listen (порт занят, нет прав), после — ошибка работающего
+  // сервера (например EMFILE на accept): оператору нужны разные подсказки.
+  let ready = false;
   server = listen(
     app,
     config.port,
     config.hostname,
     (info) => {
+      ready = true;
       console.log(`[OK] game-server на http://${info.address}:${info.port}; партий ${service.list().length}; движок ${config.fake ? 'fake' : 'go-engine'}`);
     },
     (error) => {
       // Только код: текст ошибки Node содержит адрес из HOST.
       const code = (error as NodeJS.ErrnoException).code;
-      log(`[X] game-server: не удалось слушать порт (${code ?? 'без кода'})`);
+      log(`[X] game-server: ${ready ? 'ошибка сокета сервера' : 'не удалось слушать порт'} (${code ?? 'без кода'})`);
       exit(1);
     },
   );

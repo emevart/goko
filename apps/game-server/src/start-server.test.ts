@@ -65,6 +65,8 @@ type HarnessOptions = {
   onServerClose?: (app: Parameters<Listen>[0]) => void;
   // Ошибка сокета при listen (EADDRINUSE и т. п.).
   listenError?: Error;
+  // Ошибка сокета уже после готовности (EMFILE на accept и т. п.).
+  errorAfterReady?: Error;
 };
 
 function harness(opts: HarnessOptions = {}): { deps: StartDeps; rec: Recorder } {
@@ -93,6 +95,7 @@ function harness(opts: HarnessOptions = {}): { deps: StartDeps; rec: Recorder } 
       rec.listens.push({ port, hostname });
       if (opts.listenError) onError(opts.listenError);
       else onReady({ address: hostname, port });
+      if (opts.errorAfterReady) onError(opts.errorAfterReady);
       return {
         close: (done) => {
           rec.events.push('server.close');
@@ -398,6 +401,17 @@ describe('startServer: лог приложения и ошибки сокета'
     expect(rec.logs.some((l) => l.startsWith('[X] game-server: сессия') && l.includes('room service unavailable'))).toBe(true);
   });
 
+  it('ошибка сокета после готовности — другой текст [X] с кодом, выход 1', async () => {
+    const log = say();
+    const error = Object.assign(new Error('accept EMFILE listen-host-value'), { code: 'EMFILE' });
+    const { deps, rec } = harness({ errorAfterReady: error });
+    expect(await startServer({ ...deps, env: { ...deps.env, HOST: 'listen-host-value' } })).not.toBeNull();
+    expect(log.mock.calls.map((c) => String(c[0]).startsWith('[OK]'))).toEqual([true]);
+    expect(rec.logs.filter((l) => l.startsWith('[X]'))).toEqual(['[X] game-server: ошибка сокета сервера (EMFILE)']);
+    expect(rec.exits).toEqual([1]);
+    expect(rec.logs.join('\n')).not.toContain('listen-host-value');
+  });
+
   it('ошибка listen (порт занят) — [X] с кодом ошибки без адреса, выход 1, без [OK]', async () => {
     const cases: Array<[Error, string]> = [
       [Object.assign(new Error('listen EADDRINUSE: address already in use listen-host-value:18787'), { code: 'EADDRINUSE' }), '[X] game-server: не удалось слушать порт (EADDRINUSE)'],
@@ -519,8 +533,10 @@ describe('startServer: остановка', () => {
     expect(await startServer(deps)).not.toBeNull();
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     rec.handlers.get('SIGTERM')?.();
-    // Время не продвигается: выход приходит сам, а не по дедлайну.
-    expect(await rec.exited).toBe(0);
+    // Время не продвигается: выход приходит сам, а не по дедлайну. Ожидание по оборотам очереди:
+    // если выхода нет вовсе, тест падает на утверждении, а не по таймауту.
+    await untilTick(() => rec.exits.length > 0);
+    expect(rec.exits).toEqual([0]);
     expect(rec.events).toEqual(['listen', 'server.close', 'service.close', 'exit 0']);
     expect(vi.getTimerCount()).toBe(0);
     await vi.advanceTimersByTimeAsync(SHUTDOWN_MS * 2);
