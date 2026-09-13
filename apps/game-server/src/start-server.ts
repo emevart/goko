@@ -20,7 +20,13 @@ export type Listen = (
   port: number,
   hostname: string,
   onReady: (info: { address: string; port: number }) => void,
+  onError: (error: Error) => void,
 ) => { close: (done: () => void) => void };
+
+type ServeFn = (
+  options: { fetch: Hono['fetch']; port: number; hostname: string },
+  onListen: (info: { address: string; port: number }) => void,
+) => { close: (done: () => void) => unknown; on: (event: 'error', listener: (error: Error) => void) => unknown };
 
 // Швы для тестов запуска: боевой путь берёт настоящие process.env, serve, process.on и process.exit.
 export type StartDeps = {
@@ -41,10 +47,17 @@ export const CONFIG_EXIT_CODE = 2;
 export const SHUTDOWN_MS = 25_000;
 export const DEFAULT_ENGINE_URL = 'http://127.0.0.1:8788';
 
-const defaultListen: Listen = (app, port, hostname, onReady) => {
-  const server = serve({ fetch: app.fetch, port, hostname }, (info) => onReady({ address: info.address, port: info.port }));
-  return { close: (done) => void server.close(() => done()) };
-};
+// Шов над serve: адрес готовности — фактический адрес сокета, ошибка сокета (EADDRINUSE, EACCES)
+// уходит в onError, а не падает процесс с сырым стеком.
+export const createListen =
+  (serveFn: ServeFn): Listen =>
+  (app, port, hostname, onReady, onError) => {
+    const server = serveFn({ fetch: app.fetch, port, hostname }, (info) => onReady({ address: info.address, port: info.port }));
+    server.on('error', onError);
+    return { close: (done) => void server.close(() => done()) };
+  };
+
+const defaultListen: Listen = createListen(serve);
 
 type Config = {
   appKey: string;
@@ -185,8 +198,19 @@ export async function startServer(deps: StartDeps = {}): Promise<StartedServer |
     });
   }
 
-  server = listen(app, config.port, config.hostname, (info) => {
-    console.log(`[OK] game-server на http://${info.address}:${info.port}; партий ${service.list().length}; движок ${config.fake ? 'fake' : 'go-engine'}`);
-  });
+  server = listen(
+    app,
+    config.port,
+    config.hostname,
+    (info) => {
+      console.log(`[OK] game-server на http://${info.address}:${info.port}; партий ${service.list().length}; движок ${config.fake ? 'fake' : 'go-engine'}`);
+    },
+    (error) => {
+      // Только код: текст ошибки Node содержит адрес из HOST.
+      const code = (error as NodeJS.ErrnoException).code;
+      log(`[X] game-server: не удалось слушать порт (${code ?? 'без кода'})`);
+      exit(1);
+    },
+  );
   return { app, service, sessions };
 }

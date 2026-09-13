@@ -10,7 +10,7 @@ import type { RoomCreator } from './livekit.ts';
 import { EventBus } from './events.ts';
 import { createFakeEngine } from './fake-engine.ts';
 import { GameStore } from './store.ts';
-import { SHUTDOWN_MS, type StartDeps, startServer } from './start-server.ts';
+import { type Listen, SHUTDOWN_MS, type StartDeps, createListen, startServer } from './start-server.ts';
 
 const SECRET = 'secret-of-at-least-32-characters-long';
 const REPO_ROOT = path.resolve(import.meta.dirname, '../../..');
@@ -53,7 +53,21 @@ const BASE_ENV = {
   FAKE_ENGINE: '1',
 };
 
-function harness(opts: { holdServerClose?: boolean; holdServiceClose?: boolean; initNoop?: boolean } = {}): { deps: StartDeps; rec: Recorder } {
+type HarnessOptions = {
+  holdServerClose?: boolean;
+  holdServiceClose?: boolean;
+  initNoop?: boolean;
+  // service.close отклоняется (после настоящего закрытия).
+  serviceCloseFails?: boolean;
+  // createRoom отклоняется.
+  roomsFail?: boolean;
+  // Вызывается в момент server.close: тест проверяет, что остановка к этому времени уже объявлена.
+  onServerClose?: (app: Parameters<Listen>[0]) => void;
+  // Ошибка сокета при listen (EADDRINUSE и т. п.).
+  listenError?: Error;
+};
+
+function harness(opts: HarnessOptions = {}): { deps: StartDeps; rec: Recorder } {
   let onExit: (code: number) => void = () => undefined;
   let serverDone: (() => void) | null = null;
   let serviceDone: (() => void) | null = null;
@@ -74,13 +88,15 @@ function harness(opts: { holdServerClose?: boolean; holdServiceClose?: boolean; 
   };
   const deps: StartDeps = {
     env: { ...BASE_ENV, DATA_DIR: dir },
-    listen: (_app, port, hostname, onReady) => {
+    listen: (app, port, hostname, onReady, onError) => {
       rec.events.push('listen');
       rec.listens.push({ port, hostname });
-      onReady({ address: hostname, port });
+      if (opts.listenError) onError(opts.listenError);
+      else onReady({ address: hostname, port });
       return {
         close: (done) => {
           rec.events.push('server.close');
+          opts.onServerClose?.(app);
           if (opts.holdServerClose) serverDone = done;
           else done();
         },
@@ -100,6 +116,7 @@ function harness(opts: { holdServerClose?: boolean; holdServiceClose?: boolean; 
       const rooms: RoomCreator = {
         createRoom: async (o) => {
           rec.rooms.push(o as never);
+          if (opts.roomsFail) throw new Error('twirp: room service unavailable');
           return {};
         },
       };
@@ -117,6 +134,7 @@ function harness(opts: { holdServerClose?: boolean; holdServiceClose?: boolean; 
         rec.events.push('service.close');
         await close();
         await hold;
+        if (opts.serviceCloseFails) throw new Error('store: flush failed');
       });
       return service;
     },
@@ -369,6 +387,73 @@ describe('startServer: данные и строка готовности', () =>
   });
 });
 
+describe('startServer: лог приложения и ошибки сокета', () => {
+  it('лог приложения — лог сервера: отказ LiveKit при создании сессии попадает в лог', async () => {
+    say();
+    const { deps, rec } = harness({ roomsFail: true });
+    const started = await startServer(deps);
+    if (!started) throw new Error('сервер не запустился');
+    const res = await started.app.request('/api/sessions', { method: 'POST', headers: { 'x-app-key': BASE_ENV.APP_KEY } });
+    expect(res.status).toBe(500);
+    expect(rec.logs.some((l) => l.startsWith('[X] game-server: сессия') && l.includes('room service unavailable'))).toBe(true);
+  });
+
+  it('ошибка listen (порт занят) — [X] с кодом ошибки без адреса, выход 1, без [OK]', async () => {
+    const cases: Array<[Error, string]> = [
+      [Object.assign(new Error('listen EADDRINUSE: address already in use listen-host-value:18787'), { code: 'EADDRINUSE' }), '[X] game-server: не удалось слушать порт (EADDRINUSE)'],
+      [new Error('listen failed at listen-host-value'), '[X] game-server: не удалось слушать порт (без кода)'],
+    ];
+    for (const [error, line] of cases) {
+      const log = say();
+      const { deps, rec } = harness({ listenError: error });
+      expect(await startServer({ ...deps, env: { ...deps.env, HOST: 'listen-host-value', PORT: '18787' } })).not.toBeNull();
+      expect(rec.exits).toEqual([1]);
+      expect(rec.logs.filter((l) => l.startsWith('[X]'))).toEqual([line]);
+      expect(rec.logs.join('\n')).not.toContain('listen-host-value');
+      expect(log.mock.calls).toEqual([]);
+      log.mockRestore();
+    }
+  });
+});
+
+describe('startServer: шов createListen', () => {
+  it('hostname и port уходят в serve, адрес готовности — фактический адрес сокета, close зовёт done, ошибка сокета — в onError', async () => {
+    const calls: Array<{ port: number; hostname: string; fetch: unknown }> = [];
+    let closed = 0;
+    const errorListeners: Array<(e: Error) => void> = [];
+    let onListen: ((i: { address: string; port: number }) => void) | null = null;
+    const serveFn = ((options: { port: number; hostname: string; fetch: unknown }, cb: (i: { address: string; port: number }) => void) => {
+      calls.push(options);
+      onListen = cb;
+      return {
+        close: (done: () => void) => {
+          closed++;
+          done();
+        },
+        on: (event: string, listener: (e: Error) => void) => {
+          if (event === 'error') errorListeners.push(listener);
+        },
+      };
+    }) as unknown as Parameters<typeof createListen>[0];
+    const listen = createListen(serveFn);
+    const app = { fetch: () => new Response('') } as unknown as Parameters<Listen>[0];
+    const ready: Array<{ address: string; port: number }> = [];
+    const errors: Error[] = [];
+    const handle = listen(app, 18787, 'localhost', (i) => ready.push(i), (e) => errors.push(e));
+    expect(calls).toEqual([{ port: 18787, hostname: 'localhost', fetch: app.fetch }]);
+    expect(ready).toEqual([]);
+    (onListen as ((i: { address: string; port: number }) => void) | null)?.({ address: '::1', port: 18787 });
+    expect(ready).toEqual([{ address: '::1', port: 18787 }]);
+    const boom = new Error('EACCES');
+    for (const l of errorListeners) l(boom);
+    expect(errors).toEqual([boom]);
+    let done = 0;
+    handle.close(() => done++);
+    expect(closed).toBe(1);
+    expect(done).toBe(1);
+  });
+});
+
 describe('startServer: остановка', () => {
   it('сигнал: server.close, затем service.close, выход 0 только после обоих', async () => {
     say();
@@ -386,19 +471,29 @@ describe('startServer: остановка', () => {
     expect(rec.events).toEqual(['listen', 'server.close', 'service.close', 'exit 0']);
   });
 
-  it('сигнал закрывает открытые потоки SSE: иначе server.close ждал бы их вечно', async () => {
+  it('сигнал закрывает открытые потоки SSE до server.close: иначе server.close ждал бы их до дедлайна', async () => {
     say();
-    const { deps, rec } = harness();
+    const headers = { 'x-app-key': BASE_ENV.APP_KEY, 'content-type': 'application/json' };
+    let gameId = '';
+    let lateBody: Promise<string> | null = null;
+    // Боевой server.close ждёт открытых соединений, фейковый нет. Поэтому в момент close проверяется,
+    // что остановка уже объявлена: поток, открытый сейчас, закрывается сразу и пуст.
+    const { deps, rec } = harness({
+      onServerClose: (app) => {
+        lateBody = Promise.resolve(app.request(`/api/games/${gameId}/events`, { headers })).then((r) => r.text());
+      },
+    });
     const started = await startServer(deps);
     if (!started) throw new Error('сервер не запустился');
-    const headers = { 'x-app-key': BASE_ENV.APP_KEY, 'content-type': 'application/json' };
     const created = await started.app.request('/api/games', { method: 'POST', headers, body: JSON.stringify({ black: { controller: 'human' }, white: { controller: 'human' } }) });
-    const { state } = (await created.json()) as { state: { id: string } };
-    const res = await started.app.request(`/api/games/${state.id}/events`, { headers });
+    gameId = ((await created.json()) as { state: { id: string } }).state.id;
+    const res = await started.app.request(`/api/games/${gameId}/events`, { headers });
     const reader = res.body?.getReader();
     if (!reader) throw new Error('нет тела');
     await reader.read();
     rec.handlers.get('SIGINT')?.();
+    if (!lateBody) throw new Error('server.close не вызван');
+    expect(await lateBody).toBe('');
     expect((await reader.read()).done).toBe(true);
     expect(await rec.exited).toBe(0);
   });
@@ -418,6 +513,20 @@ describe('startServer: остановка', () => {
     expect(SHUTDOWN_MS).toBe(25_000);
   });
 
+  it('отказ service.close — выход 0 без ожидания дедлайна, таймер снят', async () => {
+    say();
+    const { deps, rec } = harness({ serviceCloseFails: true });
+    expect(await startServer(deps)).not.toBeNull();
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    rec.handlers.get('SIGTERM')?.();
+    // Время не продвигается: выход приходит сам, а не по дедлайну.
+    expect(await rec.exited).toBe(0);
+    expect(rec.events).toEqual(['listen', 'server.close', 'service.close', 'exit 0']);
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(SHUTDOWN_MS * 2);
+    expect(rec.exits).toEqual([0]);
+  });
+
   it('штатная остановка снимает таймер дедлайна: второго выхода нет', async () => {
     say();
     const { deps, rec } = harness();
@@ -434,7 +543,10 @@ describe('startServer: остановка', () => {
     say();
     const { deps, rec } = harness({ holdServiceClose: true });
     expect(await startServer(deps)).not.toBeNull();
+    // Фейковые таймеры до первого сигнала: дедлайн не остаётся настоящим таймером в воркере.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     rec.handlers.get('SIGINT')?.();
+    expect(vi.getTimerCount()).toBe(1);
     expect(rec.exits).toEqual([]);
     rec.handlers.get('SIGTERM')?.();
     expect(rec.exits).toEqual([1]);
@@ -451,20 +563,18 @@ describe('startServer: остановка', () => {
         probe.close(() => resolve(free));
       });
     });
-    const log = say();
+    // Строка готовности ждётся событием (вызовом console.log), без опроса. Адрес 127.0.0.1 — без DNS;
+    // адрес сокета вместо HOST проверяет тест шва createListen.
+    const ready = new Promise<string>((resolve) => {
+      vi.spyOn(console, 'log').mockImplementation((line: unknown) => resolve(String(line)));
+    });
     const { deps, rec } = harness();
-    await startServer({ ...deps, listen: undefined, env: { ...deps.env, PORT: String(port), HOST: 'localhost' } });
-    const line = await vi.waitFor(() => {
-      const found = log.mock.calls.map((c) => String(c[0])).find((l) => l.startsWith('[OK] game-server'));
-      expect(found).toBeDefined();
-      return found;
-    }, { timeout: 10_000, interval: 20 }); // разрешение localhost под нагрузкой бывает дольше секунды
-    // Адрес — фактический адрес сокета, а не строка HOST.
-    expect(['127.0.0.1', '::1'].map((address) => `[OK] game-server на http://${address}:${port}; партий 0; движок fake`)).toContain(line);
-    const health = await fetch(`http://localhost:${port}/health`, { signal: AbortSignal.timeout(5_000) });
+    await startServer({ ...deps, listen: undefined, env: { ...deps.env, PORT: String(port), HOST: '127.0.0.1' } });
+    expect(await ready).toBe(`[OK] game-server на http://127.0.0.1:${port}; партий 0; движок fake`);
+    const health = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(5_000) });
     expect(await health.json()).toEqual({ ok: true, games: 0, sessions: 0 });
     rec.handlers.get('SIGINT')?.();
     expect(await rec.exited).toBe(0);
-    await expect(fetch(`http://localhost:${port}/health`, { signal: AbortSignal.timeout(5_000) })).rejects.toThrow();
-  });
+    await expect(fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(5_000) })).rejects.toThrow();
+  }, 20_000);
 });
