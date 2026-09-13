@@ -895,16 +895,16 @@ describe('GameService: фоновые задачи, дедлайны и мьют
     const { service, bus } = await make(engine, { store, replyTimeoutMs: undefined });
     const seen = record(bus, 'session:s1');
     await expect(service.create({ ...ENGINE_BLACK, ...S9, waitForReply: true }, { sessionId: 's1' })).rejects.toThrow('disk full');
-    expect(service.internalSizes()).toEqual({ sessionsByGame: 0, waiters: 0 });
+    expect(service.internalSizes()).toEqual({ sessionsByGame: 0, waiters: 0, gaveUp: 0 });
     expect(seen).toEqual([]);
     expect(engine.calls.genmove).toBe(0);
     // Следующая партия той же сессии: объявляется, движок отвечает, ожидающий получает ход.
     const created = await service.create({ ...ENGINE_BLACK, ...S9, waitForReply: true }, { sessionId: 's1' });
     expect(created.firstMove).toMatchObject({ coord: 'C3' });
     expect(seen[0]).toEqual({ type: 'session.game', gameId: created.state.id });
-    expect(service.internalSizes()).toEqual({ sessionsByGame: 1, waiters: 0 });
+    expect(service.internalSizes()).toEqual({ sessionsByGame: 1, waiters: 0, gaveUp: 0 });
     await service.close();
-    expect(service.internalSizes()).toEqual({ sessionsByGame: 1, waiters: 0 });
+    expect(service.internalSizes()).toEqual({ sessionsByGame: 1, waiters: 0, gaveUp: 0 });
     expect(vi.getTimerCount()).toBe(0);
   });
 
@@ -916,7 +916,7 @@ describe('GameService: фоновые задачи, дедлайны и мьют
     });
     const { service } = await make(createFakeEngine(), { store });
     await expect(service.create({ ...HUMAN_BLACK, ...S9, waitForReply: false })).rejects.toThrow('disk full');
-    expect(service.internalSizes()).toEqual({ sessionsByGame: 0, waiters: 0 });
+    expect(service.internalSizes()).toEqual({ sessionsByGame: 0, waiters: 0, gaveUp: 0 });
     expect(service.list()).toEqual([]);
   });
 
@@ -1431,7 +1431,7 @@ describe('GameService: фоновые задачи, дедлайны и мьют
 
   it('ожидание ответа после close не ждёт таймаута', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
-    const { service } = await make(createFakeEngine({ script: ['E5'] }), { replyTimeoutMs: undefined });
+    const { service } = await make(createFakeEngine({ script: ['E5'] }), { store: memoryStore(), replyTimeoutMs: undefined });
     const g = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: false });
     await service.close();
     // Часы стоят: ответа движка после close не будет, и ждать его 8 с незачем.
@@ -1771,6 +1771,119 @@ describe('GameService: серия повторов фоновой задачи',
       expect(codes(events)).toEqual(['engine_gave_up', 'engine_unavailable', 'engine_gave_up']);
     });
   }
+
+  it('отказы записи: после engine_gave_up и resume серия снова начинается с первой паузы', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const real = memoryStore();
+    const store = {
+      load: () => real.load(),
+      save: async (state: GameState) => {
+        if (state.moves.length === 2) throw new Error('disk is full');
+        return real.save(state);
+      },
+    } as unknown as GameStore;
+    const engine = createFakeEngine();
+    const { service, bus } = await make(engine, { store, retryDelaysMs: [10, 20] });
+    const g = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: false });
+    const id = g.state.id;
+    const events = record(bus, `game:${id}`);
+    await service.play(id, { coord: 'D4', waitForReply: false, via: 'api' });
+    await untilTick(() => codes(events).length === 1);
+    await vi.advanceTimersByTimeAsync(10);
+    await untilTick(() => codes(events).length === 2);
+    await vi.advanceTimersByTimeAsync(20);
+    await untilTick(() => codes(events).includes('engine_gave_up'));
+    service.resume(id);
+    await untilTick(() => codes(events).length === 4);
+    await tick(5);
+    // Новая серия: первая пауза 10 мс, а не сразу финал.
+    expect(codes(events)).toEqual(['internal', 'internal', 'engine_gave_up', 'internal']);
+    await vi.advanceTimersByTimeAsync(10);
+    await untilTick(() => codes(events).length === 5);
+    expect(codes(events)[4]).toBe('internal');
+  });
+
+  it('счёт после двух пасов: серия кончается engine_gave_up, счёт больше не зовётся до действия человека', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    let calls = 0;
+    const flaky: Engine = {
+      ...createFakeEngine(),
+      score: async () => {
+        calls++;
+        throw new Error('score failed');
+      },
+    };
+    const { service, bus } = await make(flaky, { store: memoryStore(), retryDelaysMs: [10] });
+    const g = await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false });
+    const id = g.state.id;
+    const events = record(bus, `game:${id}`);
+    await service.pass(id, { waitForReply: false, via: 'api' });
+    await service.pass(id, { waitForReply: false, via: 'api' });
+    await untilTick(() => codes(events).length === 1);
+    await vi.advanceTimersByTimeAsync(10);
+    await untilTick(() => codes(events).includes('engine_gave_up'));
+    await vi.advanceTimersByTimeAsync(10_000);
+    await tick(10);
+    expect(calls).toBe(2);
+    expect(codes(events)).toEqual(['engine_unavailable', 'engine_gave_up']);
+    expect(vi.getTimerCount()).toBe(0);
+    expect(service.get(id).status).toBe('playing');
+    service.resume(id);
+    await untilTick(() => calls === 3);
+  });
+
+  it('финальная ошибка отпускает ожидающего ответа: correct во время последней паузы не ждёт таймаута', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    let calls = 0;
+    const { service } = await make(
+      unreachable(() => calls++),
+      { store: memoryStore(), retryDelaysMs: [1000], replyTimeoutMs: undefined },
+    );
+    const g = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: false });
+    const id = g.state.id;
+    await service.play(id, { coord: 'D4', waitForReply: false, via: 'api' });
+    await untilTick(() => calls === 1);
+    await tick(5);
+    // Идёт единственная пауза серии; исправление ставит ожидающего ответа на новую ревизию.
+    const correcting = service.correct(id, { coord: 'C3', waitForReply: true, via: 'voice' });
+    const state = track(correcting);
+    await tick(10);
+    expect(state.settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1000);
+    // Часы дальше не идут: без releaseWaiters на финале correct ждал бы 8 с.
+    await untilTick(() => state.settled);
+    const res = await correcting;
+    expect(calls).toBe(2);
+    expect(res).toMatchObject({ move: { coord: 'C3' }, replyTimedOut: true });
+  });
+
+  it('сдача человека после engine_gave_up снимает отметку исчерпанной серии', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    let calls = 0;
+    const { service, bus } = await make(
+      unreachable(() => calls++),
+      { store: memoryStore(), retryDelaysMs: [10] },
+    );
+    const g = await service.create({ ...ENGINE_BLACK, ...S9, waitForReply: false });
+    const id = g.state.id;
+    const events = record(bus, `game:${id}`);
+    await untilTick(() => calls === 1);
+    await vi.advanceTimersByTimeAsync(10);
+    await untilTick(() => codes(events).includes('engine_gave_up'));
+    expect(service.internalSizes().gaveUp).toBe(1);
+    // Партия кончается, перезапускать нечего: отметка не должна пережить партию.
+    // resign зовёт resume до мьютекса (как и прочие действия): при отказе записи сдачи партия
+    // осталась бы playing, и серия должна идти. Попытка, начатая до коммита сдачи, отбрасывается.
+    await service.resign(id, { color: 'W', via: 'voice' });
+    expect(service.internalSizes().gaveUp).toBe(0);
+    expect(service.get(id).status).toBe('finished');
+    await tick(10);
+    const after = calls;
+    await vi.advanceTimersByTimeAsync(10_000);
+    await tick(10);
+    expect(calls).toBe(after);
+    expect(vi.getTimerCount()).toBe(0);
+  });
 
   it('resume во время серии ничего не добавляет, для незнакомой партии не бросает', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });

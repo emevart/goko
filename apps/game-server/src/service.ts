@@ -136,10 +136,10 @@ export class GameService {
   }
 
   // Шов для тестов на утечки: размеры внутренних таблиц, которые публичным API не видны.
-  internalSizes(): { sessionsByGame: number; waiters: number } {
+  internalSizes(): { sessionsByGame: number; waiters: number; gaveUp: number } {
     let waiters = 0;
     for (const list of this.waiters.values()) waiters += list.length;
-    return { sessionsByGame: this.sessionsByGame.size, waiters };
+    return { sessionsByGame: this.sessionsByGame.size, waiters, gaveUp: this.gaveUp.size };
   }
 
   get(id: string): GameState {

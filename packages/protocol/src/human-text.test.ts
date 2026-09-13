@@ -25,6 +25,8 @@ describe('текст ошибки для человека', () => {
     expect(humanText('illegal_move')).toBe(ERROR_TEXT.illegal_move);
     expect(humanText('illegal_move', { reason: 'toString' })).toBe(ERROR_TEXT.illegal_move);
     expect(humanText('illegal_move', { reason: 42 })).toBe(ERROR_TEXT.illegal_move);
+    // reason объясняет только illegal_move: у другого кода со знакомым reason — текст самого кода.
+    expect(humanText('not_your_turn', { reason: 'ko' })).toBe(ERROR_TEXT.not_your_turn);
   });
 
   it('код события error — строка: незнакомый код даёт текст internal', () => {
