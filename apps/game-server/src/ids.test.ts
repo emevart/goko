@@ -2,10 +2,29 @@ import { describe, expect, it, vi } from 'vitest';
 import { MAX_ID_LENGTH, isSafeId, newId } from './ids.ts';
 
 describe('newId', () => {
-  it('уникален, из base36 времени и шести hex', () => {
+  // Настоящая генерация, без подмены времени и случайности: 1000 id подряд укладываются в несколько
+  // миллисекунд, и уникальность держит только случайная часть. При 3 байтах тест падал в ~0,7 % прогонов
+  // — это и была вероятность коллизии двух партий в одну миллисекунду.
+  it('уникален на 1000 id подряд', () => {
     const ids = new Set(Array.from({ length: 1000 }, () => newId()));
     expect(ids.size).toBe(1000);
-    for (const id of ids) expect(id).toMatch(/^[0-9a-z]{8,}[0-9a-f]{6}$/);
+  });
+
+  it('формат: base36 времени и 12 hex случайной части, 20 символов на нынешних часах', () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-09-07T10:00:00.000Z'));
+      const prefix = Date.parse('2026-09-07T10:00:00.000Z').toString(36);
+      expect(prefix).toHaveLength(8);
+      for (let i = 0; i < 100; i++) {
+        const id = newId();
+        expect(id).toMatch(/^[0-9a-z]{8}[0-9a-f]{12}$/);
+        expect(id).toHaveLength(20);
+        expect(id.startsWith(prefix)).toBe(true);
+      }
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('префикс — время в base36, поэтому идентификаторы сортируются по времени', () => {
@@ -15,7 +34,7 @@ describe('newId', () => {
       const earlier = newId();
       vi.setSystemTime(new Date('2026-09-07T11:00:00.000Z'));
       const later = newId();
-      expect(earlier.slice(0, -6)).toBe(Date.parse('2026-09-07T10:00:00.000Z').toString(36));
+      expect(earlier.slice(0, -12)).toBe(Date.parse('2026-09-07T10:00:00.000Z').toString(36));
       expect(earlier < later).toBe(true);
     } finally {
       vi.useRealTimers();
