@@ -6,7 +6,7 @@
 import path from 'node:path';
 import { serve } from '@hono/node-server';
 import type { Hono } from 'hono';
-import { createApp } from './app.ts';
+import { InFlight, createApp } from './app.ts';
 import { createEngineClient } from './engine-client.ts';
 import { EventBus } from './events.ts';
 import { createFakeEngine } from './fake-engine.ts';
@@ -187,6 +187,7 @@ export async function startServer(deps: StartDeps = {}): Promise<StartedServer |
   const sessions = new SessionManager({ max: config.maxSessions, ttlMs: config.sessionTtlMs });
   const rooms = createRooms({ url: config.livekit.url, apiKey: config.livekit.apiKey, apiSecret: config.livekit.apiSecret });
   const closing = new AbortController();
+  const inFlight = new InFlight();
   const app = createApp({
     service,
     sessions,
@@ -195,39 +196,51 @@ export async function startServer(deps: StartDeps = {}): Promise<StartedServer |
     livekit: { ...config.livekit, tokenTtlSeconds: Math.floor(config.sessionTtlMs / 1000) },
     rooms,
     closing: closing.signal,
+    inFlight,
     log,
   });
 
   // Остановка: потоки SSE закрываются (иначе server.close ждал бы их вечно), сервер перестаёт
-  // принимать соединения, сервис дожидается фоновых задач. Когда сервис закрыт, текущие запросы
-  // уже получили ответ, и оставшиеся соединения обрываются: stream.abort() не освобождает сокет
-  // с застрявшей записью медленного клиента. Выход 0 — только когда закрылись оба;
-  // дольше SHUTDOWN_MS не ждём. Повторный сигнал — немедленный выход.
+  // принимать соединения, сервис дожидается фоновых задач движка. Обработчики запросов сервис не
+  // ждёт, поэтому оставшиеся соединения обрываются, только когда сервис закрыт И счётчик текущих
+  // запросов дошёл до нуля (ответ записан в сокет): обрыв нужен сокету с застрявшей записью
+  // медленного клиента, который stream.abort() не освобождает. Выход 0 — только когда закрылись
+  // сервер и сервис; отдельного таймера на запросы нет, потолок — SHUTDOWN_MS с выходом 1.
+  // Выход ровно один: дедлайн, повторный сигнал или штатное закрытие, что случится первым.
   let server: ListenHandle | null = null;
   let stopping = false;
+  let exited = false;
+  const exitOnce = (code: number) => {
+    if (exited) return;
+    exited = true;
+    exit(code);
+  };
   for (const signal of ['SIGINT', 'SIGTERM'] as const) {
     on(signal, () => {
       if (stopping) {
         log('[!] game-server: повторный сигнал, выход без ожидания');
-        exit(1);
+        exitOnce(1);
         return;
       }
       stopping = true;
       closing.abort();
       const deadline = setTimeout(() => {
         log(`[!] game-server: остановка дольше ${SHUTDOWN_MS} мс, выход без ожидания`);
-        exit(1);
+        exitOnce(1);
       }, SHUTDOWN_MS);
       const current = server;
       const serverClosed = new Promise<void>((resolve) => (current ? current.close(resolve) : resolve()));
       const serviceClosing = service.close();
       // Отказ сервиса разбирается ниже, здесь только обрыв соединений.
-      void serviceClosing.finally(() => current?.closeAllConnections()).catch(() => undefined);
+      void serviceClosing
+        .catch(() => undefined)
+        .then(() => inFlight.idle())
+        .then(() => current?.closeAllConnections());
       void Promise.allSettled([serverClosed, serviceClosing]).then(([, serviceClosed]) => {
         clearTimeout(deadline);
         // Выход всё равно 0: снапшоты пишутся до публикации состояния, но оператор должен видеть отказ.
         if (serviceClosed.status === 'rejected') log(`[!] game-server: service.close завершился ошибкой (${errorCode(serviceClosed.reason)})`);
-        exit(0);
+        exitOnce(0);
       });
     });
   }

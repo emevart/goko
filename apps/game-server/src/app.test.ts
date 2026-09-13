@@ -1,15 +1,15 @@
-import { getEventListeners } from 'node:events';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { RoomAgentDispatch, TokenVerifier } from 'livekit-server-sdk';
 import { GameSettings, createClient, fakeFetch, parseSseStream } from '@goko/protocol';
-import { type AppDeps, SSE_QUEUE_LIMIT, createApp } from './app.ts';
+import { EventEmitter, getEventListeners } from 'node:events';
+import { type AppDeps, InFlight, SSE_QUEUE_LIMIT, createApp } from './app.ts';
 import { type Engine, createEngineClient } from './engine-client.ts';
 import { EventBus } from './events.ts';
 import { createFakeEngine } from './fake-engine.ts';
 import type { RoomCreator } from './livekit.ts';
 import { GameService } from './service.ts';
 import { SessionManager } from './sessions.ts';
-import { type GuardedService, closeWithin, guardService, memoryStore } from './test-helpers.ts';
+import { type GuardedService, closeWithin, guardService, memoryStore, track } from './test-helpers.ts';
 
 const KEY = 'app-secret';
 const LK = { url: 'wss://lk.test', apiKey: 'devkey', apiSecret: 'secret-of-at-least-32-characters-long', agentName: 'goko-dev', tokenTtlSeconds: 3600 };
@@ -55,6 +55,7 @@ type MakeOptions = {
   closing?: AbortSignal;
   delayMs?: number;
   engine?: Engine;
+  inFlight?: InFlight;
 };
 
 async function make(opts: MakeOptions = {}) {
@@ -79,6 +80,7 @@ async function make(opts: MakeOptions = {}) {
     rooms,
     heartbeatMs: opts.heartbeatMs === 'default' ? undefined : (opts.heartbeatMs ?? 5_000),
     closing: opts.closing,
+    inFlight: opts.inFlight,
     log: (line) => logs.push(line),
   });
   // Клиент протокола поверх app.request: без сети.
@@ -926,5 +928,127 @@ describe('createApp: круг правок 1 пакета 12b', () => {
     await expect(client.getGame('nope')).rejects.toMatchObject({ code: 'not_found' });
     await expect(client.play(state.id, { coord: 'Z99' })).rejects.toMatchObject({ code: 'invalid_coord' });
     expect(logs.slice(before)).toEqual([]);
+  });
+});
+
+describe('createApp: счётчик текущих запросов (остановка не рвёт ответы)', () => {
+  const headers = { 'x-app-key': KEY, 'content-type': 'application/json' };
+
+  it('InFlight: idle сразу при нуле; ждёт, пока все запросы не вышли; все ожидающие просыпаются', async () => {
+    const counter = new InFlight();
+    expect(counter.size).toBe(0);
+    const empty = track(counter.idle());
+    await turns(1);
+    expect(empty.settled).toBe(true);
+    counter.enter();
+    counter.enter();
+    expect(counter.size).toBe(2);
+    const first = track(counter.idle());
+    const second = track(counter.idle());
+    counter.leave();
+    await turns(2);
+    expect([first.settled, second.settled]).toEqual([false, false]);
+    counter.leave();
+    await turns(2);
+    expect([first.settled, second.settled]).toEqual([true, true]);
+    expect(counter.size).toBe(0);
+    // Разбуженные ожидающие не просыпаются второй раз и не копятся.
+    counter.enter();
+    const third = track(counter.idle());
+    counter.leave();
+    await turns(2);
+    expect(third.settled).toBe(true);
+  });
+
+  it('запрос считается, пока обработчик не ответил: удержанный analyze — 1, после ответа — 0', async () => {
+    const inFlight = new InFlight();
+    const { app, client, service } = await make({ inFlight });
+    const { state } = await client.createGame(HUMAN_ONLY);
+    expect(inFlight.size).toBe(0);
+    let release: () => void = () => undefined;
+    const analyze = service.analyze.bind(service);
+    const held = vi.spyOn(service, 'analyze').mockImplementation(async (...args) => {
+      await new Promise<void>((resolve) => (release = resolve));
+      return analyze(...args);
+    });
+    const pending = Promise.resolve(app.request(`/api/games/${state.id}/analyze`, { method: 'POST', headers, body: '{}' }));
+    await untilTick(() => held.mock.calls.length === 1);
+    expect(inFlight.size).toBe(1);
+    const idle = track(inFlight.idle());
+    await turns(5);
+    expect(idle.settled).toBe(false);
+    release();
+    expect((await pending).status).toBe(200);
+    await untilTick(() => idle.settled);
+    expect(inFlight.size).toBe(0);
+  });
+
+  it('ответы с ошибкой, 401 и /health тоже выходят из счёта', async () => {
+    const inFlight = new InFlight();
+    const { app } = await make({ inFlight });
+    expect((await app.request('/api/games/nope')).status).toBe(401);
+    expect((await app.request('/api/games/nope', { headers })).status).toBe(404);
+    expect((await app.request('/api/games', { method: 'POST', headers, body: 'not json' })).status).toBe(400);
+    expect((await app.request('/health')).status).toBe(200);
+    expect(inFlight.size).toBe(0);
+  });
+
+  it('потоки SSE не считаются: открытый поток партии и сессии не держат счётчик', async () => {
+    const inFlight = new InFlight();
+    const { app, client, sessions } = await make({ inFlight });
+    const { state } = await client.createGame(HUMAN_ONLY);
+    const game = streamOf(await app.request(`/api/games/${state.id}/events`, { headers }));
+    await readUntil(game, (t) => t.includes('"cause":"sync"'));
+    const session = sessions.create();
+    const sessionStream = await app.request(`/api/sessions/${session.id}/events`, { headers });
+    expect(sessionStream.status).toBe(200);
+    expect(inFlight.size).toBe(0);
+    await game.cancel();
+    await sessionStream.body?.cancel();
+  });
+
+  it('на сокете Node запрос выходит из счёта по close ответа, а не по возврату обработчика', async () => {
+    const inFlight = new InFlight();
+    const { app } = await make({ inFlight });
+    const outgoing = new EventEmitter();
+    const res = await app.fetch(new Request('http://app.test/health'), { outgoing });
+    expect(res.status).toBe(200);
+    // Ответ ещё не записан в сокет: обрыв соединений сейчас потерял бы его.
+    expect(inFlight.size).toBe(1);
+    outgoing.emit('close');
+    expect(inFlight.size).toBe(0);
+    expect(getEventListeners(outgoing, 'close')).toHaveLength(0);
+  });
+
+  it('на сокете Node: соединение закрылось раньше ответа — запрос всё равно выходит из счёта', async () => {
+    const inFlight = new InFlight();
+    const { app, client, service } = await make({ inFlight });
+    const { state } = await client.createGame(HUMAN_ONLY);
+    let release: () => void = () => undefined;
+    const analyze = service.analyze.bind(service);
+    const held = vi.spyOn(service, 'analyze').mockImplementation(async (...args) => {
+      await new Promise<void>((resolve) => (release = resolve));
+      return analyze(...args);
+    });
+    const outgoing = new EventEmitter();
+    const pending = Promise.resolve(app.fetch(new Request(`http://app.test/api/games/${state.id}/analyze`, { method: 'POST', headers, body: '{}' }), { outgoing }));
+    await untilTick(() => held.mock.calls.length === 1);
+    expect(inFlight.size).toBe(1);
+    outgoing.emit('close'); // клиент ушёл, пока сервис думал
+    expect(inFlight.size).toBe(1);
+    release();
+    expect((await pending).status).toBe(200);
+    await untilTick(() => inFlight.size === 0);
+  });
+
+  it('на сокете Node поток SSE выходит из счёта сразу, не дожидаясь close', async () => {
+    const inFlight = new InFlight();
+    const { app, client } = await make({ inFlight });
+    const { state } = await client.createGame(HUMAN_ONLY);
+    const outgoing = new EventEmitter();
+    const res = await app.fetch(new Request(`http://app.test/api/games/${state.id}/events`, { headers }), { outgoing });
+    expect(res.status).toBe(200);
+    expect(inFlight.size).toBe(0);
+    await res.body?.cancel();
   });
 });

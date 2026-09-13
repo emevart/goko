@@ -1,5 +1,6 @@
 // HTTP-приложение game-server (раздел 5 спеки): маршруты, X-App-Key, ошибки по таблице, SSE.
 import { createHash, timingSafeEqual } from 'node:crypto';
+import { EventEmitter } from 'node:events';
 import { type Context, Hono } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import { type SSEStreamingApi, streamSSE } from 'hono/streaming';
@@ -36,8 +37,37 @@ export type AppDeps = {
   heartbeatMs?: number;
   // Остановка сервера: открытые потоки SSE закрываются, новые закрываются сразу.
   closing?: AbortSignal;
+  // Текущие запросы (кроме потоков SSE): остановка рвёт соединения только когда их не осталось.
+  inFlight?: InFlight;
   log?: (line: string) => void;
 };
+
+// Счётчик текущих запросов. idle() осядет, когда счётчик дойдёт до нуля (сразу, если он уже ноль).
+export class InFlight {
+  #count = 0;
+  #waiters: Array<() => void> = [];
+
+  get size(): number {
+    return this.#count;
+  }
+
+  enter(): void {
+    this.#count++;
+  }
+
+  leave(): void {
+    this.#count--;
+    if (this.#count > 0) return;
+    const waiters = this.#waiters;
+    this.#waiters = [];
+    for (const wake of waiters) wake();
+  }
+
+  idle(): Promise<void> {
+    if (this.#count === 0) return Promise.resolve();
+    return new Promise((resolve) => this.#waiters.push(resolve));
+  }
+}
 
 export const DEFAULT_HEARTBEAT_MS = 15_000;
 // Предел тела запроса: самое большое тело протокола (новая партия с метками мест) — сотни байт.
@@ -81,6 +111,37 @@ export function createApp(deps: AppDeps): Hono {
   const redact = (text: string) => secrets.reduce((acc, secret) => acc.split(secret).join('[скрыто]'), text);
   const fail = (c: Context, code: ErrorCode, message: string, details?: Record<string, unknown>) =>
     c.json({ error: { code, message, ...(details ? { details } : {}) } }, ERROR_STATUS[code] as ContentfulStatusCode);
+
+  // Счёт текущих запросов — первым, чтобы в него попали и отказы по ключу и телу. Под @hono/node-server
+  // обработчик возвращает Response раньше, чем ответ записан в сокет, поэтому запрос выходит из счёта
+  // по close ответа Node (c.env.outgoing); без сокета (app.request) — по возврату обработчика.
+  // Слушатель close ставится до обработчика: соединение может закрыться, пока сервис думает.
+  // Поток SSE выходит из счёта сразу: он живёт до остановки и закрывается по сигналу closing.
+  const inFlight = deps.inFlight;
+  if (inFlight) {
+    app.use('*', async (c, next) => {
+      const outgoing = (c.env as { outgoing?: unknown } | undefined)?.outgoing;
+      const socket = outgoing instanceof EventEmitter ? outgoing : null;
+      let closed = false;
+      const onClose = () => {
+        closed = true;
+      };
+      socket?.once('close', onClose);
+      inFlight.enter();
+      try {
+        await next();
+      } finally {
+        const sse = c.res.headers.get('content-type')?.startsWith('text/event-stream') === true;
+        if (socket === null || closed || sse) {
+          socket?.off('close', onClose);
+          inFlight.leave();
+        } else {
+          socket.off('close', onClose);
+          socket.once('close', () => inFlight.leave());
+        }
+      }
+    });
+  }
 
   app.get('/health', (c) => c.json({ ok: true, games: service.list().length, sessions: sessions.list().length }));
 

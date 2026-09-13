@@ -156,6 +156,17 @@ function harness(opts: HarnessOptions = {}): { deps: StartDeps; rec: Recorder } 
   return { deps, rec };
 }
 
+const freePort = () =>
+  new Promise<number>((resolve, reject) => {
+    const probe = createServer();
+    probe.once('error', reject);
+    probe.listen(0, '127.0.0.1', () => {
+      const address = probe.address();
+      const free = typeof address === 'object' && address ? address.port : 0;
+      probe.close(() => resolve(free));
+    });
+  });
+
 const say = () => vi.spyOn(console, 'log').mockImplementation(() => undefined);
 
 const untilTick = async (cond: () => boolean, turns = 1000): Promise<void> => {
@@ -566,6 +577,89 @@ describe('startServer: остановка', () => {
     expect(rec.events).toEqual(['listen', 'server.close', 'service.close', 'server.closeAllConnections', 'exit 0']);
   });
 
+  it('запрос, удержанный в сервисе во время сигнала, получает 200; соединения рвутся только после ответа, выход 0', async () => {
+    say();
+    const headers = { 'x-app-key': BASE_ENV.APP_KEY, 'content-type': 'application/json' };
+    const { deps, rec } = harness({ stuckConnection: true });
+    const started = await startServer(deps);
+    if (!started) throw new Error('сервер не запустился');
+    const created = await started.app.request('/api/games', { method: 'POST', headers, body: JSON.stringify({ black: { controller: 'human' }, white: { controller: 'human' } }) });
+    const gameId = ((await created.json()) as { state: { id: string } }).state.id;
+    let release: () => void = () => undefined;
+    const analyze = started.service.analyze.bind(started.service);
+    const held = vi.spyOn(started.service, 'analyze').mockImplementation(async (...args) => {
+      await new Promise<void>((resolve) => (release = resolve));
+      const result = await analyze(...args);
+      rec.events.push('analyze.done');
+      return result;
+    });
+    const pending = Promise.resolve(started.app.request(`/api/games/${gameId}/analyze`, { method: 'POST', headers, body: '{}' }));
+    await untilTick(() => held.mock.calls.length === 1);
+    rec.handlers.get('SIGTERM')?.();
+    await untilTick(() => rec.events.includes('service.close'));
+    for (let i = 0; i < 50; i++) await new Promise((r) => setImmediate(r));
+    // Сервис закрыт, но запрос ещё в обработчике: соединения не рвутся, выхода нет.
+    expect(rec.events).toEqual(['listen', 'server.close', 'service.close']);
+    expect(rec.exits).toEqual([]);
+    release();
+    expect((await pending).status).toBe(200);
+    await untilTick(() => rec.exits.length > 0);
+    expect(rec.exits).toEqual([0]);
+    expect(rec.events).toEqual(['listen', 'server.close', 'service.close', 'analyze.done', 'server.closeAllConnections', 'exit 0']);
+  });
+
+  it('боевой listen: запрос, удержанный в сервисе во время сигнала, получает 200 по сокету, затем выход 0', async () => {
+    const port = await freePort();
+    const ready = new Promise<void>((resolve) => {
+      vi.spyOn(console, 'log').mockImplementation(() => resolve());
+    });
+    const { deps, rec } = harness();
+    const started = await startServer({ ...deps, listen: undefined, env: { ...deps.env, PORT: String(port), HOST: '127.0.0.1' } });
+    if (!started) throw new Error('сервер не запустился');
+    await ready;
+    const base = `http://127.0.0.1:${port}`;
+    const headers = { 'x-app-key': BASE_ENV.APP_KEY, 'content-type': 'application/json' };
+    const created = await fetch(`${base}/api/games`, { method: 'POST', headers, body: JSON.stringify({ black: { controller: 'human' }, white: { controller: 'human' } }), signal: AbortSignal.timeout(5_000) });
+    const gameId = ((await created.json()) as { state: { id: string } }).state.id;
+    let release: () => void = () => undefined;
+    const analyze = started.service.analyze.bind(started.service);
+    const held = vi.spyOn(started.service, 'analyze').mockImplementation(async (...args) => {
+      await new Promise<void>((resolve) => (release = resolve));
+      return analyze(...args);
+    });
+    const pending = fetch(`${base}/api/games/${gameId}/analyze`, { method: 'POST', headers, body: '{}', signal: AbortSignal.timeout(10_000) });
+    await vi.waitFor(() => expect(held).toHaveBeenCalledTimes(1), { timeout: 5_000 });
+    rec.handlers.get('SIGTERM')?.();
+    await untilTick(() => rec.events.includes('service.close'));
+    for (let i = 0; i < 50; i++) await new Promise((r) => setImmediate(r));
+    expect(rec.exits).toEqual([]);
+    release();
+    const res = await pending;
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { winrateB?: unknown }).winrateB).toBeDefined();
+    expect(await rec.exited).toBe(0);
+  }, 20_000);
+
+  it('сервис висит и соединение застряло: ровно один выход 1 по дедлайну, второго выхода нет', async () => {
+    say();
+    const { deps, rec } = harness({ stuckConnection: true, holdServiceClose: true });
+    expect(await startServer(deps)).not.toBeNull();
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    rec.handlers.get('SIGINT')?.();
+    await untilTick(() => rec.events.includes('service.close'));
+    await vi.advanceTimersByTimeAsync(SHUTDOWN_MS - 1);
+    expect(rec.exits).toEqual([]);
+    expect(rec.events).not.toContain('server.closeAllConnections');
+    await vi.advanceTimersByTimeAsync(1);
+    expect(rec.exits).toEqual([1]);
+    // Сервис дозакрылся уже после дедлайна: соединения рвутся, но второго выхода нет.
+    rec.finishServiceClose();
+    await untilTick(() => rec.events.includes('server.closeAllConnections'));
+    for (let i = 0; i < 50; i++) await new Promise((r) => setImmediate(r));
+    await vi.advanceTimersByTimeAsync(SHUTDOWN_MS * 2);
+    expect(rec.exits).toEqual([1]);
+  });
+
   it('потоки SSE закрыты раньше closeAllConnections: остановка объявлена до обрыва соединений', async () => {
     say();
     const headers = { 'x-app-key': BASE_ENV.APP_KEY, 'content-type': 'application/json' };
@@ -579,13 +673,13 @@ describe('startServer: остановка', () => {
     if (!reader) throw new Error('нет тела');
     await reader.read();
     rec.handlers.get('SIGINT')?.();
-    const ended = reader.read().then((r) => {
+    void reader.read().then((r) => {
       rec.events.push(`sse.done ${r.done}`);
     });
-    // Ожидание по оборотам очереди: без выхода тест падает на утверждении, а не по таймауту.
-    await untilTick(() => rec.exits.length > 0, 5000);
+    // Ожидание по оборотам очереди: если поток не закрылся или выхода нет, тест падает на
+    // утверждении, а не по таймауту vitest.
+    await untilTick(() => rec.exits.length > 0 && rec.events.includes('sse.done true'), 5000);
     expect(rec.exits).toEqual([0]);
-    await ended;
     expect(rec.events.indexOf('sse.done true')).toBeGreaterThan(-1);
     expect(rec.events.indexOf('sse.done true')).toBeLessThan(rec.events.indexOf('server.closeAllConnections'));
   });
@@ -642,7 +736,8 @@ describe('startServer: остановка', () => {
     // если выхода нет вовсе, тест падает на утверждении, а не по таймауту.
     await untilTick(() => rec.exits.length > 0);
     expect(rec.exits).toEqual([0]);
-    expect(rec.events).toEqual(['listen', 'server.close', 'service.close', 'server.closeAllConnections', 'exit 0']);
+    // Сервер без застрявших соединений закрылся сам: обрыв соединений может прийти и после выхода.
+    expect(rec.events.filter((e) => e !== 'server.closeAllConnections')).toEqual(['listen', 'server.close', 'service.close', 'exit 0']);
     expect(vi.getTimerCount()).toBe(0);
     await vi.advanceTimersByTimeAsync(SHUTDOWN_MS * 2);
     expect(rec.exits).toEqual([0]);
@@ -675,15 +770,7 @@ describe('startServer: остановка', () => {
   });
 
   it('боевой listen поднимает сервер на порту, отвечает по HTTP и закрывается по сигналу', async () => {
-    const port = await new Promise<number>((resolve, reject) => {
-      const probe = createServer();
-      probe.once('error', reject);
-      probe.listen(0, '127.0.0.1', () => {
-        const address = probe.address();
-        const free = typeof address === 'object' && address ? address.port : 0;
-        probe.close(() => resolve(free));
-      });
-    });
+    const port = await freePort();
     // Строка готовности ждётся событием (вызовом console.log), без опроса. Адрес 127.0.0.1 — без DNS;
     // адрес сокета вместо HOST проверяет тест шва createListen.
     const ready = new Promise<string>((resolve) => {
