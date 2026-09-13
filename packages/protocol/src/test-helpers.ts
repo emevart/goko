@@ -1,5 +1,6 @@
 // Фейковый fetch для тестов: собирает вызовы, отвечает по списку обработчиков.
 // Один обработчик — отвечает на все вызовы; список — по одному на вызов, последний повторяется.
+// Импорт — по подпути @goko/protocol/testing, а не из index.ts: в бандл веба тестовый код не попадает.
 export type Call = { url: string; init: RequestInit };
 type Handler = (call: Call) => Response | Promise<Response>;
 

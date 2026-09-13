@@ -6,4 +6,3 @@ export * from './events.ts';
 export * from './engine.ts';
 export * from './sse.ts';
 export * from './client.ts';
-export * from './test-helpers.ts';

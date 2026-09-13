@@ -759,8 +759,8 @@ describe('строгость запросов', () => {
 });
 
 describe('публичная поверхность пакета', () => {
-  it('index.ts реэкспортирует все восемь модулей', () => {
-    for (const name of ['GameState', 'ERROR_CODES', 'PlayRequest', 'GameEvent', 'EngineGenmoveRequest', 'createClient', 'parseSseStream', 'fakeFetch']) {
+  it('index.ts реэкспортирует все модули протокола', () => {
+    for (const name of ['GameState', 'ERROR_CODES', 'PlayRequest', 'GameEvent', 'EngineGenmoveRequest', 'createClient', 'parseSseStream', 'humanText']) {
       expect(Object.keys(protocol), name).toContain(name);
     }
     expect(protocol.ERROR_CODES).toEqual(ERROR_CODES);
@@ -770,6 +770,11 @@ describe('публичная поверхность пакета', () => {
     expect(protocol.EngineGenmoveRequest).toBe(EngineGenmoveRequest);
     expect(protocol.createClient).toBe(createClient);
     expect(protocol.parseSseStream).toBe(parseSseStream);
-    expect(protocol.fakeFetch).toBe(fakeFetch);
+  });
+
+  it('тестовые помощники не в index.ts (он уходит в бандл веба), а по подпути @goko/protocol/testing', async () => {
+    expect(Object.keys(protocol)).not.toContain('fakeFetch');
+    const testing = await import('@goko/protocol/testing');
+    expect(testing.fakeFetch).toBe(fakeFetch);
   });
 });

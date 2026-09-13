@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { RoomAgentDispatch, TokenVerifier } from 'livekit-server-sdk';
-import { GameSettings, createClient, fakeFetch, parseSseStream } from '@goko/protocol';
+import { GameSettings, createClient, parseSseStream } from '@goko/protocol';
+import { fakeFetch } from '@goko/protocol/testing';
 import { EventEmitter, getEventListeners } from 'node:events';
 import { serve } from '@hono/node-server';
 import { type AppDeps, InFlight, SSE_QUEUE_LIMIT, createApp } from './app.ts';

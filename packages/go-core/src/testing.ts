@@ -1,4 +1,5 @@
 // Помощник для тестов: позиция из строк сверху вниз. 'X' чёрные, 'O' белые, '.' пусто.
+// Импорт — по подпути @goko/go-core/testing, а не из index.ts.
 import type { Position } from './board.ts';
 
 export function positionFromRows(rows: string[]): Position {

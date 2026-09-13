@@ -6,4 +6,3 @@ export * from './score.ts';
 export * from './groups.ts';
 export * from './sgf.ts';
 export * from './ascii.ts';
-export * from './testing.ts';

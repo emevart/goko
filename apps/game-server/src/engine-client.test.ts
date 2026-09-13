@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { type Call, fakeFetch } from '@goko/protocol';
+import { type Call, fakeFetch } from '@goko/protocol/testing';
 import { ENGINE_RETRY_DELAY_MS, ENGINE_TIMEOUTS, createEngineClient, isConnectionError } from './engine-client.ts';
 import { track } from './test-helpers.ts';
 
