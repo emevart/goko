@@ -1,3 +1,4 @@
+import { getEventListeners } from 'node:events';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -50,7 +51,7 @@ type MakeOptions = {
   maxSessions?: number;
   ttlMs?: number;
   now?: () => number;
-  heartbeatMs?: number;
+  heartbeatMs?: number | 'default';
   rooms?: RoomCreator & { calls: RoomCall[] };
   livekit?: Partial<AppDeps['livekit']>;
   closing?: AbortSignal;
@@ -72,7 +73,7 @@ async function make(opts: MakeOptions = {}) {
     appKey: KEY,
     livekit: { ...LK, ...opts.livekit },
     rooms,
-    heartbeatMs: opts.heartbeatMs ?? 5_000,
+    heartbeatMs: opts.heartbeatMs === 'default' ? undefined : (opts.heartbeatMs ?? 5_000),
     closing: opts.closing,
     log: (line) => logs.push(line),
   });
@@ -224,6 +225,13 @@ describe('createApp: маршруты брифа', () => {
 });
 
 describe('createApp: X-App-Key, тела и ошибки', () => {
+  it('/health считает партии и живые сессии', async () => {
+    const { app, client } = await make();
+    await client.createGame(HUMAN_ONLY);
+    await client.createSession();
+    expect(await (await app.request('/health')).json()).toEqual({ ok: true, games: 1, sessions: 1 });
+  });
+
   it('неверный ключ любой длины — 401; ключ не попадает в ответ; пустой appKey не принимается', async () => {
     const { app, service } = await make();
     for (const header of ['app-secreT', 'app-secret-longer', 'a', '']) {
@@ -475,6 +483,38 @@ describe('createApp: SSE, heartbeat и остановка', () => {
 
     const late = await app.request(`/api/games/${state.id}/events`, { headers: { 'x-app-key': KEY } });
     expect(await late.text()).toBe('');
+    expect(bus.count(`game:${state.id}`)).toBe(0);
+  });
+
+  it('heartbeat по умолчанию — 15 с', async () => {
+    const { app, client } = await make({ heartbeatMs: 'default' });
+    const { state } = await client.createGame(HUMAN_ONLY);
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const reader = streamOf(await app.request(`/api/games/${state.id}/events`, { headers: { 'x-app-key': KEY } }));
+    await readUntil(reader, (t) => t.includes('"cause":"sync"'));
+    await untilTick(() => vi.getTimerCount() === 1);
+    let pinged = false;
+    const next = reader.read().then(() => {
+      pinged = true;
+    });
+    await vi.advanceTimersByTimeAsync(14_999);
+    expect(pinged).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    await next;
+    expect(pinged).toBe(true);
+    await reader.cancel();
+  });
+
+  it('закрытый поток снимает свой слушатель с сигнала остановки', async () => {
+    const closing = new AbortController();
+    const { app, client, bus } = await make({ closing: closing.signal });
+    const { state } = await client.createGame(HUMAN_ONLY);
+    const reader = streamOf(await app.request(`/api/games/${state.id}/events`, { headers: { 'x-app-key': KEY } }));
+    await readUntil(reader, (t) => t.includes('"cause":"sync"'));
+    expect(getEventListeners(closing.signal, 'abort')).toHaveLength(1);
+    await reader.cancel();
+    await untilTick(() => getEventListeners(closing.signal, 'abort').length === 0);
+    expect(getEventListeners(closing.signal, 'abort')).toHaveLength(0);
     expect(bus.count(`game:${state.id}`)).toBe(0);
   });
 

@@ -127,8 +127,8 @@ export function createApp(deps: AppDeps): Hono {
           }
         }
       } finally {
-        stop();
-        c.req.raw.signal.removeEventListener('abort', stop);
+        // Цикл выходит только после stop(). Слушатель на долгоживущем сигнале остановки снимается,
+        // иначе копился бы на каждом закрытом потоке; сигнал запроса умирает вместе с запросом.
         deps.closing?.removeEventListener('abort', stop);
       }
     });

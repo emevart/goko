@@ -7,6 +7,9 @@ import { TokenVerifier } from 'livekit-server-sdk';
 import type { GameService, GameServiceDeps } from './service.ts';
 import { GameService as RealGameService } from './service.ts';
 import type { RoomCreator } from './livekit.ts';
+import { EventBus } from './events.ts';
+import { createFakeEngine } from './fake-engine.ts';
+import { GameStore } from './store.ts';
 import { SHUTDOWN_MS, type StartDeps, startServer } from './start-server.ts';
 
 const SECRET = 'secret-of-at-least-32-characters-long';
@@ -339,6 +342,29 @@ describe('startServer: конфигурация из env', () => {
     expect(lines).toEqual(['[OK] game-server на http://127.0.0.1:18000; партий 0; движок fake']);
     const all = lines.join('\n');
     for (const secret of [BASE_ENV.APP_KEY, SECRET, 'engine-url-value']) expect(all).not.toContain(secret);
+  });
+});
+
+describe('startServer: данные и строка готовности', () => {
+  it('партии из DATA_DIR загружаются до listen', async () => {
+    const seed = new RealGameService({ store: new GameStore(dir), engine: createFakeEngine(), bus: new EventBus() });
+    opened.push(seed);
+    await seed.init();
+    const { state } = await seed.create({ black: { controller: 'human' }, white: { controller: 'human' }, waitForReply: true });
+    const log = say();
+    const { deps } = harness();
+    const started = await startServer(deps);
+    if (!started) throw new Error('сервер не запустился');
+    expect(log.mock.calls.map((c) => String(c[0]))).toEqual(['[OK] game-server на http://127.0.0.1:8787; партий 1; движок fake']);
+    expect(started.service.get(state.id).id).toBe(state.id);
+  });
+
+  it('с настоящим движком строка готовности называет go-engine, не адрес', async () => {
+    const log = say();
+    const { deps } = harness();
+    await startServer({ ...deps, env: { ...deps.env, FAKE_ENGINE: undefined, ENGINE_KEY: 'engine-key-value', ENGINE_URL: 'http://engine-url-value' } });
+    const lines = log.mock.calls.map((c) => String(c[0]));
+    expect(lines).toEqual(['[OK] game-server на http://127.0.0.1:8787; партий 0; движок go-engine']);
   });
 });
 
