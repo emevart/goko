@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -57,14 +57,15 @@ afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-type Options = { extraEnv?: Record<string, string>; withoutPath?: boolean };
+type Options = { extraEnv?: Record<string, string>; withoutPath?: boolean; rawDotEnv?: string };
 
 function runDoctor(vars: Record<string, string>, options: Options = {}): { lines: string[]; status: number | null } {
   writeFileSync(
     path.join(dir, '.env'),
-    Object.entries(vars)
-      .map(([k, v]) => `${k}=${v}`)
-      .join('\n'),
+    options.rawDotEnv ??
+      Object.entries(vars)
+        .map(([k, v]) => `${k}=${v}`)
+        .join('\n'),
   );
   const env: Record<string, string> = {};
   for (const key of PASS_THROUGH) {
@@ -91,12 +92,13 @@ describe('doctor: боевой запуск', () => {
       const { lines, status } = runDoctor(withoutWebHost);
       const joined = lines.join('\n');
       // Итог: обе недостающие переменные, и та, что ломает спайк, и та, что ломает движок.
-      expect(lines).toContain('[!] doctor: инструменты на месте, но не запустится без WEB_HOST, ENGINE_KEY');
+      expect(lines).toContain('[!] doctor: инструменты на месте, но не запустится без WEB_HOST, ENGINE_KEY, APP_KEY');
       expect(joined).not.toContain('[OK] doctor: можно работать');
       // Отдельные строки-подсказки: без них у founder'а нет имени файла, куда смотреть.
       expect(lines).toContain('[!] env отсутствуют: WEB_HOST — спайк не запустится (см. infra/.env.example)');
       expect(lines).toContain('[!] env отсутствуют: ENGINE_KEY — go-engine не запустится (см. infra/.env.example)');
-      expect(lines).toContain('[!] env для стадии 1 отсутствуют: APP_KEY (сейчас не нужны)');
+      expect(lines).toContain('[!] env отсутствуют: APP_KEY — game-server выходит с кодом 2 (см. infra/.env.example)');
+      expect(joined).not.toContain('сейчас не нужны');
       expect(lines).toContain('[OK] env: LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET, OPENAI_API_KEY');
       expect(lines).toContain("[!] AGENT_NAME не задан: спайк возьмёт продовое имя 'goko', на ПК нужен 'goko-dev'");
       expect(lines).toContain('[!] KATAGO_BIN не задан: движок будет недоступен, тесты движка пропускаются');
@@ -152,7 +154,7 @@ describe('doctor: боевой запуск', () => {
       writeFileSync(path.join(models, 'b18c384nbt-humanv0.bin.gz'), '');
       const { lines, status } = runDoctor(
         { ...SPIKE, KATAGO_MODEL: '', ENGINE_KEY: '' },
-        // Из пробелов — через окружение процесса: readDotEnv сам обрезает значения.
+        // Из пробелов — через окружение процесса: разбор .env сам обрезает значения без кавычек.
         { extraEnv: { KATAGO_HUMAN_MODEL: '  ', APP_KEY: '  ', WEB_HOST: '  ', AGENT_NAME: '  ', KATAGO_BIN: '  ' } },
       );
       expect(lines).toContain('[OK] основная сеть на месте (KATAGO_MODEL)');
@@ -161,10 +163,39 @@ describe('doctor: боевой запуск', () => {
       expect(lines).toContain("[!] AGENT_NAME не задан: спайк возьмёт продовое имя 'goko', на ПК нужен 'goko-dev'");
       expect(lines).toContain('[!] env отсутствуют: WEB_HOST — спайк не запустится (см. infra/.env.example)');
       expect(lines).toContain('[!] env отсутствуют: ENGINE_KEY — go-engine не запустится (см. infra/.env.example)');
-      expect(lines).toContain('[!] env для стадии 1 отсутствуют: APP_KEY (сейчас не нужны)');
-      expect(lines).toContain('[!] doctor: инструменты на месте, но не запустится без WEB_HOST, ENGINE_KEY');
+      expect(lines).toContain('[!] env отсутствуют: APP_KEY — game-server выходит с кодом 2 (см. infra/.env.example)');
+      expect(lines).toContain('[!] doctor: инструменты на месте, но не запустится без WEB_HOST, ENGINE_KEY, APP_KEY');
       expect(lines.join('\n')).not.toContain(MARKER);
       expect(status).toBe(0);
+    },
+    60_000,
+  );
+
+  it(
+    '.env, скопированный из infra/.env.example: пустые переменные с комментарием — «не задано», без ложного [X]',
+    () => {
+      const { lines, status } = runDoctor({}, { rawDotEnv: readFileSync(path.join(HERE, '..', 'infra', '.env.example'), 'utf8') });
+      const joined = lines.join('\n');
+      expect(joined).not.toContain('[X]');
+      expect(lines).toContain('[!] KATAGO_BIN не задан: движок будет недоступен, тесты движка пропускаются');
+      expect(lines).toContain('[!] env отсутствуют: LIVEKIT_API_KEY, LIVEKIT_API_SECRET, OPENAI_API_KEY — спайк не запустится (см. infra/.env.example)');
+      expect(lines).toContain('[!] env отсутствуют: ENGINE_KEY — go-engine не запустится (см. infra/.env.example)');
+      expect(lines).toContain('[!] env отсутствуют: APP_KEY, LIVEKIT_API_KEY, LIVEKIT_API_SECRET — game-server выходит с кодом 2 (см. infra/.env.example)');
+      // Имена в итоге без повторов: LIVEKIT_* нужны и спайку, и game-server.
+      expect(lines).toContain('[!] doctor: инструменты на месте, но не запустится без LIVEKIT_API_KEY, LIVEKIT_API_SECRET, OPENAI_API_KEY, ENGINE_KEY, APP_KEY');
+      expect(status).toBe(0);
+    },
+    60_000,
+  );
+
+  it(
+    'без LIVEKIT_* game-server не стартует и при FAKE_ENGINE=1: строка game-server, а не только спайка',
+    () => {
+      const { LIVEKIT_URL: _url, ...withoutUrl } = SPIKE;
+      const { lines } = runDoctor({ ...withoutUrl, ENGINE_KEY: `${MARKER}-engine`, APP_KEY: `${MARKER}-app`, FAKE_ENGINE: '1' });
+      expect(lines).toContain('[!] env отсутствуют: LIVEKIT_URL — game-server выходит с кодом 2 (см. infra/.env.example)');
+      expect(lines).toContain('[!] doctor: инструменты на месте, но не запустится без LIVEKIT_URL');
+      expect(lines.join('\n')).not.toContain(MARKER);
     },
     60_000,
   );

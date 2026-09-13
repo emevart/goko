@@ -1,6 +1,7 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import util from 'node:util';
 import { describe, expect, it } from 'vitest';
 import { REQUIRED_ENV, checkEnvNames, checkNodeVersion, envValue, readDotEnv, verdict } from './doctor.mjs';
 
@@ -12,8 +13,13 @@ describe('doctor', () => {
   });
 
   it('ENGINE_KEY нужен сейчас, а не «на стадии 1»: без него go-engine не стартует', () => {
-    expect(REQUIRED_ENV.engine).toContain('ENGINE_KEY');
-    expect(REQUIRED_ENV.later).not.toContain('ENGINE_KEY');
+    expect(REQUIRED_ENV.engine).toEqual(['ENGINE_KEY']);
+    // Списка «понадобится потом» больше нет: всё, что читает запускаемый сервис, нужно сейчас.
+    expect(Object.keys(REQUIRED_ENV)).toEqual(['spike', 'engine', 'gameServer']);
+  });
+
+  it('game-server без APP_KEY и LIVEKIT_* выходит с кодом 2, в том числе при FAKE_ENGINE=1', () => {
+    expect(REQUIRED_ENV.gameServer).toEqual(['APP_KEY', 'LIVEKIT_URL', 'LIVEKIT_API_KEY', 'LIVEKIT_API_SECRET']);
   });
 
   it('список переменных спайка закреплён: doctor не должен «забыть» WEB_HOST', () => {
@@ -57,17 +63,37 @@ describe('doctor', () => {
     expect(envValue({}, 'D')).toBeUndefined();
   });
 
-  it('readDotEnv пропускает комментарии и пустые строки, снимает кавычки', () => {
+  it('readDotEnv читает .env как process.loadEnvFile: комментарии в конце строки отрезаны, кавычки сняты', () => {
     const dir = mkdtempSync(path.join(tmpdir(), 'goko-doctor-'));
     const file = path.join(dir, '.env');
     try {
       // Знак = внутри значения — обычное дело для токенов: строка делится по первому, а не последнему.
-      const lines = ['# ENGINE_KEY=commented', '', 'APP_KEY="quoted"', 'ENGINE_KEY=plain', 'broken-line', 'APP_URL=a=b'];
+      const lines = [
+        '# ENGINE_KEY=commented',
+        '',
+        'APP_KEY="quoted"',
+        'ENGINE_KEY=plain',
+        'broken-line',
+        'APP_URL=a=b',
+        'KATAGO_BIN=                        # только на ПК',
+        'WEB_HOST="with # hash"  # комментарий',
+      ];
       writeFileSync(file, lines.join('\n'));
-      expect(readDotEnv(file)).toEqual({ APP_KEY: 'quoted', ENGINE_KEY: 'plain', APP_URL: 'a=b' });
+      expect(readDotEnv(file)).toEqual({ APP_KEY: 'quoted', ENGINE_KEY: 'plain', APP_URL: 'a=b', KATAGO_BIN: '', WEB_HOST: 'with # hash' });
+      expect(readDotEnv(path.join(dir, 'missing.env'))).toEqual({});
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  it('infra/.env.example: пустые переменные с комментарием читаются пустыми, а не текстом комментария', () => {
+    const example = readDotEnv(path.join(import.meta.dirname, '..', 'infra', '.env.example'));
+    // Тот же разбор, что у dev и smoke (process.loadEnvFile).
+    expect(example).toEqual(util.parseEnv(readFileSync(path.join(import.meta.dirname, '..', 'infra', '.env.example'), 'utf8')));
+    for (const name of ['APP_KEY', 'ENGINE_KEY', 'KATAGO_BIN', 'KATAGO_MODEL', 'LIVEKIT_API_KEY', 'LIVEKIT_API_SECRET', 'TRUST_PROXY']) {
+      expect(example[name], name).toBe('');
+    }
+    expect(checkEnvNames(example, REQUIRED_ENV.gameServer).missing).toEqual(['APP_KEY', 'LIVEKIT_API_KEY', 'LIVEKIT_API_SECRET']);
   });
 
   it('accepts node >= 22.18 and rejects older', () => {

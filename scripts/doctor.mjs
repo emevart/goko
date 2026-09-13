@@ -4,6 +4,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { execSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
+import util from 'node:util';
 
 export function checkNodeVersion(version) {
   const m = /^v(\d+)\.(\d+)\.(\d+)/.exec(version);
@@ -27,17 +28,11 @@ export function checkEnvNames(env, required) {
   return { present, missing };
 }
 
+// Тот же разбор, что у process.loadEnvFile в dev и smoke: комментарий в конце строки отрезается,
+// кавычки снимаются. Свой разбор однажды читал текст комментария как значение пустой переменной.
 export function readDotEnv(file) {
   if (!existsSync(file)) return {};
-  const out = {};
-  for (const line of readFileSync(file, 'utf8').split(/\r?\n/)) {
-    const t = line.trim();
-    if (!t || t.startsWith('#')) continue;
-    const i = t.indexOf('=');
-    if (i < 0) continue;
-    out[t.slice(0, i).trim()] = t.slice(i + 1).trim().replace(/^"(.*)"$/, '$1');
-  }
-  return out;
+  return util.parseEnv(readFileSync(file, 'utf8'));
 }
 
 // Что чем ломается. Списки разделены по последствию, а не по «стадии»: doctor не должен
@@ -47,8 +42,8 @@ export const REQUIRED_ENV = {
   spike: ['LIVEKIT_URL', 'LIVEKIT_API_KEY', 'LIVEKIT_API_SECRET', 'OPENAI_API_KEY', 'WEB_HOST'],
   // ENGINE_KEY читает apps/go-engine/src/start-engine.ts: без него go-engine выходит с кодом 2.
   engine: ['ENGINE_KEY'],
-  // Понадобится game-server'у; сейчас его никто не читает.
-  later: ['APP_KEY'],
+  // apps/game-server/src/start-server.ts: без любой из них выходит с кодом 2, и при FAKE_ENGINE=1 тоже.
+  gameServer: ['APP_KEY', 'LIVEKIT_URL', 'LIVEKIT_API_KEY', 'LIVEKIT_API_SECRET'],
 };
 
 // Итоговая строка. blockers — имена переменных, без которых сервис не поднимется;
@@ -93,8 +88,8 @@ function main() {
   const engine = checkEnvNames(env, REQUIRED_ENV.engine);
   if (engine.missing.length) warn(`env отсутствуют: ${engine.missing.join(', ')} — go-engine не запустится (см. infra/.env.example)`);
 
-  const later = checkEnvNames(env, REQUIRED_ENV.later);
-  if (later.missing.length) warn(`env для стадии 1 отсутствуют: ${later.missing.join(', ')} (сейчас не нужны)`);
+  const server = checkEnvNames(env, REQUIRED_ENV.gameServer);
+  if (server.missing.length) warn(`env отсутствуют: ${server.missing.join(', ')} — game-server выходит с кодом 2 (см. infra/.env.example)`);
 
   // AGENT_NAME молча подменяется дефолтом 'goko' в трёх файлах спайка. На ПК это
   // продовое имя: воркер зарегистрируется, но заданий не получит, и выглядит это
@@ -119,7 +114,8 @@ function main() {
     else warn(`${net.label} не найдена (${net.envName} или apps/go-engine/models/README.md)`);
   }
 
-  console.log(verdict({ failed, blockers: [...now.missing, ...engine.missing] }));
+  // LIVEKIT_* нужны и спайку, и game-server: в итоге каждое имя один раз.
+  console.log(verdict({ failed, blockers: [...new Set([...now.missing, ...engine.missing, ...server.missing])] }));
   process.exit(failed ? 1 : 0);
 }
 
