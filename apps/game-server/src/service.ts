@@ -341,6 +341,16 @@ export class GameService {
     }
   }
 
+  // Сломанный лог (запись в закрытый поток) не вправе менять ход партии: строка теряется, а отказ
+  // идёт обычным путём — событие error, пауза, повтор; нелегальный ход движка — всё равно пас.
+  private log(line: string): void {
+    try {
+      this.deps.log?.(line);
+    } catch {
+      // сообщить о сломанном логе некуда
+    }
+  }
+
   private now(): string {
     return (this.deps.now?.() ?? new Date()).toISOString();
   }
@@ -499,14 +509,17 @@ export class GameService {
   private startTask(tasks: Map<string, Promise<void>>, id: string, task: Promise<void>): void {
     const run = async (): Promise<void> => {
       try {
+        // await task обязан быть первой инструкцией run: run() вызывается до tasks.set, и finally с
+        // tasks.delete не должен выполниться раньше set. Синхронный выход до этого await оставил бы
+        // запись в карте навсегда, и для партии не поставилась бы ни одна задача.
         await task;
         // Задача дошла до конца без броска: серия отказов прервана.
         this.failures.delete(id);
       } catch (e) {
         await this.onFailure(id, e, 'internal', INTERNAL_MESSAGE, (detail) => `[X] background task for game ${id} failed: ${detail}`);
       } finally {
-        // Запись снимается при любом исходе, даже если бросил сам обработчик отказа (лог
-        // в закрытый поток): иначе для партии больше не поставилась бы ни одна задача.
+        // Запись снимается при любом исходе, даже если бросил сам обработчик отказа:
+        // иначе для партии больше не поставилась бы ни одна задача.
         tasks.delete(id);
       }
       // kick после любого исхода, а не только после отказа: коммит, случившийся пока запись задачи
@@ -516,7 +529,8 @@ export class GameService {
       const state = this.games.get(id);
       if (state) this.kick(state);
     };
-    // Бросок обработчика отказа сообщить уже некуда: лог сломан. Гасим, чтобы не уронить процесс.
+    // Бросок обработчика отказа (лог уже не бросает, но защита на будущее) сообщить некуда.
+    // Гасим, чтобы не уронить процесс.
     tasks.set(
       id,
       run().catch(() => undefined),
@@ -561,7 +575,7 @@ export class GameService {
         try {
           next = applyMove(current, color, reply.move, this.now());
         } catch (e) {
-          this.deps.log?.(`[!] the engine suggested an illegal move ${reply.move}: ${e instanceof Error ? e.message : String(e)}; passing instead`);
+          this.log(`[!] the engine suggested an illegal move ${reply.move}: ${e instanceof Error ? e.message : String(e)}; passing instead`);
           next = applyMove(current, color, 'pass', this.now());
         }
         await this.commit(next.state, 'engine', 'engine', undefined, reply.humanFallback);
@@ -582,13 +596,13 @@ export class GameService {
     if (retryMs === undefined) {
       this.failures.delete(id);
       this.gaveUp.add(id);
-      this.deps.log?.(`${logLine(detail)}; gave up after ${delays.length} retries`);
+      this.log(`${logLine(detail)}; gave up after ${delays.length} retries`);
       this.emitGame(id, { type: 'error', code: 'retries_exhausted', message: RETRIES_EXHAUSTED_MESSAGE });
       this.releaseWaiters(id);
       return false;
     }
     this.failures.set(id, count);
-    this.deps.log?.(`${logLine(detail)}; retrying in ${retryMs} ms`);
+    this.log(`${logLine(detail)}; retrying in ${retryMs} ms`);
     this.emitGame(id, publicError(e, code, message));
     this.releaseWaiters(id);
     await this.sleep(retryMs);

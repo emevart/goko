@@ -1596,31 +1596,51 @@ describe('GameService: фоновые задачи, дедлайны и мьют
     expect((await real.load())[0]?.status).toBe('finished');
   });
 
-  it('бросивший лог в обработчике отказа не оставляет партию без задачи движка навсегда', async () => {
+  it('бросивший лог не отменяет повтор: событие error, ожидающий снят, после паузы ход движка приходит', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     const real = memoryStore();
     let failures = 1;
     const store = gatedStore(real, async (state) => {
       if (state.moves.length === 2 && failures-- > 0) throw new Error('disk is full');
     });
-    // Лог пишет в закрытый поток и бросает на строке об отказе фоновой задачи.
-    const log = (line: string) => {
-      if (line.startsWith('[X]')) throw new Error('log stream is closed');
+    // Лог пишет в закрытый поток и бросает на каждой строке.
+    const log = () => {
+      throw new Error('log stream is closed');
     };
-    const engine = createFakeEngine({ script: ['E5', 'F6'] });
-    const { service } = await make(engine, { store, log });
+    // Второй E5 — ответ повтора: первый ход движка до диска не дошёл.
+    const engine = createFakeEngine({ script: ['E5', 'E5'] });
+    const { service, bus } = await make(engine, { store, log, retryDelaysMs: delays(1000), replyTimeoutMs: undefined });
     const g = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: false });
     const id = g.state.id;
-    await service.play(id, { coord: 'D4', waitForReply: false, via: 'api' });
-    await untilTick(() => failures === 0);
-    await tick(5);
-    // Исправление хода ставит ход движка заново: запись прежней задачи не вправе его заблокировать.
-    const correcting = service.correct(id, { coord: 'C3', waitForReply: true, via: 'voice' });
-    const state = track(correcting);
-    await untilTick(() => state.settled);
-    const res = await correcting;
-    expect(res.reply).toMatchObject({ coord: 'F6' });
-    expect(service.get(id).moves.map((m) => m.coord)).toEqual(['C3', 'F6']);
+    const events = record(bus, `game:${id}`);
+    // Ответ ждётся с таймаутом 8 с на стоящих часах: снять ожидающего может только обычный путь отказа.
+    const playing = service.play(id, { coord: 'D4', waitForReply: true, via: 'voice' });
+    const settled = track(playing);
+    await untilTick(() => settled.settled);
+    expect((await playing).replyTimedOut).toBe(true);
+    expect(events.filter((e) => e.type === 'error')).toEqual([{ type: 'error', code: 'internal', message: 'internal server error' }]);
+    await vi.advanceTimersByTimeAsync(1000);
+    await untilTick(() => service.get(id).moves.length === 2);
+    expect(service.get(id).moves.map((m) => m.coord)).toEqual(['D4', 'E5']);
+  });
+
+  it('бросивший лог не мешает пасу вместо нелегального хода движка', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const log = () => {
+      throw new Error('log stream is closed');
+    };
+    const errors: GameEvent[] = [];
+    const { service, bus } = await make(createFakeEngine({ script: ['D4'] }), { log, replyTimeoutMs: undefined });
+    const g = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: false });
+    bus.subscribe(`game:${g.state.id}`, (e) => {
+      if (e.type === 'error') errors.push(e);
+    });
+    // Часы стоят: ответ приходит только ходом движка, а не таймаутом ожидания.
+    const playing = service.play(g.state.id, { coord: 'D4', waitForReply: true, via: 'voice' });
+    const settled = track(playing);
+    await untilTick(() => settled.settled);
+    expect((await playing).reply).toMatchObject({ coord: 'pass' });
+    expect(errors).toEqual([]);
   });
 
   it('движок против движка: после хода задача ставится заново, партия идёт дальше одного хода', async () => {
