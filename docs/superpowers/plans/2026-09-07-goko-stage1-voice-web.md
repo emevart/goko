@@ -4,7 +4,7 @@
 
 **Goal:** Поверх ядра стадии 1 (план `2026-09-07-goko-stage1-core.md`) — голосовой соперник целиком: воркер LiveKit Agents с инструментами и промптом Гоко, озвучивание событий партии, текстовый канал из консоли, страница для телефона (доска, лента, микрофон), контейнеры game-server / go-engine / voice-agent в compose, деплой статики и runbook VPS.
 
-**Architecture:** `apps/voice-agent` — воркер `@livekit/agents` (`agentName` из `AGENT_NAME`): на каждую комнату читает `sessionId` из метаданных диспетчеризации, собирает `AgentSession` в режиме `realtime` (gpt-realtime, голос marin) или `pipeline` (STT → LLM → TTS, `VOICE_MODE`), даёт модели девять инструментов над `GokoClient` из `@goko/protocol` и слушает SSE сессии, превращая события (тап на экране, ход движка после таймаута, конец партии) в `generateReply`. Инструменты — чистые функции над клиентом (`createToolFns`), тестируются с фейковым клиентом без LLM; обёртки `llm.tool()` — тонкие. `apps/web` — Vite + React, одна страница: `useSession` (сессия, комната LiveKit, транскрипты), `useGame` (SSE, действия тапами через тот же клиент), SVG-доска с геометрией в отдельном модуле с тестами. `scripts/chat.mjs` — участник комнаты из консоли: stdin → `lk.chat`, `lk.transcription` и события SSE → stdout. Инфраструктура: три Dockerfile (Node 22 запускает `.ts` напрямую, без сборки), сервисы в `infra/docker-compose.yml` на `127.0.0.1`, Caddy остаётся единственной точкой входа.
+**Architecture:** `apps/voice-agent` — воркер `@livekit/agents` (`agentName` из `AGENT_NAME`): на каждую комнату читает `sessionId` из метаданных диспетчеризации, собирает `AgentSession` в режиме `realtime` (gpt-realtime, голос marin) или `pipeline` (STT → LLM → TTS, `VOICE_MODE`), даёт модели девять инструментов над `GokoClient` из `@goko/protocol` и слушает SSE сессии, превращая события (тап на экране, ход движка после таймаута, конец партии) в `generateReply`. Инструменты — чистые функции над клиентом (`createToolFns`), тестируются с фейковым клиентом без LLM; обёртки `llm.tool()` — тонкие. `apps/web` — Vite + React, одна страница: `useSession` (сессия, комната LiveKit, режим «Голос / Чат» атрибутом `goko.mode`, микрофон, чат, лента-диалог), `useGame` (SSE с «Повторить», действия тапами через тот же клиент), SVG-доска с геометрией в отдельном модуле с тестами; настройки (режим, цвет, ранг) — в `localStorage`. Режим агент читает из атрибута участника и в «Чате» выключает аудио сессии (D-0011). `scripts/chat.mjs` — участник комнаты из консоли в режиме `chat`: stdin → `lk.chat`, `lk.transcription` и события SSE → stdout. Инфраструктура: три Dockerfile (Node 22 запускает `.ts` напрямую, без сборки), сервисы в `infra/docker-compose.yml` на `127.0.0.1`, Caddy остаётся единственной точкой входа.
 
 **Tech Stack:** Node 22.22 (нативный `.ts`), npm workspaces, TypeScript 5.9, vitest 5, zod 4.5, `@livekit/agents` 1.8 + `@livekit/agents-plugin-openai` 1.8 + `@livekit/agents-plugin-silero` 1.8, `@livekit/rtc-node` 0.13, `livekit-client` 2.22, Vite 8 + `@vitejs/plugin-react` 6, React 19, Docker Compose, Caddy 2.
 
@@ -16,14 +16,16 @@
 - Правила го, координаты и озвучивание координат (`speakCoord`) — только из `@goko/go-core`; веб рисует присланную строку `board`; агент не хранит позицию: каждая реплика о партии — из результата инструмента (правило 2 `CLAUDE.md`). В памяти агента только `sessionId`, `gameId`, цвет человека, ранг, коми и служебные флаги.
 - Инструменты ровно по таблице раздела 9 спеки: `start_game`, `play_move`, `correct_last_move`, `pass`, `resign`, `undo`, `get_position`, `get_assessment`, `set_rank`; `get_assessment` — `analyze` с `maxVisits: 50`; тексты `note`/`reason` для модели — по-русски; координаты в аргументах и результатах — латиницей (`D4`), рядом произношение (`дэ четыре`).
 - `[!]` Известная граница разбора координат на 19x19: русские названия букв «эр» и «эс» транскрипт отдаёт кириллицей `Р` и `С`, а карта двойников `go-core` переводит их в `P` и `C`, а не в `R` и `S`. На 13x13 не проявляется — столбцы `O P Q R S T` отсекаются размером доски. Когда дойдёт до 19x19: агент диктует и принимает столбцы латиницей либо переспрашивает; карту двойников не трогать, она права для латиницы.
-- Речь: `VOICE_MODE=realtime` (по умолчанию) — `openai.realtime.RealtimeModel({ model: 'gpt-realtime', voice: 'marin' })`, серверный VAD с перебиванием, транскрипция входа `gpt-live-transcribe` с `language: 'ru'`; `VOICE_MODE=pipeline` — `silero.VAD` + `openai.STT` (`gpt-transcribe`, `ru`) + `openai.LLM` + `openai.TTS` (`gpt-4o-mini-tts` с инструкцией по тону). Приветствие — `generateReply` в `onEnter`.
-- Текстовые каналы LiveKit: вход `lk.chat` (стандартный `RoomIO`), выход `lk.transcription` (атрибуты `lk.segment_id`, `lk.transcription_final`, `lk.transcribed_track_id`). Признак финальности двусторонний (проверено на спайке 08.09, `@livekit/agents` 1.8.0): у транскрипта агента поток дельта-, атрибут `lk.transcription_final` навсегда `false`, финал — дочитанный поток; у транскрипта человека поток не дельта-, атрибут выставляется честно, но каждый промежуточный результат STT приходит отдельным уже закрытым потоком с тем же `lk.segment_id`. Отсюда общее правило обоих потребителей: единица реплики — `lk.segment_id`, а не поток; фильтровать по одному атрибуту нельзя. Консоль (`scripts/chat.mjs`) печатает сегмент один раз — сразу при `final="true"`, иначе по паузе без новых кусков; веб держит строку ленты по `lk.segment_id` и переписывает её новым куском того же сегмента.
-- Имена воркера: `AGENT_NAME=goko` на VPS, `goko-dev` на ПК. По D-0001 комнату с диспетчеризацией агента создаёт game-server (`createRoom` с `agents: [{ agentName, metadata }]`, `AGENT_NAME` у него же), токен телефона — только `roomJoin`, без `roomConfig`. Метаданные диспетчеризации — `{ "sessionId": "<id>" }`, комната — `goko-<sessionId>`. Агент приходит в комнату раньше телефона и открывает Realtime только после `ctx.waitForParticipant()`: пустая комната живёт до `emptyTimeout` 300 с, и без ожидания платная сессия шла бы вхолостую.
-- Ошибки (D-0007): `message` ошибок и событий `error` — английский текст для разработчика, его не озвучивают и не показывают. Русский текст для человека и для модели — `humanText(code, details)` из `@goko/protocol`. `retries_exhausted` (D-0006) значит, что сервер больше не повторяет сам: нужна реплика или действие человека. Признак `humanFallback` есть только в событии `state.updated` хода движка, в ответе `play` его нет.
-- Веб: одна страница, портретный телефон, SVG-доска, тап = ближайший пункт → `play` с `via: 'tap'` и `waitForReply: false`; не ход человека — сообщение «сейчас ход Гоко» без запроса; цели касания ≥ 44 px; тёмная и светлая тема по `prefers-color-scheme`; без UI-библиотек; без агента в комнате страница играет тапами.
+- Речь: `VOICE_MODE=realtime` (по умолчанию) — `openai.realtime.RealtimeModel({ model: 'gpt-realtime', voice: 'marin' })`, серверный VAD с перебиванием, транскрипция входа `gpt-live-transcribe` с `language: 'ru'`; `VOICE_MODE=pipeline` — `silero.VAD` + `openai.STT` (`gpt-transcribe`, `ru`) + `openai.LLM` + `openai.TTS` (`gpt-4o-mini-tts` с инструкцией по тону). Приветствие — `generateReply` сразу после `session.start` и применения режима (D-0011), чтобы в «Чате» оно пришло только текстом; `GokoAgent` умеет здороваться и в `onEnter` (`greet`), воркер это выключает.
+- Текстовые каналы LiveKit: вход `lk.chat` (стандартный `RoomIO`), выход `lk.transcription` (атрибуты `lk.segment_id`, `lk.transcription_final`, `lk.transcribed_track_id`). Признак финальности двусторонний (проверено на спайке 08.09, `@livekit/agents` 1.8.0): у транскрипта агента поток дельта-, атрибут `lk.transcription_final` навсегда `false`, финал — дочитанный поток; у транскрипта человека поток не дельта-, атрибут выставляется честно, но каждый промежуточный результат STT приходит отдельным уже закрытым потоком с тем же `lk.segment_id`. Отсюда общее правило обоих потребителей: единица реплики — `lk.segment_id`, а не поток; фильтровать по одному атрибуту нельзя. Консоль (`scripts/chat.mjs`) печатает сегмент один раз — сразу при `final="true"`, иначе по паузе без новых кусков. Веб (D-0011, лента — диалог без дублей): строку Гоко держит по `lk.segment_id` и переписывает её новым куском того же сегмента; реплику человека добавляет только при `lk.transcription_final === 'true'` и тоже по `lk.segment_id`, так что распознанная фраза появляется в ленте один раз. Свою строку чата веб добавляет в ленту сам: `lk.chat` отправителю не возвращается и в `lk.transcription` не попадает.
+- Имена воркера: `AGENT_NAME=goko` на VPS, `goko-dev` на ПК. По D-0001 комнату с диспетчеризацией агента создаёт game-server в `POST /api/sessions` (`createRoom` с `agents: [{ agentName, metadata }]`, `AGENT_NAME` у него же); веб и `scripts/chat.mjs` комнат не создают и `roomConfig` не несут. Токен телефона — `roomJoin` на комнату сессии с правами публикации, подписки и данных и, по D-0011, `canUpdateOwnMetadata` для атрибута режима; без `roomCreate` и без `roomConfig`. Метаданные диспетчеризации — `{ "sessionId": "<id>" }`, комната — `goko-<sessionId>`. Агент приходит в комнату раньше телефона и открывает Realtime только после `ctx.waitForParticipant()`: пустая комната живёт до `emptyTimeout` 300 с, и без ожидания платная сессия шла бы вхолостую.
+- Ошибки (D-0007): `message` ошибок и событий `error` — английский текст для разработчика, его не озвучивают и не показывают, он только для логов. Русский текст для человека и для модели — `humanText(code, details)` из `@goko/protocol`. `retries_exhausted` (D-0006) значит, что сервер больше не повторяет сам; серию заново запускает мутирующее действие человека или открытие потока сессии. Механизм в плане: voice-agent на первой реплике человека после `retries_exhausted` (голосом или в `lk.chat`) переоткрывает поток сессии (задача 3), веб показывает кнопку «Повторить», которая переоткрывает SSE (задачи 6–8), тап по доске — мутирующее действие. Признак `humanFallback` есть только в событии `state.updated` хода движка, в ответе `play` его нет: агент запоминает номер такого хода и говорит о нём по вопросу о позиции.
+- Режимы (D-0011): переключатель «Голос / Чат», по умолчанию «Голос», выбор помнится в `localStorage` (чтение и запись в `try/catch`). Веб выставляет атрибут участника `goko.mode` = `voice` | `chat` через `localParticipant.setAttributes`; voice-agent читает его после `waitForParticipant()` и слушает `RoomEvent.ParticipantAttributesChanged`. В «Чате» агент выключает аудиовыход и аудиовход сессии (`session.output.setAudioEnabled(false)`, `session.input.setAudioEnabled(false)`, `@livekit/agents` 1.8), ответы идут только текстом в `lk.transcription`; запасной путь — веб в «Чате» отписывается от аудиотрека агента. Realtime при этом всё равно генерирует аудио (`modalities` задаётся только в конструкторе `RealtimeModel`), это известная цена D-0011. Тапы по доске работают в любом режиме; комментарий Гоко к ходу — в ленте всегда, вслух только в «Голосе». Человек против человека (D-0005) разрешён: агент в такой партии комментирует и выполняет команды за того, чей ход.
+- Веб: одна страница, портретный телефон, SVG-доска, тап = ближайший пункт → `play` с `via: 'tap'` и `waitForReply: false`; не ход человека — сообщение «сейчас ход Гоко» без запроса; перед «Новой партией» — выбор цвета (чёрные / белые / случайно) и ранга Гоко тапом, только существующими полями `NewGameRequest` (`black`, `white`, `settings.boardSize` и `settings.komi` от текущей партии), форы в протоколе нет; цели касания ≥ 44 px; тёмная и светлая тема по `prefers-color-scheme`; без UI-библиотек; без агента в комнате страница играет тапами.
 - Протокол и заголовки как в ядре: `X-App-Key` на `/api/*`; ключ в веб попадает на этапе сборки (`APP_KEY` из `.env` → `import.meta.env.VITE_APP_KEY`), в git не попадает. Значения переменных не печатать в логи и не вставлять в доки.
 - Порты dev: game-server `8787`, go-engine `8788`, web `5173`; воркер портов не слушает. В compose сервисы публикуют порты только на `127.0.0.1`; `go-engine` с лимитом `cpus`.
-- Тесты: `voice-agent` — фейковый клиент протокола (бесплатно, всегда); evals через `AgentSession.run` — только при `RUN_AGENT_EVALS=1` и `OPENAI_API_KEY`; `web` — чистые модули (`geometry`, `transcript`, `stream`) под vitest в `node`; экран телефона агент не видит — приёмка руками у founder'а.
+- Тесты: `voice-agent` — фейковый клиент протокола и замоканный сеанс для режима (бесплатно, всегда); evals через `AgentSession.run` — только при `RUN_AGENT_EVALS=1` и `OPENAI_API_KEY`, новых evals этот план не добавляет; `web` — чистые модули (`geometry`, `transcript`, `stream`, `text`, `prefs`, `chat`) под vitest в `node`; экран телефона агент не видит — приёмка руками у founder'а.
+- Время жизни и бюджеты (D-0008, D-0010): токен LiveKit живёт TTL сессии от её создания и может истечь раньше продлённой сессии — переподключение к комнате тогда требует новой сессии; id сессий и партий — непрозрачные строки, план их формат не разбирает. Серверные бюджеты: ожидание ответа движка 8 с, `analyze` 10 с, `score` 15 с; план на них опирается только в `FINISH_WAIT_MS` (задача 2).
 - Язык доков, комментариев, коммитов — русский; код и идентификаторы — английский; без эмодзи; маркеры `[OK] [!] [FIX] [X] [WIP] [TODO]`; коммиты `<область>: <что сделано>`.
 - Деплой, Hetzner, DNS, tailnet и аудио-тесты с телефона — только по явной просьбе founder'а в текущей сессии (правило 5 `CLAUDE.md`); план описывает команды, исполнитель их не запускает сам.
 
@@ -35,22 +37,25 @@
 packages/protocol/src/game.ts         + seatColor(seats, controller)
 packages/protocol/src/index.ts        + экспорт seatColor
 
-apps/voice-agent/package.json         @goko/voice-agent: @livekit/agents, плагины openai и silero, @goko/*, zod
+apps/game-server/src/livekit.ts       + право canUpdateOwnMetadata в токене телефона (D-0011); livekit.test.ts, app.test.ts
+
+apps/voice-agent/package.json         @goko/voice-agent: @livekit/agents, @livekit/rtc-node, плагины openai и silero, @goko/*, zod
 apps/voice-agent/src/phrases.ts       parseRank, speakRank, speakMove, describeResult, formatPoints, colorName
-apps/voice-agent/src/state.ts         AgentState: sessionId, gameId, humanColor, rank, komi, флаги озвучивания
+apps/voice-agent/src/state.ts         AgentState: sessionId, gameId, humanColor, rank, komi, флаги озвучивания и повторов
 apps/voice-agent/src/tools.ts         createToolFns(deps) — чистые функции; createTools(deps) — llm.tool() со схемами
-apps/voice-agent/src/events.ts        handleEvent(ev, state) -> инструкция | null; watchSession(...) — цикл SSE с переподключением
+apps/voice-agent/src/events.ts        handleEvent(ev, state) -> инструкция | null; watchSession(...) -> { done, humanSpoke } — цикл SSE с переподключением и переоткрытием после retries_exhausted
+apps/voice-agent/src/mode.ts          режим goko.mode: modeOf, applyMode, followMode (D-0011)
 apps/voice-agent/src/prompt.ts        INSTRUCTIONS, GREETING_INSTRUCTIONS
 apps/voice-agent/src/voice.ts         parseVoiceMode, sessionOptions(mode) — realtime | pipeline
-apps/voice-agent/src/agent.ts         class GokoAgent extends voice.Agent (onEnter — приветствие)
+apps/voice-agent/src/agent.ts         class GokoAgent extends voice.Agent (onEnter — приветствие при greet; воркер его выключает)
 apps/voice-agent/src/metadata.ts      sessionIdOf(metadata, roomName)
 apps/voice-agent/src/main.ts          defineAgent + cli.runApp; env: APP_KEY, API_BASE, AGENT_NAME, VOICE_MODE, LIVEKIT_*, OPENAI_API_KEY
 apps/voice-agent/src/testing/fake-client.ts   createFakeClient(): ToolClient со сценарием и журналом вызовов; fakeGame()
-apps/voice-agent/src/*.test.ts        phrases, tools, events, metadata, voice; agent.eval.test.ts — платный, по флагу
+apps/voice-agent/src/*.test.ts        phrases, tools, events, mode, metadata, voice; agent.eval.test.ts — платный, по флагу
 apps/voice-agent/Dockerfile
 
-scripts/chat.mjs                      сессия через game-server, комната LiveKit, stdin -> lk.chat, ответы и события -> stdout
-scripts/chat.test.ts                  describeEvent
+scripts/chat.mjs                      сессия через game-server, комната LiveKit, атрибут goko.mode=chat, stdin -> lk.chat, ответы и события -> stdout
+scripts/chat.test.ts                  describeEvent, CHAT_ATTRIBUTES
 
 apps/web/package.json                 @goko/web: react, react-dom, livekit-client, @goko/*; vite, @vitejs/plugin-react
 apps/web/tsconfig.json                DOM, react-jsx, bundler
@@ -61,15 +66,20 @@ apps/web/src/main.tsx
 apps/web/src/App.tsx
 apps/web/src/api.ts                   client = createClient({ baseUrl, appKey })
 apps/web/src/geometry.ts              layout, x, y, pointAt, coordAt, hoshi, stones, indexOf  (+ geometry.test.ts)
-apps/web/src/transcript.ts            Line, upsertLine, whoOf              (+ transcript.test.ts)
-apps/web/src/stream.ts                streamEvents: SSE с переподключением (+ stream.test.ts)
-apps/web/src/text.ts                  describeError, resultText, statusText (+ text.test.ts)
-apps/web/src/hooks/useSession.ts      сессия в sessionStorage, комната, микрофон, лента
-apps/web/src/hooks/useGame.ts         состояние партии по SSE, действия тапами
+apps/web/src/transcript.ts            Line, upsertLine, whoOf, acceptLine  (+ transcript.test.ts)
+apps/web/src/stream.ts                streamEvents -> { done, reopen }: SSE с переподключением; needsRetry (+ stream.test.ts)
+apps/web/src/text.ts                  describeError, hasEngine, humanColorOf, resultText, statusText, capturesText, rankText (+ text.test.ts)
+apps/web/src/prefs.ts                 режим, цвет, ранг в localStorage; newGameRequest, stepRank, modeAttributes (+ prefs.test.ts)
+apps/web/src/chat.ts                  sendChat — форма ввода чата; agentReady (+ chat.test.ts)
+apps/web/src/hooks/useSession.ts      сессия в sessionStorage, комната, режим, микрофон, чат, лента
+apps/web/src/hooks/useGame.ts         состояние партии по SSE, действия тапами, «Повторить»
 apps/web/src/components/Board.tsx
 apps/web/src/components/Transcript.tsx
 apps/web/src/components/StatusBar.tsx
-apps/web/src/components/Controls.tsx
+apps/web/src/components/Controls.tsx  микрофон (в «Голосе»), «Пас», «Сдаться», «Отменить»
+apps/web/src/components/ModeSwitch.tsx переключатель «Голос / Чат»
+apps/web/src/components/NewGame.tsx   «Новая партия»: выбор цвета и ранга Гоко
+apps/web/src/components/ChatInput.tsx поле ввода и «Отправить»
 apps/web/src/styles.css
 
 apps/game-server/Dockerfile
@@ -94,7 +104,7 @@ CLAUDE.md, README.md, docs/README.md, docs/NOW.md
 
 **Interfaces:**
 - Consumes: `speakCoord` из `@goko/go-core`; `Color`, `Rank`, `RANKS`, `Result`, `Seat`, `Controller` из `@goko/protocol`.
-- Produces: `seatColor(seats: { B: Seat; W: Seat }, controller: Controller): Color | null` в `@goko/protocol` (первый цвет с таким контроллером, порядок B, W); `parseRank(text): Rank | null`; `speakRank(rank): string` («10 кю», «3 дан»); `speakMove(coord): string`; `colorName(c)` («чёрные»/«белые»), `colorNameInstrumental(c)` («чёрными»/«белыми»); `formatPoints(n): string` («1 очко», «5,5 очка», «12 очков»); `describeResult(result: Result, humanColor: Color): string`; `type AgentState`, `newAgentState(sessionId): AgentState`.
+- Produces: `seatColor(seats: { B: Seat; W: Seat }, controller: Controller): Color | null` в `@goko/protocol` (первый цвет с таким контроллером, порядок B, W); `parseRank(text): Rank | null`; `speakRank(rank): string` («10 кю», «3 дан»); `speakMove(coord): string`; `colorName(c)` («чёрные»/«белые»), `colorNameInstrumental(c)` («чёрными»/«белыми»); `formatPoints(n): string` («1 очко», «5,5 очка», «12 очков»); `describeResult(result: Result, humanColor: Color | null): string` (`null` — партия двух людей, D-0005); `type AgentState` (`humanColor: Color | null`, `retriesExhausted`, `fallbackMove`, `startingGame`), `newAgentState(sessionId): AgentState`.
 
 - [ ] **Step 1: `apps/voice-agent/package.json`**
 
@@ -115,12 +125,13 @@ CLAUDE.md, README.md, docs/README.md, docs/NOW.md
     "@livekit/agents": "^1.8.0",
     "@livekit/agents-plugin-openai": "^1.8.0",
     "@livekit/agents-plugin-silero": "^1.8.0",
+    "@livekit/rtc-node": "^0.13.34",
     "zod": "^4.5.4"
   }
 }
 ```
 
-`npm install` в корне (workspace `apps/*` уже объявлен). `@livekit/agents` принимает zod `^3.25.76 || ^4.1.8`, конфликтов с zod 4.5 нет.
+`npm install` в корне (workspace `apps/*` уже объявлен). `@livekit/agents` принимает zod `^3.25.76 || ^4.1.8`, конфликтов с zod 4.5 нет. `@livekit/rtc-node` — peer-зависимость `@livekit/agents` 1.8, и `main.ts` импортирует из него `RoomEvent` (задача 4), поэтому пакет объявлен прямой зависимостью воркера.
 
 - [ ] **Step 2: Тест `packages/protocol/src/seat.test.ts`**
 
@@ -196,6 +207,10 @@ describe('describeResult', () => {
     expect(describeResult({ winner: 'W', margin: 5.5, reason: 'score' }, 'B')).toBe('победа за мной, разница 5,5 очка');
     expect(describeResult({ winner: 'B', margin: 12, reason: 'score' }, 'B')).toBe('победа за тобой, разница 12 очков');
   });
+  it('в партии двух людей называет цвет победителя (D-0005)', () => {
+    expect(describeResult({ winner: 'B', reason: 'resign' }, null)).toBe('победа чёрных: белые сдались');
+    expect(describeResult({ winner: 'W', margin: 2.5, reason: 'score' }, null)).toBe('победа белых, разница 2,5 очка');
+  });
 });
 ```
 
@@ -267,8 +282,17 @@ export function formatPoints(n: number): string {
   return `${text} ${word}`;
 }
 
+const colorNameGenitive = (c: Color): string => (c === 'B' ? 'чёрных' : 'белых');
+
 // Результат словами Гоко: «я» — Гоко, «ты» — человек, без рода для человека.
-export function describeResult(result: Result, humanColor: Color): string {
+// humanColor = null — партия двух людей (D-0005): Гоко не участник, называем цвета.
+export function describeResult(result: Result, humanColor: Color | null): string {
+  if (humanColor === null) {
+    const loser: Color = result.winner === 'B' ? 'W' : 'B';
+    const who = `победа ${colorNameGenitive(result.winner)}`;
+    if (result.reason === 'resign') return `${who}: ${colorName(loser)} сдались`;
+    return `${who}, разница ${formatPoints(result.margin ?? 0)}`;
+  }
   const humanWon = result.winner === humanColor;
   const who = humanWon ? 'победа за тобой' : 'победа за мной';
   if (result.reason === 'resign') return `${who}: ${humanWon ? 'я сдался' : 'партия сдана'}`;
@@ -286,7 +310,7 @@ import type { Color, Rank } from '@goko/protocol';
 export type AgentState = {
   sessionId: string;
   gameId: string | null;
-  humanColor: Color;
+  humanColor: Color | null; // null — в партии нет движка, играют два человека (D-0005)
   rank: Rank; // ранг Гоко для следующей партии
   komi: number;
   toolGames: Set<string>; // партии, созданные start_game: их state.updated/new не озвучиваем
@@ -294,6 +318,9 @@ export type AgentState = {
   awaitingReply: boolean; // play/pass вернули replyTimedOut: ход движка озвучит событие
   lastTap: { cause: 'play' | 'pass' | 'correct'; coord: string } | null; // ход с экрана, ждём ответ движка
   lastErrorAt: number; // когда в последний раз озвучивали ошибку движка
+  retriesExhausted: boolean; // пришёл error retries_exhausted: следующая реплика человека переоткроет поток (D-0006)
+  fallbackMove: number | null; // номер последнего хода движка с humanFallback (D-0007)
+  startingGame: boolean; // start_game ждёт ответа newGame: событие new приходит раньше ответа HTTP
 };
 
 export const DEFAULT_RANK: Rank = '10k';
@@ -311,6 +338,9 @@ export function newAgentState(sessionId: string): AgentState {
     awaitingReply: false,
     lastTap: null,
     lastErrorAt: 0,
+    retriesExhausted: false,
+    fallbackMove: null,
+    startingGame: false,
   };
 }
 ```
@@ -318,7 +348,7 @@ export function newAgentState(sessionId: string): AgentState {
 - [ ] **Step 8: Тесты и typecheck зелёные**
 
 Run: `npx vitest run packages/protocol/src/seat.test.ts apps/voice-agent/src/phrases.test.ts && npm run typecheck`
-Expected: `2 passed` и `10 passed`, typecheck без ошибок.
+Expected: `Test Files  2 passed`, `Tests  8 passed` (2 в `seat.test.ts`, 6 в `phrases.test.ts`), typecheck без ошибок.
 
 - [ ] **Step 9: Commit**
 
@@ -337,7 +367,7 @@ git commit -m "voice-agent: пакет, фразы и разбор ранга; p
 
 **Interfaces:**
 - Consumes: `GokoClient`, `ApiError`, `GameState`, `PlayResponse`, `Analysis`, `Move`, `Rank`, `Color`, `seatColor` из `@goko/protocol`; `phrases.ts`, `state.ts` из Task 1; `llm.tool` из `@livekit/agents`.
-- Produces: `type ToolClient = Pick<GokoClient, 'newGame' | 'play' | 'correct' | 'pass' | 'resign' | 'undo' | 'getGame' | 'ascii' | 'analyze' | 'setRank'>`; `type ToolDeps = { client: ToolClient; state: AgentState; sleep?: (ms: number) => Promise<void>; log?: (line: string) => void }`; `createToolFns(deps)` с методами `startGame({ my_color?, rank?, komi? })`, `playMove({ coord })`, `correctLastMove({ coord })`, `pass()`, `resign()`, `undo()`, `getPosition(): Promise<string>`, `getAssessment()`, `setRank({ rank })`; `createTools(deps)` — объект из девяти `llm.tool()` с именами из спеки; константы `ASSESSMENT_VISITS = 50`, `FINISH_WAIT_MS = 35000`, `FINISH_POLL_MS = 500`; `humanColorOf(state: GameState): Color`, `engineColorOf(state): Color`. Тестовый клиент: `createFakeClient(opts?: { replies?: string[]; ascii?: string; analysis?: Partial<Analysis>; finishAfterPolls?: number }): FakeClient` (`ToolClient & { calls: Array<{ method: string; args: unknown[] }>; game: GameState | null; failNext(err: Error): void; replyTimedOut: boolean }`); `fakeGame(overrides?: Partial<GameState>): GameState`.
+- Produces: `type ToolClient = Pick<GokoClient, 'newGame' | 'play' | 'correct' | 'pass' | 'resign' | 'undo' | 'getGame' | 'ascii' | 'analyze' | 'setRank'>`; `type ToolDeps = { client: ToolClient; state: AgentState; sleep?: (ms: number) => Promise<void>; log?: (line: string) => void }`; `createToolFns(deps)` с методами `startGame({ my_color?, rank?, komi? })`, `playMove({ coord })`, `correctLastMove({ coord })`, `pass()`, `resign()`, `undo()`, `getPosition(): Promise<string>`, `getAssessment()`, `setRank({ rank })`; `createTools(deps)` — объект из девяти `llm.tool()` с именами из спеки; константы `ASSESSMENT_VISITS = 50`, `FINISH_WAIT_MS = 35000`, `FINISH_POLL_MS = 500`; `humanColorOf(state: GameState): Color` (место человека; в партии без движка — цвет того, чей ход, D-0005), `hasEngine(state: GameState): boolean`, `engineColorOf(state): Color`. Тестовый клиент: `createFakeClient(opts?: { replies?: string[]; ascii?: string; analysis?: Partial<Analysis>; finishAfterPolls?: number }): FakeClient` (`ToolClient & { calls: Array<{ method: string; args: unknown[] }>; game: GameState | null; failNext(err: Error): void; replyTimedOut: boolean }`); `fakeGame(overrides?: Partial<GameState>): GameState`.
 
 Результаты инструментов (то, что видит модель):
 
@@ -348,9 +378,9 @@ git commit -m "voice-agent: пакет, фразы и разбор ранга; p
 | `pass` | `true` | `myMove`, `myMoveSpoken`, `toPlay`, `finished?`, `result?`, `note?` |
 | `resign` | `true` | `result` |
 | `undo` | `true` | `removed: string[]`, `removedSpoken: string[]`, `toPlay`, `status` |
-| `get_position` | — | текст: ascii-доска, последние 6 ходов, пленные, чей ход |
-| `get_assessment` | — | `leader: 'you' \| 'me' \| 'even'`, `marginPoints`, `winrateYou` (проценты), `weakGroups: [{ color: 'yours' \| 'mine', where, status }]`, `bestMoves: string[]`, `toPlay: 'you' \| 'me'` |
-| `set_rank` | `true` | `rank`, `note?` |
+| `get_position` | — | текст: ascii-доска, последние 6 ходов, пленные, строка о ходе движка с `humanFallback` (если он ещё на доске), чей ход |
+| `get_assessment` | — | `leader: 'you' \| 'me' \| 'even'`, `marginPoints`, `winrateYou` (проценты), `weakGroups: [{ color: 'yours' \| 'mine', where, status }]`, `bestMoves: string[]`, `toPlay: 'you' \| 'me'`; в партии двух людей (D-0005) — цветами: `leader: 'black' \| 'white' \| 'even'`, `winrateBlack`, `weakGroups[].color: 'black' \| 'white'`, `toPlay: 'black' \| 'white'` |
+| `set_rank` | `true` | `rank`, `note?` (без партии или в партии без Гоко — ранг для следующей) |
 | любой | `false` | `reason` — русский текст: `humanText(code, details)` из протокола по коду ошибки сервера (для `illegal_move` — причина: «точка занята», «ко: сразу забрать нельзя») или своя фраза агента («партия не начата: предложи начать») |
 
 - [ ] **Step 1: `apps/voice-agent/src/testing/fake-client.ts`**
@@ -468,7 +498,7 @@ export function createFakeClient(opts: FakeClientOptions = {}): FakeClient {
       record('undo', id, req);
       throwPending();
       const g = need();
-      if (g.moves.length === 0) throw new ApiError('nothing_to_undo', 'отменять нечего');
+      if (g.moves.length === 0) throw new ApiError('nothing_to_undo', 'nothing to undo');
       const removed = g.moves.slice(-2);
       g.moves = g.moves.slice(0, -2);
       g.toPlay = seatColor(g.seats, 'human') ?? 'B';
@@ -533,7 +563,7 @@ export function createFakeClient(opts: FakeClientOptions = {}): FakeClient {
     }
   }
   function need(): GameState {
-    if (!self.game) throw new ApiError('not_found', 'партии нет');
+    if (!self.game) throw new ApiError('not_found', 'game not found');
     return self.game;
   }
   function stamp(): string {
@@ -552,13 +582,15 @@ export function createFakeClient(opts: FakeClientOptions = {}): FakeClient {
   function humanMove(coord: string): PlayResponse {
     throwPending();
     const g = need();
-    if (g.status === 'finished') throw new ApiError('game_finished', 'партия окончена');
-    const human = seatColor(g.seats, 'human') ?? 'B';
-    if (g.toPlay !== human) throw new ApiError('not_your_turn', 'сейчас ходит Гоко');
+    if (g.status === 'finished') throw new ApiError('game_finished', 'game is finished');
+    const human = g.toPlay;
+    if (g.seats[human].controller !== 'human') throw new ApiError('not_your_turn', 'it is Goko to play');
     const move: Move = { n: g.moves.length + 1, color: human, coord, captured: 0, at: stamp() };
     g.moves = [...g.moves, move];
     g.toPlay = human === 'B' ? 'W' : 'B';
     g.revision++;
+    // Партия двух людей (D-0005): ответа движка нет.
+    if (g.seats[g.toPlay].controller !== 'engine') return { state: g, move };
     g.pendingEngineMove = true;
     if (self.replyTimedOut) {
       self.replyTimedOut = false;
@@ -580,7 +612,7 @@ import { describe, expect, it } from 'vitest';
 import { ApiError, humanText } from '@goko/protocol';
 import { newAgentState } from './state.ts';
 import { createFakeClient, fakeGame } from './testing/fake-client.ts';
-import { ASSESSMENT_VISITS, createToolFns, createTools, humanColorOf } from './tools.ts';
+import { ASSESSMENT_VISITS, createToolFns, createTools, hasEngine, humanColorOf } from './tools.ts';
 
 function setup(opts: Parameters<typeof createFakeClient>[0] = {}) {
   const client = createFakeClient(opts);
@@ -625,6 +657,21 @@ describe('start_game', () => {
     expect(state.gameId).toBe('g1');
     expect(state.humanColor).toBe('B');
     expect(state.toolGames.has('g1')).toBe(true);
+    expect(state.startingGame).toBe(false);
+  });
+  it('на время newGame выставляет startingGame и снимает его после ошибки', async () => {
+    const { fns, state, client } = setup();
+    let during: boolean | null = null;
+    const newGame = client.newGame;
+    client.newGame = async (...args) => {
+      during = state.startingGame;
+      return newGame(...args);
+    };
+    await fns.startGame({});
+    expect(during).toBe(true);
+    client.failNext(new ApiError('limit_reached', 'too many active sessions'));
+    expect(await fns.startGame({})).toEqual({ ok: false, reason: humanText('limit_reached') });
+    expect(state.startingGame).toBe(false);
   });
   it('человек белыми с рангом: первый ход движка в ответе', async () => {
     const { fns, state } = setup({ replies: ['K10'] });
@@ -727,9 +774,9 @@ describe('pass / resign / undo', () => {
     expect(await fns.undo()).toEqual({ ok: true, removed: ['D4', 'K10'], removedSpoken: ['дэ четыре', 'ка десять'], toPlay: 'B', status: 'playing' });
     expect(state.awaitingReply).toBe(false);
   });
-  it('undo без ходов — reason сервера', async () => {
+  it('undo без ходов — reason из humanText, не английский message', async () => {
     const { fns } = await withGame();
-    expect(await fns.undo()).toEqual({ ok: false, reason: 'отменять нечего' });
+    expect(await fns.undo()).toEqual({ ok: false, reason: humanText('nothing_to_undo') });
   });
 });
 
@@ -744,6 +791,15 @@ describe('get_position / get_assessment / set_rank', () => {
     expect(text).not.toContain('1. чёрные D4');
     expect(text).toContain('Пленные: чёрные сняли 2, белые сняли 0');
     expect(text).toContain('Ход: чёрные (твой)');
+    expect(text).not.toContain('из основного поиска');
+  });
+  it('позиция называет ход движка с humanFallback, пока он на доске (D-0007)', async () => {
+    const { fns, state } = await withGame({ replies: ['K10'] });
+    await fns.playMove({ coord: 'D4' });
+    state.fallbackMove = 2;
+    expect(await fns.getPosition()).toContain('Ход 2 (белые K10) Гоко взял из основного поиска, а не из человеческой сети уровня');
+    state.fallbackMove = 5;
+    expect(await fns.getPosition()).not.toContain('из основного поиска');
   });
   it('оценка: лидер, отрыв, шансы, слабые группы, лучшие ходы', async () => {
     const { fns, client } = await withGame();
@@ -785,6 +841,59 @@ describe('createTools', () => {
     expect(humanColorOf(fakeGame())).toBe('B');
     expect(humanColorOf(fakeGame({ seats: { B: { controller: 'engine' }, W: { controller: 'human' } } }))).toBe('W');
     expect(humanColorOf(fakeGame({ seats: { B: { controller: 'engine' }, W: { controller: 'external' } } }))).toBe('B');
+    expect(hasEngine(fakeGame())).toBe(true);
+  });
+});
+
+describe('человек против человека (D-0005)', () => {
+  function hvh() {
+    const t = setup();
+    t.client.game = fakeGame({
+      seats: { B: { controller: 'human' }, W: { controller: 'human' } },
+      toPlay: 'W',
+      moves: [{ n: 1, color: 'B', coord: 'D4', captured: 0, at: 't' }],
+      revision: 1,
+    });
+    t.state.gameId = 'g1';
+    t.state.humanColor = null;
+    return t;
+  }
+  it('humanColorOf — цвет того, чей ход; движка нет', () => {
+    const { client } = hvh();
+    expect(humanColorOf(client.game!)).toBe('W');
+    expect(hasEngine(client.game!)).toBe(false);
+  });
+  it('ход без ответа движка', async () => {
+    const { fns, client, state } = hvh();
+    expect(await fns.playMove({ coord: 'K10' })).toEqual({ ok: true, yourMove: 'K10', myMove: null, myMoveSpoken: null, captured: 0, myCaptured: 0, toPlay: 'B', moveNumber: 2 });
+    expect(client.calls.map((c) => c.method)).toEqual(['play']);
+    expect(state.awaitingReply).toBe(false);
+  });
+  it('сдаётся тот, чей ход; результат цветами', async () => {
+    const { fns, client } = hvh();
+    expect(await fns.resign()).toEqual({ ok: true, result: 'победа чёрных: белые сдались' });
+    expect(client.calls.at(-1)).toMatchObject({ method: 'resign', args: ['g1', { color: 'W', via: 'voice' }] });
+  });
+  it('set_rank не трогает партию без Гоко', async () => {
+    const { fns, client, state } = hvh();
+    expect(await fns.setRank({ rank: '5 кю' })).toEqual({ ok: true, rank: '5 кю', note: 'в этой партии нет Гоко: уровень применится к следующей' });
+    expect(state.rank).toBe('5k');
+    expect(client.calls.map((c) => c.method)).toEqual(['getGame']);
+  });
+  it('позиция и оценка — цветами, без «твой» и «мой»', async () => {
+    const { fns } = hvh();
+    expect((await fns.getPosition()).split('\n').at(-1)).toBe('Ход: белые');
+    expect(await fns.getAssessment()).toEqual({
+      leader: 'black',
+      marginPoints: 6,
+      winrateBlack: 70,
+      weakGroups: [
+        { color: 'white', where: 'K10, K11', status: 'неустойчива' },
+        { color: 'black', where: 'M3', status: 'мертва' },
+      ],
+      bestMoves: ['K10', 'D10', 'G7'],
+      toPlay: 'white',
+    });
   });
 });
 ```
@@ -827,7 +936,10 @@ export type ToolDeps = {
 };
 
 export const ASSESSMENT_VISITS = 50;
-export const FINISH_WAIT_MS = 35_000; // score на сервере — до 30 с
+// Счёт после двух пасов сервер ведёт в фоне: бюджет score сервиса 15 с (D-0010), при сбое пауза
+// первого повтора серии 5 с и вторая попытка ещё до 15 с (D-0006). 35 с покрывают это с запасом;
+// дальше инструмент отдаёт партию незавершённой, а результат объявит событие game.finished.
+export const FINISH_WAIT_MS = 35_000;
 export const FINISH_POLL_MS = 500;
 
 const NO_GAME = 'партия не начата: предложи начать';
@@ -836,13 +948,20 @@ const THINKING_NOTE = 'Гоко ещё думает: свой ход он наз
 type Fail = { ok: false; reason: string };
 const fail = (reason: string): Fail => ({ ok: false, reason });
 
+// Есть ли в партии Гоко. Партия двух людей разрешена (D-0005): Гоко в ней только комментирует.
+export const hasEngine = (state: GameState): boolean => seatColor(state.seats, 'engine') !== null;
+
+// Цвет «человека» для текстов и сдачи. В партии без движка людей двое, и «ты» — тот, чей сейчас ход.
 export function humanColorOf(state: GameState): Color {
+  if (!hasEngine(state) && state.seats[state.toPlay].controller === 'human') return state.toPlay;
   return seatColor(state.seats, 'human') ?? 'B';
 }
 
 export function engineColorOf(state: GameState): Color {
   return seatColor(state.seats, 'engine') ?? 'W';
 }
+
+const colorKey = (c: Color) => (c === 'B' ? ('black' as const) : ('white' as const));
 
 // Ошибки протокола -> { ok: false, reason } с русским текстом из humanText по code и details (D-0007):
 // message сервера английский и модели не отдаётся. Всё остальное (сеть, баги) пробрасываем:
@@ -853,7 +972,9 @@ function reasonOf(e: unknown): Fail {
 }
 
 function finishedFields(g: GameState) {
-  return g.status === 'finished' && g.result ? { finished: true as const, result: describeResult(g.result, humanColorOf(g)) } : {};
+  return g.status === 'finished' && g.result
+    ? { finished: true as const, result: describeResult(g.result, hasEngine(g) ? humanColorOf(g) : null) }
+    : {};
 }
 
 export function createToolFns(deps: ToolDeps) {
@@ -901,6 +1022,9 @@ export function createToolFns(deps: ToolDeps) {
       const komi = args.komi ?? state.komi;
       const engine = { controller: 'engine' as const, rank };
       const humanSeat = { controller: 'human' as const };
+      // Сервер публикует state.updated new раньше, чем отвечает на HTTP (а с waitForReply и первым ходом
+      // движка — заметно раньше): флаг говорит events.ts, что эта новая партия — от инструмента.
+      state.startingGame = true;
       try {
         const res = await client.newGame(state.sessionId, {
           black: human === 'B' ? humanSeat : engine,
@@ -930,6 +1054,8 @@ export function createToolFns(deps: ToolDeps) {
         };
       } catch (e) {
         return reasonOf(e);
+      } finally {
+        state.startingGame = false;
       }
     },
 
@@ -977,11 +1103,14 @@ export function createToolFns(deps: ToolDeps) {
     async resign() {
       if (!state.gameId) return fail(NO_GAME);
       try {
+        // Цвет сдающегося — до хода: в партии двух людей это тот, чей ход (humanColorOf).
         const current = await client.getGame(state.gameId);
-        const res = await client.resign(state.gameId, { color: humanColorOf(current), via: 'voice' });
+        const color = humanColorOf(current);
+        const res = await client.resign(state.gameId, { color, via: 'voice' });
         state.announcedFinish = res.state.id;
         state.awaitingReply = false;
-        return { ok: true as const, result: res.state.result ? describeResult(res.state.result, humanColorOf(res.state)) : 'партия сдана' };
+        const who = hasEngine(current) ? color : null;
+        return { ok: true as const, result: res.state.result ? describeResult(res.state.result, who) : 'партия сдана' };
       } catch (e) {
         return reasonOf(e);
       }
@@ -1013,11 +1142,17 @@ export function createToolFns(deps: ToolDeps) {
         .slice(-6)
         .map((m) => `${m.n}. ${colorName(m.color)} ${m.coord === 'pass' ? 'пас' : m.coord}`)
         .join('; ');
-      const turn = g.status === 'finished' ? 'партия окончена' : `${colorName(g.toPlay)} (${g.toPlay === human ? 'твой' : 'мой'})`;
+      let turn = 'партия окончена';
+      if (g.status !== 'finished') turn = hasEngine(g) ? `${colorName(g.toPlay)} (${g.toPlay === human ? 'твой' : 'мой'})` : colorName(g.toPlay);
+      // humanFallback приходит только событием state.updated хода движка (events.ts запоминает номер хода).
+      const fallback = state.fallbackMove === null ? undefined : g.moves.find((m) => m.n === state.fallbackMove);
       return [
         ascii.trimEnd(),
         `Последние ходы: ${last || 'нет'}`,
         `Пленные: чёрные сняли ${g.captures.B}, белые сняли ${g.captures.W}`,
+        ...(fallback
+          ? [`Ход ${fallback.n} (${colorName(fallback.color)} ${fallback.coord}) Гоко взял из основного поиска, а не из человеческой сети уровня: по силе он может отличаться от заявленного ранга`]
+          : []),
         `Ход: ${turn}`,
       ].join('\n');
     },
@@ -1026,22 +1161,35 @@ export function createToolFns(deps: ToolDeps) {
       if (!state.gameId) return fail(NO_GAME);
       try {
         const [g, a] = await Promise.all([client.getGame(state.gameId), client.analyze(state.gameId, { maxVisits: ASSESSMENT_VISITS })]);
-        const human = humanColorOf(g);
         const lead = a.scoreLeadB;
         const leaderColor: Color | null = Math.abs(lead) < 0.5 ? null : lead > 0 ? 'B' : 'W';
+        const marginPoints = Math.abs(Math.round(lead * 2) / 2);
+        const weak = a.groups.filter((gr) => gr.status !== 'safe');
+        const statusText = (s: string) => (s === 'dead' ? 'мертва' : 'неустойчива');
+        const bestMoves = a.topMoves.slice(0, 3).map((m) => m.coord);
+        if (!hasEngine(g)) {
+          // Партия двух людей (D-0005): «ты» и «я» здесь не значат ничего, говорим цветами.
+          return {
+            leader: leaderColor === null ? ('even' as const) : colorKey(leaderColor),
+            marginPoints,
+            winrateBlack: Math.round(a.winrateB * 100),
+            weakGroups: weak.map((gr) => ({ color: colorKey(gr.color), where: gr.stones.slice(0, 3).join(', '), status: statusText(gr.status) })),
+            bestMoves,
+            toPlay: colorKey(g.toPlay),
+          };
+        }
+        const human = humanColorOf(g);
         const winrateHuman = human === 'B' ? a.winrateB : 1 - a.winrateB;
         return {
           leader: leaderColor === null ? ('even' as const) : leaderColor === human ? ('you' as const) : ('me' as const),
-          marginPoints: Math.abs(Math.round(lead * 2) / 2),
+          marginPoints,
           winrateYou: Math.round(winrateHuman * 100),
-          weakGroups: a.groups
-            .filter((gr) => gr.status !== 'safe')
-            .map((gr) => ({
-              color: gr.color === human ? ('yours' as const) : ('mine' as const),
-              where: gr.stones.slice(0, 3).join(', '),
-              status: gr.status === 'dead' ? 'мертва' : 'неустойчива',
-            })),
-          bestMoves: a.topMoves.slice(0, 3).map((m) => m.coord),
+          weakGroups: weak.map((gr) => ({
+            color: gr.color === human ? ('yours' as const) : ('mine' as const),
+            where: gr.stones.slice(0, 3).join(', '),
+            status: statusText(gr.status),
+          })),
+          bestMoves,
           toPlay: g.toPlay === human ? ('you' as const) : ('me' as const),
         };
       } catch (e) {
@@ -1058,6 +1206,10 @@ export function createToolFns(deps: ToolDeps) {
       }
       try {
         const g = await client.getGame(state.gameId);
+        if (!hasEngine(g)) {
+          state.rank = parsed;
+          return { ok: true as const, rank: speakRank(parsed), note: 'в этой партии нет Гоко: уровень применится к следующей' };
+        }
         await client.setRank(state.gameId, { color: engineColorOf(g), rank: parsed });
         state.rank = parsed;
         return { ok: true as const, rank: speakRank(parsed) };
@@ -1099,7 +1251,7 @@ export function createTools(deps: ToolDeps) {
       execute: () => fns.pass(),
     }),
     resign: llm.tool({
-      description: 'Человек сдаётся. Возвращает result.',
+      description: 'Человек сдаётся (в партии двух людей — тот, чей сейчас ход). Возвращает result.',
       execute: () => fns.resign(),
     }),
     undo: llm.tool({
@@ -1128,7 +1280,7 @@ export type GokoTools = ReturnType<typeof createTools>;
 - [ ] **Step 5: Тесты и typecheck зелёные**
 
 Run: `npx vitest run apps/voice-agent && npm run typecheck`
-Expected: все тесты `tools.test.ts` и `phrases.test.ts` проходят; typecheck без ошибок. Если `llm.tool` в установленной версии требует `parameters` всегда — передать `z.object({})` у инструментов без аргументов.
+Expected: все тесты `tools.test.ts` (в том числе блок «человек против человека» и строка `humanFallback`) и `phrases.test.ts` проходят; typecheck без ошибок. Если `llm.tool` в установленной версии требует `parameters` всегда — передать `z.object({})` у инструментов без аргументов.
 
 - [ ] **Step 6: Commit**
 
@@ -1145,33 +1297,38 @@ git commit -m "voice-agent: девять инструментов над кли�
 - Test: `apps/voice-agent/src/events.test.ts`
 
 **Interfaces:**
-- Consumes: `GameEvent`, `GokoClient` из `@goko/protocol`; `AgentState`; `describeResult`, `speakMove`, `colorName` из `phrases.ts`; `humanColorOf` из `tools.ts`; `fakeGame` из `testing/fake-client.ts`.
-- Produces: `handleEvent(ev: GameEvent, state: AgentState, now?: () => number): string | null` — инструкция для `generateReply` или `null`; `watchSession(opts: { client: Pick<GokoClient, 'events'>; state: AgentState; speak: (instructions: string) => Promise<void> | void; signal: AbortSignal; log?: (line: string) => void; retryMs?: number; sleep?: (ms) => Promise<void> }): Promise<void>`; `ERROR_REPEAT_MS = 30000`.
+- Consumes: `ApiError`, `EventsTarget`, `GameEvent`, `GokoClient`, `humanText`, `seatColor` из `@goko/protocol`; `AgentState`; `colorName`, `colorNameInstrumental`, `describeResult`, `speakMove`, `speakRank` из `phrases.ts`; `hasEngine`, `humanColorOf` из `tools.ts`; `fakeGame` из `testing/fake-client.ts`.
+- Produces: `handleEvent(ev: GameEvent, state: AgentState, now?: () => number): string | null` — инструкция для `generateReply` или `null`; `type WatchOptions = { client: Pick<GokoClient, 'events'>; state: AgentState; speak: (instructions: string) => Promise<void> | void; signal: AbortSignal; log?: (line: string) => void; retryMs?: number; sleep?: (ms: number) => Promise<void> }`; `type WatchHandle = { done: Promise<void>; humanSpoke: () => void }`; `watchSession(opts: WatchOptions): WatchHandle` — `done` завершается по `signal`; `humanSpoke()` после `retries_exhausted` переоткрывает поток сессии без паузы (D-0006), в остальное время ничего не делает; `ERROR_REPEAT_MS = 30000`.
 
 Правила озвучивания (раздел 9 спеки, «Озвучивание событий»), в порядке проверки:
 
 | Событие | Условие | Действие |
 | --- | --- | --- |
-| `session.game` | всегда | запомнить `gameId`, сбросить `lastTap`, `awaitingReply`; молчать |
-| `state.updated`, `cause: 'sync'` | `gameId` только что сменился и партия идёт | «Продолжаем партию»: цвет человека, чей ход |
-| `state.updated`, `cause: 'new'` | партия не из `toolGames` | «Человек начал партию с экрана»; если ход движка — `awaitingReply = true` |
+| `session.game` | всегда | запомнить `gameId`, сбросить `lastTap`, `awaitingReply`, `retriesExhausted`, `fallbackMove`; молчать |
+| любой `state.updated` | — | снять `retriesExhausted`: у партии был коммит, серия повторов перезапущена или не нужна |
+| `state.updated`, `cause: 'sync'` | `gameId` только что сменился и партия идёт | «Продолжаем партию»: кто играет (человек цветом или два человека), чей ход |
+| `state.updated`, `cause: 'new'` (у сервера `by: 'system'`, без `via`) | партия не из `toolGames` и не идёт `start_game` (`startingGame`) | «Человек начал партию с экрана»; если ход движка — `awaitingReply = true`; при `startingGame` — добавить в `toolGames` и молчать |
 | `state.updated`, `status: 'finished'` | любой cause | сбросить флаги, молчать (объявит `game.finished`) |
 | `state.updated`, `via: 'tap'`, cause `play/pass/correct` | `pendingEngineMove` | запомнить `lastTap`, молчать до ответа движка |
-| то же | нет ответа движка (место `external`) | «Человек сыграл … на экране» |
+| то же | нет ответа движка (место `external` или партия двух людей, D-0005) | «Человек сыграл … на экране» |
 | `state.updated`, `via: 'tap'`, `cause: 'undo'` | всегда | «Человек отменил ход кнопкой» |
-| `state.updated`, `cause: 'engine'` | есть `lastTap` | «Человек сыграл … на экране, ты ответил …» |
+| `state.updated`, `cause: 'engine'` | всегда | `fallbackMove` = номер хода, если `humanFallback`; иначе снять, если он указывал на этот или более поздний ход |
+| то же | есть `lastTap` | «Человек сыграл … на экране, ты ответил …» |
 | то же | `awaitingReply` | «Твой ход готов: …» |
 | то же | иначе (ответ на голосовой ход уже вернул инструмент) | молчать |
 | `state.updated`, `by: 'external'` | стадия 2 | «Соперник сыграл …» |
 | `game.finished` | `announcedFinish !== gameId` | «Партия окончена: …» |
 | `engine.thinking` | — | молчать |
-| `error` | прошло ≥ 30 с с прошлой ошибки | «Движку нужно ещё время» |
+| `error`, `code: 'retries_exhausted'` | всегда | `retriesExhausted = true`; сразу: текст `humanText`, «следующая реплика человека запустит новую попытку» |
+| `error`, другой код | прошло ≥ 30 с с прошлой ошибки | «Движку нужно ещё время» |
+
+Комментарий Гоко к ходу с экрана в режиме «Чат» (D-0011) — та же инструкция `generateReply`: при выключенном аудиовыходе ответ приходит только текстом в `lk.transcription` и виден в ленте. Отдельной ветки для режима в `events.ts` нет.
 
 - [ ] **Step 1: Тест `apps/voice-agent/src/events.test.ts`**
 
 ```ts
-import { describe, expect, it } from 'vitest';
-import { type GameEvent, type GameState, humanText, type Move } from '@goko/protocol';
+import { describe, expect, it, vi } from 'vitest';
+import { type EventsTarget, type GameEvent, type GameState, humanText, type Move } from '@goko/protocol';
 import { ERROR_REPEAT_MS, handleEvent, watchSession } from './events.ts';
 import { newAgentState } from './state.ts';
 import { fakeGame } from './testing/fake-client.ts';
@@ -1190,10 +1347,14 @@ describe('handleEvent: подключение и новые партии', () =>
     const s = newAgentState('s1');
     s.lastTap = { cause: 'play', coord: 'D4' };
     s.awaitingReply = true;
+    s.retriesExhausted = true;
+    s.fallbackMove = 4;
     expect(handleEvent({ type: 'session.game', gameId: 'g1' }, s)).toBeNull();
     expect(s.gameId).toBe('g1');
     expect(s.lastTap).toBeNull();
     expect(s.awaitingReply).toBe(false);
+    expect(s.retriesExhausted).toBe(false);
+    expect(s.fallbackMove).toBeNull();
   });
   it('sync после смены партии — «продолжаем», с цветом человека и чьим ходом', () => {
     const s = newAgentState('s1');
@@ -1219,7 +1380,8 @@ describe('handleEvent: подключение и новые партии', () =>
   it('new с экрана — реплика о новой партии; при ходе движка ждём его', () => {
     const s = newAgentState('s1');
     const g = fakeGame({ id: 'g2', seats: { B: { controller: 'engine', rank: '5k' }, W: { controller: 'human' } }, toPlay: 'B', pendingEngineMove: true });
-    const text = handleEvent(upd(g, { cause: 'new', by: 'human', via: 'tap' }), s);
+    // Сервер публикует new от имени system и без via — и для кнопки на экране, и для start_game.
+    const text = handleEvent(upd(g, { cause: 'new', by: 'system' }), s);
     expect(text).toContain('начал новую партию с экрана');
     expect(text).toContain('человек играет белыми');
     expect(text).toContain('5 кю');
@@ -1229,7 +1391,26 @@ describe('handleEvent: подключение и новые партии', () =>
   it('new партии из start_game молчит', () => {
     const s = newAgentState('s1');
     s.toolGames.add('g1');
-    expect(handleEvent(upd(fakeGame(), { cause: 'new', by: 'human', via: 'voice' }), s)).toBeNull();
+    expect(handleEvent(upd(fakeGame(), { cause: 'new', by: 'system' }), s)).toBeNull();
+  });
+  it('new, пришедшее раньше ответа start_game, молчит и помечает партию', () => {
+    const s = newAgentState('s1');
+    s.startingGame = true;
+    const g = fakeGame({ id: 'g3', seats: { B: { controller: 'engine', rank: '10k' }, W: { controller: 'human' } }, pendingEngineMove: true });
+    expect(handleEvent(upd(g, { cause: 'new', by: 'system' }), s)).toBeNull();
+    expect(s.toolGames.has('g3')).toBe(true);
+    expect(s.awaitingReply).toBe(false);
+  });
+  it('партия двух людей (D-0005): sync без «твой ход», тап озвучивается сразу', () => {
+    const s = newAgentState('s1');
+    const g = fakeGame({ seats: { B: { controller: 'human' }, W: { controller: 'human' } }, toPlay: 'W', moves: [mv(1, 'B', 'D4')] });
+    const text = handleEvent(upd(g, { cause: 'sync', by: 'system' }), s);
+    expect(text).toContain('играют два человека');
+    expect(text).toContain('сейчас ходят белые');
+    expect(text).not.toContain('твой ход');
+    expect(s.humanColor).toBeNull();
+    const tap = fakeGame({ ...g, moves: [mv(1, 'B', 'D4'), mv(2, 'W', 'K10')], toPlay: 'B', revision: 2 });
+    expect(handleEvent(upd(tap, { cause: 'play', by: 'human', via: 'tap' }), s)).toContain('сыграл ка десять на экране');
   });
 });
 
@@ -1275,6 +1456,20 @@ describe('handleEvent: ходы', () => {
     const text = handleEvent(upd(fakeGame({ moves: [mv(1, 'B', 'D4'), mv(2, 'W', 'K10')] }), { cause: 'engine', by: 'engine' }), s);
     expect(text).toContain('Твой ход готов: ка десять');
     expect(s.awaitingReply).toBe(false);
+  });
+  it('humanFallback хода движка запоминается номером хода и снимается следующим обычным ходом (D-0007)', () => {
+    const s = newAgentState('s1');
+    s.gameId = 'g1';
+    const two = fakeGame({ moves: [mv(1, 'B', 'D4'), mv(2, 'W', 'K10')] });
+    handleEvent(upd(two, { cause: 'engine', by: 'engine', humanFallback: true }), s);
+    expect(s.fallbackMove).toBe(2);
+    const four = fakeGame({ moves: [mv(1, 'B', 'D4'), mv(2, 'W', 'K10'), mv(3, 'B', 'C3'), mv(4, 'W', 'D10')] });
+    handleEvent(upd(four, { cause: 'engine', by: 'engine', humanFallback: false }), s);
+    expect(s.fallbackMove).toBe(2);
+    // undo снял ходы 3–4 и 2 заменён новым ответом без humanFallback
+    const replaced = fakeGame({ moves: [mv(1, 'B', 'D4'), mv(2, 'W', 'G7')] });
+    handleEvent(upd(replaced, { cause: 'engine', by: 'engine', humanFallback: false }), s);
+    expect(s.fallbackMove).toBeNull();
   });
   it('state.updated законченной партии сбрасывает флаги и молчит', () => {
     const s = newAgentState('s1');
@@ -1337,13 +1532,23 @@ describe('handleEvent: конец партии и ошибки', () => {
     t += 2;
     expect(handleEvent({ type: 'error', code: 'engine_unavailable', message: 'engine is unavailable' }, s, now)).not.toBeNull();
   });
-  it('retries_exhausted озвучивается сразу и без «сервер повторит сам»', () => {
+  it('retries_exhausted озвучивается сразу, без «сервер повторит сам», и ставит флаг переоткрытия', () => {
     const s = newAgentState('s1');
     const now = () => 1_000_000;
     expect(handleEvent({ type: 'error', code: 'engine_busy', message: 'engine did not respond within 10000 ms' }, s, now)).not.toBeNull();
     const text = handleEvent({ type: 'error', code: 'retries_exhausted', message: 'background task retries are exhausted' }, s, now);
     expect(text).toContain(humanText('retries_exhausted'));
+    expect(text).toContain('следующая реплика человека');
     expect(text).not.toContain('повторит попытку сам');
+    expect(text).not.toContain('background task');
+    expect(s.retriesExhausted).toBe(true);
+  });
+  it('любой state.updated снимает retriesExhausted: серию перезапустил коммит', () => {
+    const s = newAgentState('s1');
+    s.gameId = 'g1';
+    s.retriesExhausted = true;
+    handleEvent(upd(fakeGame({ moves: [mv(1, 'B', 'D4')], pendingEngineMove: true }), { cause: 'play', by: 'human', via: 'tap' }), s);
+    expect(s.retriesExhausted).toBe(false);
   });
 });
 
@@ -1367,10 +1572,54 @@ describe('watchSession', () => {
       },
     };
     const slept: number[] = [];
-    await watchSession({ client, state: s, signal: abort.signal, speak: (t) => void spoken.push(t), retryMs: 7, sleep: async (ms) => void slept.push(ms) });
+    await watchSession({ client, state: s, signal: abort.signal, speak: (t) => void spoken.push(t), retryMs: 7, sleep: async (ms) => void slept.push(ms) }).done;
     expect(spoken).toEqual(['Партия окончена: победа за тобой: я сдался. Объяви результат одной фразой.']);
     expect(connects).toBe(2);
     expect(slept).toEqual([7]);
+  });
+  it('после retries_exhausted реплика человека переоткрывает поток сразу, без паузы (D-0006)', async () => {
+    const s = newAgentState('s1');
+    const spoken: string[] = [];
+    const logs: string[] = [];
+    const slept: number[] = [];
+    const abort = new AbortController();
+    let connects = 0;
+    const client = {
+      async *events(target: EventsTarget, signal?: AbortSignal): AsyncGenerator<GameEvent, void, undefined> {
+        connects++;
+        expect(target).toEqual({ sessionId: 's1' });
+        if (connects === 1) {
+          yield { type: 'session.game', gameId: 'g1' };
+          yield { type: 'error', code: 'retries_exhausted', message: 'background task retries are exhausted' };
+          // Живой поток молчит, пока его не оборвут.
+          await new Promise<void>((resolve) => signal?.addEventListener('abort', () => resolve(), { once: true }));
+          throw new DOMException('This operation was aborted', 'AbortError');
+        }
+        yield { type: 'session.game', gameId: 'g1' };
+        abort.abort();
+      },
+    };
+    const watch = watchSession({
+      client,
+      state: s,
+      signal: abort.signal,
+      speak: (t) => void spoken.push(t),
+      log: (l) => void logs.push(l),
+      retryMs: 7,
+      sleep: async (ms) => void slept.push(ms),
+    });
+    watch.humanSpoke(); // до retries_exhausted — ничего не происходит
+    await vi.waitFor(() => expect(s.retriesExhausted).toBe(true));
+    watch.humanSpoke();
+    watch.humanSpoke(); // вторая реплика подряд не рвёт поток ещё раз
+    await watch.done;
+    expect(connects).toBe(2);
+    expect(slept).toEqual([]);
+    expect(s.retriesExhausted).toBe(false);
+    expect(spoken).toHaveLength(1);
+    expect(spoken[0]).toContain(humanText('retries_exhausted'));
+    expect(logs).toContain('[OK] voice-agent: реплика человека после retries_exhausted, переоткрываю поток сессии');
+    expect(logs.some((l) => l.includes('оборвался'))).toBe(false);
   });
   it('ошибка speak не рвёт цикл', async () => {
     const s = newAgentState('s1');
@@ -1392,7 +1641,7 @@ describe('watchSession', () => {
         spoken.push(t);
         throw new Error('session closing');
       },
-    });
+    }).done;
     expect(spoken.length).toBe(2);
   });
 });
@@ -1407,18 +1656,27 @@ Expected: FAIL — `Cannot find module './events.ts'`.
 
 ```ts
 // Озвучивание событий SSE (раздел 9 спеки). handleEvent — чистая функция: событие + память агента ->
-// инструкция для generateReply или null. watchSession — цикл чтения потока сессии с переподключением.
-import { type GameEvent, type GameState, type GokoClient, humanText } from '@goko/protocol';
-import { colorNameInstrumental, describeResult, speakMove, speakRank } from './phrases.ts';
+// инструкция для generateReply или null. watchSession — цикл чтения потока сессии с переподключением
+// и переоткрытием после retries_exhausted (D-0006).
+import { ApiError, type GameEvent, type GameState, type GokoClient, humanText, seatColor } from '@goko/protocol';
+import { colorName, colorNameInstrumental, describeResult, speakMove, speakRank } from './phrases.ts';
 import type { AgentState } from './state.ts';
-import { humanColorOf } from './tools.ts';
+import { hasEngine, humanColorOf } from './tools.ts';
 
 export const ERROR_REPEAT_MS = 30_000;
 
 const ONE_PHRASE = 'Скажи одну короткую фразу.';
 
 function whoseTurn(g: GameState): string {
+  if (!hasEngine(g)) return `сейчас ходят ${colorName(g.toPlay)}`;
   return g.toPlay === humanColorOf(g) ? 'сейчас ход человека' : 'сейчас твой ход';
+}
+
+// Кто играет: человек цветом или два человека (D-0005 — Гоко в такой партии только комментирует).
+function seatsText(g: GameState): string {
+  const human = seatColor(g.seats, 'human');
+  if (!hasEngine(g)) return 'играют два человека, ты только комментируешь';
+  return `человек играет ${colorNameInstrumental(human ?? 'B')}`;
 }
 
 function resetTurnFlags(state: AgentState) {
@@ -1434,7 +1692,8 @@ function onStateUpdated(ev: Extract<GameEvent, { type: 'state.updated' }>, state
   const g = ev.state;
   const fresh = g.id !== state.gameId;
   state.gameId = g.id;
-  state.humanColor = humanColorOf(g);
+  state.humanColor = hasEngine(g) ? humanColorOf(g) : null;
+  state.retriesExhausted = false; // был коммит или открытие потока: серия повторов перезапущена (D-0006)
   const last = g.moves.at(-1);
 
   if (g.status === 'finished') {
@@ -1446,13 +1705,20 @@ function onStateUpdated(ev: Extract<GameEvent, { type: 'state.updated' }>, state
     case 'sync':
       if (!fresh) return null;
       resetTurnFlags(state);
-      return `Продолжаем партию: человек играет ${colorNameInstrumental(state.humanColor)}, сделано ходов: ${g.moves.length}, ${whoseTurn(g)}. ${ONE_PHRASE} Ход не называй, пока его не вернул инструмент.`;
+      return `Продолжаем партию: ${seatsText(g)}, сделано ходов: ${g.moves.length}, ${whoseTurn(g)}. ${ONE_PHRASE} Ход не называй, пока его не вернул инструмент.`;
     case 'new': {
       resetTurnFlags(state);
+      // У сервера new всегда by 'system' без via: отличить кнопку на экране от start_game можно только
+      // по памяти агента. Событие обгоняет ответ HTTP, поэтому смотрим и на идущий start_game.
+      if (state.startingGame) state.toolGames.add(g.id);
       if (state.toolGames.has(g.id)) return null;
-      const engineSeat = g.seats.B.controller === 'engine' ? g.seats.B : g.seats.W;
+      const engineColor = seatColor(g.seats, 'engine');
+      if (engineColor === null) {
+        return `Человек начал с экрана новую партию двух людей: ты в ней не играешь, только комментируешь и выполняешь просьбы за того, чей ход. ${ONE_PHRASE}`;
+      }
+      const engineSeat = g.seats[engineColor];
       state.awaitingReply = g.pendingEngineMove;
-      return `Человек начал новую партию с экрана: человек играет ${colorNameInstrumental(state.humanColor)}, Гоко — ${engineSeat.rank ? speakRank(engineSeat.rank) : 'без ранга'}. ${g.pendingEngineMove ? 'Первый ход твой, его назовёт следующее событие: пока не выдумывай.' : 'Первый ход человека.'} ${ONE_PHRASE}`;
+      return `Человек начал новую партию с экрана: ${seatsText(g)}, Гоко — ${engineSeat.rank ? speakRank(engineSeat.rank) : 'без ранга'}. ${g.pendingEngineMove ? 'Первый ход твой, его назовёт следующее событие: пока не выдумывай.' : 'Первый ход человека.'} ${ONE_PHRASE}`;
     }
     case 'play':
     case 'pass':
@@ -1471,6 +1737,10 @@ function onStateUpdated(ev: Extract<GameEvent, { type: 'state.updated' }>, state
       return `Человек отменил последний ход кнопкой на экране, ${whoseTurn(g)}. ${ONE_PHRASE}`;
     case 'engine': {
       if (!last) return null;
+      // humanFallback есть только здесь (D-0007): get_position скажет о таком ходе, пока он на доске.
+      // Ход с тем же или меньшим номером без признака значит, что прежний ход сняли или заменили.
+      if (ev.humanFallback) state.fallbackMove = last.n;
+      else if (state.fallbackMove !== null && last.n <= state.fallbackMove) state.fallbackMove = null;
       const reply = last.coord === 'pass' ? 'ответил пасом' : `ответил ${speakMove(last.coord)}`;
       if (state.lastTap) {
         const tap = state.lastTap;
@@ -1497,6 +1767,8 @@ export function handleEvent(ev: GameEvent, state: AgentState, now: () => number 
     case 'session.game':
       state.gameId = ev.gameId;
       resetTurnFlags(state);
+      state.retriesExhausted = false;
+      state.fallbackMove = null;
       return null;
     case 'state.updated':
       return onStateUpdated(ev, state);
@@ -1510,10 +1782,12 @@ export function handleEvent(ev: GameEvent, state: AgentState, now: () => number 
     }
     case 'error': {
       // Текст — по code (humanText), message английский и только для логов (D-0007).
-      // retries_exhausted: сервер больше не повторяет сам, серию перезапустит действие человека или
-      // открытие потока (D-0006), поэтому реплика звучит сразу, без паузы повтора.
+      // retries_exhausted: сервер больше не повторяет сам. Серию перезапустит мутирующее действие человека
+      // или открытие потока (D-0006); watchSession переоткроет поток на первой реплике человека
+      // (голосом или в чате) — инструкция ниже обещает человеку ровно это. Реплика — сразу.
       if (ev.code === 'retries_exhausted') {
-        return `${humanText(ev.code)}. Скажи это одной фразой и попроси человека сказать что-нибудь или сделать ход, если ход его.`;
+        state.retriesExhausted = true;
+        return `Сервер перестал повторять попытки: ${humanText(ev.code)}. Передай это одной фразой от первого лица; следующая реплика человека сама запустит новую попытку.`;
       }
       const t = now();
       if (t - state.lastErrorAt < ERROR_REPEAT_MS) return null;
@@ -1535,32 +1809,69 @@ export type WatchOptions = {
   sleep?: (ms: number) => Promise<void>;
 };
 
+export type WatchHandle = {
+  done: Promise<void>; // завершается по opts.signal
+  humanSpoke: () => void; // реплика человека (голос или lk.chat): после retries_exhausted переоткрыть поток
+};
+
+const failureText = (e: unknown): string => (e instanceof ApiError ? e.code : e instanceof Error ? `${e.name}: ${e.message}` : String(e));
+
 // Читает поток сессии, пока не отменят. Обрыв (сеть, рестарт game-server) — пауза и новое подключение:
 // первым сообщением сервер шлёт session.game и sync, так что состояние восстанавливается само.
-export async function watchSession(opts: WatchOptions): Promise<void> {
+// Каждое подключение — свой AbortController: humanSpoke обрывает только его, и цикл сразу открывает
+// поток заново. Открытие потока сессии перезапускает серию повторов на сервере (D-0006).
+export function watchSession(opts: WatchOptions): WatchHandle {
   const log = opts.log ?? (() => {});
   const retryMs = opts.retryMs ?? 1000;
   const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
-  while (!opts.signal.aborted) {
-    try {
-      for await (const ev of opts.client.events({ sessionId: opts.state.sessionId }, opts.signal)) {
-        const instructions = handleEvent(ev, opts.state);
-        if (!instructions) continue;
-        try {
-          await opts.speak(instructions);
-        } catch (e) {
-          log(`[!] voice-agent: generateReply не удался: ${(e as Error).message}`);
+  let conn: AbortController | null = null;
+  let reopening = false;
+
+  const humanSpoke = () => {
+    if (!opts.state.retriesExhausted || reopening || !conn) return;
+    reopening = true;
+    log('[OK] voice-agent: реплика человека после retries_exhausted, переоткрываю поток сессии');
+    conn.abort();
+  };
+
+  const run = async () => {
+    while (!opts.signal.aborted) {
+      const current = new AbortController();
+      conn = current;
+      reopening = false;
+      const stop = () => current.abort();
+      opts.signal.addEventListener('abort', stop, { once: true });
+      try {
+        for await (const ev of opts.client.events({ sessionId: opts.state.sessionId }, current.signal)) {
+          const instructions = handleEvent(ev, opts.state);
+          if (!instructions) continue;
+          try {
+            await opts.speak(instructions);
+          } catch (e) {
+            log(`[!] voice-agent: generateReply не удался: ${failureText(e)}`);
+          }
         }
+      } catch (e) {
+        if (opts.signal.aborted) return;
+        if (!reopening) log(`[!] voice-agent: поток сессии оборвался: ${failureText(e)}`);
+      } finally {
+        opts.signal.removeEventListener('abort', stop);
+        conn = null;
       }
-    } catch (e) {
       if (opts.signal.aborted) return;
-      log(`[!] voice-agent: поток сессии оборвался: ${(e as Error).message}`);
+      if (reopening) {
+        opts.state.retriesExhausted = false;
+        continue; // без паузы: человек ждёт ответа
+      }
+      await sleep(retryMs);
     }
-    if (opts.signal.aborted) return;
-    await sleep(retryMs);
-  }
+  };
+
+  return { done: run(), humanSpoke };
 }
 ```
+
+Живой поток сессии на ходу движка может молчать долго, кроме пингов; `humanSpoke` обрывает его через `AbortSignal`, который клиент протокола передаёт в `fetch` (`events(target, signal)`). Реплику человека `main.ts` передаёт сюда из двух мест: финальный транскрипт голоса (`user_input_transcribed`) и сообщение пользователя в истории (`conversation_item_added` — туда же попадает текст из `lk.chat`), задача 4.
 
 - [ ] **Step 4: Тесты зелёные**
 
@@ -1579,13 +1890,19 @@ git commit -m "voice-agent: события сессии в реплики, ци�
 ### Task 4: `voice-agent` — промпт, режимы речи, воркер, evals
 
 **Files:**
-- Create: `apps/voice-agent/src/prompt.ts`, `apps/voice-agent/src/voice.ts`, `apps/voice-agent/src/agent.ts`, `apps/voice-agent/src/metadata.ts`, `apps/voice-agent/src/main.ts`
+- Create: `apps/voice-agent/src/prompt.ts`, `apps/voice-agent/src/voice.ts`, `apps/voice-agent/src/agent.ts`, `apps/voice-agent/src/metadata.ts`, `apps/voice-agent/src/mode.ts`, `apps/voice-agent/src/main.ts`
 - Modify: `infra/.env.example` (переменные `VOICE_MODE`, `API_BASE`)
-- Test: `apps/voice-agent/src/metadata.test.ts`, `apps/voice-agent/src/voice.test.ts`, `apps/voice-agent/src/agent.eval.test.ts`
+- Test: `apps/voice-agent/src/metadata.test.ts`, `apps/voice-agent/src/voice.test.ts`, `apps/voice-agent/src/mode.test.ts`, `apps/voice-agent/src/agent.eval.test.ts`
 
 **Interfaces:**
-- Consumes: `createTools`, `GokoTools` (Task 2); `watchSession` (Task 3); `newAgentState`; `createClient` из `@goko/protocol`; `defineAgent`, `cli`, `ServerOptions`, `voice`, `JobContext` из `@livekit/agents`; `openai` и `silero` плагины.
-- Produces: `INSTRUCTIONS: string`, `GREETING_INSTRUCTIONS: string`; `type VoiceMode = 'realtime' | 'pipeline'`, `parseVoiceMode(v: string | undefined): VoiceMode` (бросает на другом значении), `sessionOptions(mode): Promise<SessionOptions>` где `SessionOptions = ConstructorParameters<typeof voice.AgentSession>[0]`; `class GokoAgent extends voice.Agent` с `constructor(tools: GokoTools, opts?: { greet?: boolean })`; `sessionIdOf(metadata: string | undefined, roomName: string): string`; воркер `node apps/voice-agent/src/main.ts dev|start` с переменными `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`, `OPENAI_API_KEY`, `APP_KEY` (обязательные, выход с кодом 2), `API_BASE` (по умолчанию `http://127.0.0.1:8787`), `AGENT_NAME` (по умолчанию `goko`), `VOICE_MODE` (по умолчанию `realtime`).
+- Consumes: `createTools`, `GokoTools` (Task 2); `watchSession`, `WatchHandle` (Task 3); `newAgentState`; `createClient` из `@goko/protocol`; `defineAgent`, `cli`, `ServerOptions`, `voice`, `JobContext` из `@livekit/agents`; `RoomEvent` из `@livekit/rtc-node`; `openai` и `silero` плагины.
+- Produces: `INSTRUCTIONS: string`, `GREETING_INSTRUCTIONS: string`; `type VoiceMode = 'realtime' | 'pipeline'`, `parseVoiceMode(v: string | undefined): VoiceMode` (бросает на другом значении), `sessionOptions(mode): Promise<SessionOptions>` где `SessionOptions = ConstructorParameters<typeof voice.AgentSession>[0]`; `class GokoAgent extends voice.Agent` с `constructor(tools: GokoTools, opts?: { greet?: boolean })`; `sessionIdOf(metadata: string | undefined, roomName: string): string`; режим D-0011: `type TalkMode = 'voice' | 'chat'`, `MODE_ATTRIBUTE = 'goko.mode'`, `modeOf(attributes?): TalkMode`, `type AudioSwitch = { input: { setAudioEnabled(enabled: boolean): void }; output: { setAudioEnabled(enabled: boolean): void } }`, `applyMode(session: AudioSwitch, mode: TalkMode): void`, `type ParticipantLike = { identity: string; attributes: Readonly<Record<string, string>> }`, `followMode(opts: { participant: ParticipantLike; session: AudioSwitch; log? }): { readonly mode: TalkMode; onAttributes(p: ParticipantLike): void }`; воркер `node apps/voice-agent/src/main.ts dev|start` с переменными `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`, `OPENAI_API_KEY`, `APP_KEY` (обязательные, пустые и из пробелов считаются не заданными, выход с кодом 2), `API_BASE` (по умолчанию `http://127.0.0.1:8787`), `AGENT_NAME` (по умолчанию `goko`), `VOICE_MODE` (по умолчанию `realtime`).
+
+Выключение звука в режиме «Чат» (сверено с исходниками `@livekit/agents` 1.8.0 в `node_modules` и документацией LiveKit Agents через context7):
+- Основной путь: `session.output.setAudioEnabled(false)` и `session.input.setAudioEnabled(false)` (`AgentOutput` / `AgentInput`, `src/voice/io.ts`). Пока выход выключен, `AgentActivity` не передаёт кадры в аудиовыход (`output.audioEnabled ? output.audio : null`), а текст ответа уходит в `lk.transcription` без синхронизации со звуком. Включение обратно — те же вызовы с `true`. Режим применяется после `session.start`: подключение аудиовыхода `RoomIO` вызывает `onAttached` независимо от флага.
+- Чего нет: переключить Realtime на текст на лету. `modalities` у `openai.realtime.RealtimeModel` задаётся только в конструкторе, `updateOptions` принимает лишь `toolChoice`. Модель продолжает генерировать аудио, мы за него платим (цена D-0011). Пересоздавать сессию с `modalities: ['text']` при каждой смене режима не будем: обрыв разговора и контекста дороже.
+- Запасной путь, если на живом прогоне звук в «Чате» всё же доходит до телефона: веб в «Чате» отписывается от аудиотрека агента (`RemoteTrackPublication.setSubscribed(false)`, задача 7), это сделано в любом случае. Совсем крайний — `RemoteParticipant.setVolume(0)` на странице.
+- Атрибут участника читается из `participant.attributes` после `ctx.waitForParticipant()`, смена — событие `RoomEvent.ParticipantAttributesChanged` (`@livekit/rtc-node` 0.13: `(changedAttributes, participant)`, атрибуты участника к моменту события уже обновлены). Выставить атрибут участник может только с правом `canUpdateOwnMetadata` в токене: его добавляет задача 5 (шаг 1).
 
 - [ ] **Step 1: `apps/voice-agent/src/prompt.ts`**
 
@@ -1604,13 +1921,18 @@ export const INSTRUCTIONS = `Ты Гоко, соперник по го на до
 - Оценку позиции обсуждай охотно через get_assessment: кто впереди, на сколько, какие группы слабые. Лучший ход (bestMoves) называй только по прямой просьбе подсказать.
 - Не пасуй и не предлагай пас, пока пас не стал разумным. «Пас» человека — инструмент pass; «сдаюсь» — resign; «отмени», «верни ход» — undo; «давай партию», «начнём», «новая партия» — start_game (цвет человека — чёрные, если не сказал иначе; «я белыми» — my_color white). «Играй как пять кю», «слабее», «сильнее» — set_rank с рангом словами.
 - Если результат содержит finished и result, объяви результат словами из result.
+- За человека ходи только по его прямой просьбе («сходи за меня на дэ четыре») и всегда называй этот ход вслух. Размышление вслух («а не пойти ли мне на дэ четыре») ходом не считается: переспроси, если не ясно.
+- Человек может писать текстом (режим «Чат»): отвечай так же коротко. Твои реплики всегда видны в ленте на экране, в режиме «Голос» они ещё и звучат.
+- Если в партии нет Гоко (играют два человека), ты не играешь: комментируешь, отвечаешь на вопросы о позиции и применяешь названные ходы за того, чей сейчас ход. Результаты таких партий называй цветами.
+- Если get_position сообщает, что ход Гоко взят из основного поиска, а не из человеческой сети уровня, и человек спрашивает, почему ход такой сильный или странный, объясни это одной фразой.
+- Если сервер перестал повторять попытки, скажи об этом одной фразой: новая попытка начнётся сама, как только человек что-нибудь скажет или напишет.
 - Реплики до двух предложений, если не спрашивают о позиции. Если тебя перебили — замолчи и слушай.`;
 
 export const GREETING_INSTRUCTIONS =
   'Поздоровайся одной короткой фразой как соперник за доской и предложи начать партию или назвать ход. Ничего о позиции не говори.';
 ```
 
-- [ ] **Step 2: Тест `apps/voice-agent/src/metadata.test.ts` и `apps/voice-agent/src/voice.test.ts`**
+- [ ] **Step 2: Тесты `apps/voice-agent/src/metadata.test.ts`, `apps/voice-agent/src/voice.test.ts`, `apps/voice-agent/src/mode.test.ts`**
 
 ```ts
 // metadata.test.ts
@@ -1646,12 +1968,74 @@ describe('parseVoiceMode', () => {
 });
 ```
 
+```ts
+// mode.test.ts — режим Голос / Чат (D-0011) на замоканном сеансе
+import { describe, expect, it } from 'vitest';
+import { MODE_ATTRIBUTE, applyMode, followMode, modeOf } from './mode.ts';
+
+function fakeSession() {
+  const calls: string[] = [];
+  return {
+    calls,
+    input: { setAudioEnabled: (enabled: boolean) => void calls.push(`in:${enabled}`) },
+    output: { setAudioEnabled: (enabled: boolean) => void calls.push(`out:${enabled}`) },
+  };
+}
+
+describe('modeOf', () => {
+  it('chat только при goko.mode=chat, всё остальное — voice', () => {
+    expect(MODE_ATTRIBUTE).toBe('goko.mode');
+    expect(modeOf({ 'goko.mode': 'chat' })).toBe('chat');
+    expect(modeOf({ 'goko.mode': 'voice' })).toBe('voice');
+    expect(modeOf({ 'goko.mode': 'CHAT' })).toBe('voice');
+    expect(modeOf({})).toBe('voice');
+    expect(modeOf(undefined)).toBe('voice');
+  });
+});
+
+describe('applyMode', () => {
+  it('chat выключает аудиовыход и аудиовход сессии, voice включает обратно', () => {
+    const s = fakeSession();
+    applyMode(s, 'chat');
+    applyMode(s, 'voice');
+    expect(s.calls).toEqual(['out:false', 'in:false', 'out:true', 'in:true']);
+  });
+});
+
+describe('followMode', () => {
+  it('на старте читает атрибут участника: в чате звук выключен сразу', () => {
+    const s = fakeSession();
+    const logs: string[] = [];
+    const f = followMode({ participant: { identity: 'phone-s1', attributes: { 'goko.mode': 'chat' } }, session: s, log: (l) => void logs.push(l) });
+    expect(f.mode).toBe('chat');
+    expect(s.calls).toEqual(['out:false', 'in:false']);
+    expect(logs).toEqual(['[OK] voice-agent: режим chat']);
+  });
+  it('смена атрибута переключает режим; чужой участник и тот же режим не трогают сессию', () => {
+    const s = fakeSession();
+    const f = followMode({ participant: { identity: 'phone-s1', attributes: {} }, session: s });
+    expect(f.mode).toBe('voice');
+    expect(s.calls).toEqual(['out:true', 'in:true']);
+    s.calls.length = 0;
+    f.onAttributes({ identity: 'someone-else', attributes: { 'goko.mode': 'chat' } });
+    f.onAttributes({ identity: 'phone-s1', attributes: { 'goko.mode': 'voice' } });
+    expect(s.calls).toEqual([]);
+    f.onAttributes({ identity: 'phone-s1', attributes: { 'goko.mode': 'chat' } });
+    expect(f.mode).toBe('chat');
+    expect(s.calls).toEqual(['out:false', 'in:false']);
+    f.onAttributes({ identity: 'phone-s1', attributes: {} });
+    expect(f.mode).toBe('voice');
+    expect(s.calls).toEqual(['out:false', 'in:false', 'out:true', 'in:true']);
+  });
+});
+```
+
 - [ ] **Step 3: Запустить тесты, убедиться, что падают**
 
-Run: `npx vitest run apps/voice-agent/src/metadata.test.ts apps/voice-agent/src/voice.test.ts`
+Run: `npx vitest run apps/voice-agent/src/metadata.test.ts apps/voice-agent/src/voice.test.ts apps/voice-agent/src/mode.test.ts`
 Expected: FAIL — модули не найдены.
 
-- [ ] **Step 4: `apps/voice-agent/src/metadata.ts`**
+- [ ] **Step 4: `apps/voice-agent/src/metadata.ts` и `apps/voice-agent/src/mode.ts`**
 
 ```ts
 // sessionId из метаданных диспетчеризации (game-server кладёт { sessionId } в agents комнаты при createRoom, D-0001);
@@ -1668,6 +2052,60 @@ export function sessionIdOf(metadata: string | undefined, roomName: string): str
     }
   }
   return roomName.replace(/^goko-/, '');
+}
+```
+
+```ts
+// Режим разговора (D-0011): веб и scripts/chat.mjs выставляют атрибут участника goko.mode = voice | chat.
+// В «Чате» аудиовход и аудиовыход сессии выключены, ответы идут только текстом в lk.transcription.
+// Realtime при этом всё равно генерирует аудио (modalities задаются только в конструкторе RealtimeModel):
+// это известная цена D-0011. Запасной путь — веб в «Чате» не подписан на аудиотрек агента.
+export type TalkMode = 'voice' | 'chat';
+
+export const MODE_ATTRIBUTE = 'goko.mode';
+
+// Незнакомое значение и отсутствие атрибута — «Голос»: основной режим, и старый веб без атрибута работает как раньше.
+export function modeOf(attributes: Readonly<Record<string, string>> | undefined): TalkMode {
+  return attributes?.[MODE_ATTRIBUTE] === 'chat' ? 'chat' : 'voice';
+}
+
+// Ровно то, что нужно от voice.AgentSession (@livekit/agents 1.8: session.input и session.output, src/voice/io.ts).
+export type AudioSwitch = {
+  input: { setAudioEnabled(enabled: boolean): void };
+  output: { setAudioEnabled(enabled: boolean): void };
+};
+
+export function applyMode(session: AudioSwitch, mode: TalkMode): void {
+  const on = mode === 'voice';
+  session.output.setAudioEnabled(on);
+  session.input.setAudioEnabled(on);
+}
+
+// RemoteParticipant из @livekit/rtc-node подходит как есть: identity и attributes — геттеры.
+export type ParticipantLike = { identity: string; attributes: Readonly<Record<string, string>> };
+
+export type ModeFollower = { readonly mode: TalkMode; onAttributes(p: ParticipantLike): void };
+
+// Следит за режимом одного участника — того, кого дождался ctx.waitForParticipant(). Вызывать после
+// session.start: подключение аудиовыхода RoomIO внутри start вызывает onAttached независимо от флага.
+export function followMode(opts: { participant: ParticipantLike; session: AudioSwitch; log?: (line: string) => void }): ModeFollower {
+  const log = opts.log ?? (() => {});
+  let mode = modeOf(opts.participant.attributes);
+  applyMode(opts.session, mode);
+  log(`[OK] voice-agent: режим ${mode}`);
+  return {
+    get mode() {
+      return mode;
+    },
+    onAttributes(p) {
+      if (p.identity !== opts.participant.identity) return;
+      const next = modeOf(p.attributes);
+      if (next === mode) return;
+      mode = next;
+      applyMode(opts.session, mode);
+      log(`[OK] voice-agent: режим ${mode}`);
+    },
+  };
 }
 ```
 
@@ -1754,10 +2192,13 @@ import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { type JobContext, ServerOptions, cli, defineAgent, voice } from '@livekit/agents';
+import { RoomEvent } from '@livekit/rtc-node';
 import { createClient } from '@goko/protocol';
 import { GokoAgent } from './agent.ts';
-import { watchSession } from './events.ts';
+import { type WatchHandle, watchSession } from './events.ts';
 import { sessionIdOf } from './metadata.ts';
+import { followMode } from './mode.ts';
+import { GREETING_INSTRUCTIONS } from './prompt.ts';
 import { newAgentState } from './state.ts';
 import { createTools } from './tools.ts';
 import { parseVoiceMode, sessionOptions } from './voice.ts';
@@ -1765,9 +2206,15 @@ import { parseVoiceMode, sessionOptions } from './voice.ts';
 const root = path.resolve(import.meta.dirname, '../../..');
 if (existsSync(path.join(root, '.env'))) process.loadEnvFile(path.join(root, '.env'));
 
-function need(name: string): string {
+// Пустая строка и строка из пробелов — «не задано», как в doctor, go-engine и game-server.
+function optional(name: string): string | undefined {
   const v = process.env[name];
-  if (!v) {
+  return v === undefined || v.trim() === '' ? undefined : v;
+}
+
+function need(name: string): string {
+  const v = optional(name);
+  if (v === undefined) {
     console.error(`[X] voice-agent: нужна переменная ${name} (см. infra/.env.example)`);
     process.exit(2);
   }
@@ -1776,32 +2223,41 @@ function need(name: string): string {
 
 for (const name of ['LIVEKIT_URL', 'LIVEKIT_API_KEY', 'LIVEKIT_API_SECRET', 'OPENAI_API_KEY']) need(name);
 const APP_KEY = need('APP_KEY');
-const API_BASE = process.env.API_BASE ?? 'http://127.0.0.1:8787';
-const AGENT_NAME = process.env.AGENT_NAME ?? 'goko';
-const VOICE_MODE = parseVoiceMode(process.env.VOICE_MODE);
+const API_BASE = optional('API_BASE') ?? 'http://127.0.0.1:8787';
+const AGENT_NAME = optional('AGENT_NAME') ?? 'goko';
+const VOICE_MODE = parseVoiceMode(optional('VOICE_MODE'));
 
 const log = (line: string) => console.log(line);
 
 export default defineAgent({
   entry: async (ctx: JobContext) => {
     const sessionId = sessionIdOf(ctx.job.metadata, ctx.room.name ?? '');
-    log(`[OK] voice-agent: комната ${ctx.room.name}, сессия ${sessionId}, режим ${VOICE_MODE}`);
+    log(`[OK] voice-agent: комната ${ctx.room.name}, сессия ${sessionId}, речь ${VOICE_MODE}`);
     await ctx.connect();
     // Комнату создал game-server (D-0001), агент приходит раньше телефона: Realtime открываем только
     // при живом участнике, иначе платная сессия шла бы в пустой комнате до emptyTimeout.
-    await ctx.waitForParticipant();
+    const participant = await ctx.waitForParticipant();
 
     const client = createClient({ baseUrl: API_BASE, appKey: APP_KEY });
     const state = newAgentState(sessionId);
-    const agent = new GokoAgent(createTools({ client, state, log }));
+    // Приветствие не в onEnter, а после применения режима: в «Чате» оно должно прийти только текстом.
+    const agent = new GokoAgent(createTools({ client, state, log }), { greet: false });
     const session = new voice.AgentSession(await sessionOptions(VOICE_MODE));
+    let watch: WatchHandle | null = null;
 
     // Лента для логов: что услышали и что сказали. Значений env здесь нет.
+    // Реплика человека после retries_exhausted переоткрывает поток сессии (D-0006): голосом — финальный
+    // транскрипт, текстом из lk.chat — сообщение пользователя в истории (оно приходит и для голоса, повтор безвреден).
     session.on('user_input_transcribed', (ev) => {
-      if (ev.isFinal) log(`[user] ${ev.transcript}`);
+      if (!ev.isFinal) return;
+      log(`[user] ${ev.transcript}`);
+      watch?.humanSpoke();
     });
     session.on('conversation_item_added', (ev) => {
-      if (ev.item.role === 'assistant' && ev.item.textContent) log(`[goko] ${ev.item.textContent}`);
+      const item = ev.item;
+      if (item.type !== 'message') return; // AgentHandoffItem без role и текста
+      if (item.role === 'user') watch?.humanSpoke();
+      if (item.role === 'assistant' && item.textContent) log(`[goko] ${item.textContent}`);
     });
     session.on('function_tools_executed', (ev) => {
       for (const call of ev.functionCalls) log(`[tool] ${call.name} ${call.args}`);
@@ -1812,7 +2268,14 @@ export default defineAgent({
     ctx.addShutdownCallback(async () => abort.abort());
 
     await session.start({ agent, room: ctx.room });
-    void watchSession({
+
+    // Режим Голос / Чат (D-0011): атрибут goko.mode участника. Применяется после start, см. mode.ts.
+    const mode = followMode({ participant, session, log });
+    ctx.room.on(RoomEvent.ParticipantAttributesChanged, (_changed, p) => mode.onAttributes(p));
+    ctx.room.on(RoomEvent.ParticipantConnected, (p) => mode.onAttributes(p)); // вернулся после обрыва с тем же identity
+    session.generateReply({ instructions: GREETING_INSTRUCTIONS });
+
+    watch = watchSession({
       client,
       state,
       signal: abort.signal,
@@ -1821,13 +2284,14 @@ export default defineAgent({
         session.generateReply({ instructions });
       },
     });
+    void watch.done;
   },
 });
 
 cli.runApp(new ServerOptions({ agent: fileURLToPath(import.meta.url), agentName: AGENT_NAME }));
 ```
 
-Если у события `function_tools_executed` в установленной версии другое поле (не `functionCalls` с `name`/`args`), подстроить лог по типу `FunctionToolsExecutedEvent` из `@livekit/agents` — суть та же: имя инструмента и аргументы одной строкой. Если `ctx.addShutdownCallback` отсутствует — убрать строку, `close` сессии достаточно.
+Если у события `function_tools_executed` в установленной версии другое поле (не `functionCalls` с `name`/`args`), подстроить лог по типу `FunctionToolsExecutedEvent` из `@livekit/agents` — суть та же: имя инструмента и аргументы одной строкой. Если `ctx.addShutdownCallback` отсутствует — убрать строку, `close` сессии достаточно. `ParticipantConnected` с тем же `identity` приходит, когда телефон вернулся в комнату после обрыва: его атрибуты уже в `participant.attributes`. Участник с другим `identity` режим не меняет — токен сессии выдаётся на одно `identity` (`phone-<sessionId>`).
 
 - [ ] **Step 8: `infra/.env.example` — переменные агента** (после строки `AGENT_NAME=goko ...`)
 
@@ -1839,10 +2303,10 @@ API_BASE=http://127.0.0.1:8787     # куда voice-agent ходит за пар
 - [ ] **Step 9: Тесты, typecheck, запуск воркера**
 
 Run: `npx vitest run apps/voice-agent && npm run typecheck`
-Expected: все тесты `voice-agent` проходят (eval-файла пока нет), typecheck без ошибок.
+Expected: все тесты `voice-agent` проходят, в том числе `mode.test.ts` (eval-файла пока нет), typecheck без ошибок.
 
 Run (нужен `.env` с `LIVEKIT_*`, `OPENAI_API_KEY`, `APP_KEY`): `AGENT_NAME=goko-dev node apps/voice-agent/src/main.ts dev`
-Expected: в логе `registered worker` с `agentName goko-dev`; без `.env` — `[X] voice-agent: нужна переменная LIVEKIT_URL` и код 2. Остановить Ctrl+C.
+Expected: в логе `registered worker` с `agentName goko-dev`; без `.env` или с `LIVEKIT_URL` из пробелов — `[X] voice-agent: нужна переменная LIVEKIT_URL` и код 2. Остановить Ctrl+C. Проверка режима — в задаче 5 (`scripts/chat.mjs` выставляет `goko.mode=chat`: в логе агента `[OK] voice-agent: режим chat`).
 
 - [ ] **Step 10: Платные evals `apps/voice-agent/src/agent.eval.test.ts`** (включаются только `RUN_AGENT_EVALS=1` при `OPENAI_API_KEY`; в `npm run check` — `skipped`)
 
@@ -1929,27 +2393,80 @@ Expected: `agent.eval.test.ts` — `skipped`, остальное зелёное.
 - [ ] **Step 11: Commit**
 
 ```bash
-git add apps/voice-agent/src/prompt.ts apps/voice-agent/src/voice.ts apps/voice-agent/src/voice.test.ts apps/voice-agent/src/agent.ts apps/voice-agent/src/metadata.ts apps/voice-agent/src/metadata.test.ts apps/voice-agent/src/main.ts apps/voice-agent/src/agent.eval.test.ts infra/.env.example
-git commit -m "voice-agent: промпт, режимы realtime/pipeline, воркер, evals по флагу"
+git add apps/voice-agent/src/prompt.ts apps/voice-agent/src/voice.ts apps/voice-agent/src/voice.test.ts apps/voice-agent/src/agent.ts apps/voice-agent/src/metadata.ts apps/voice-agent/src/metadata.test.ts apps/voice-agent/src/mode.ts apps/voice-agent/src/mode.test.ts apps/voice-agent/src/main.ts apps/voice-agent/src/agent.eval.test.ts infra/.env.example
+git commit -m "voice-agent: промпт, режимы realtime/pipeline и Голос/Чат, воркер, evals по флагу"
 ```
 
 ---
-### Task 5: `scripts/chat.mjs` — текстовый диалог с Гоко из консоли
+### Task 5: `scripts/chat.mjs` — текстовый диалог с Гоко из консоли; право атрибута режима в токене
 
 **Files:**
 - Create: `scripts/chat.mjs`
-- Modify: `package.json` (корень: скрипт `chat`, devDependency `@livekit/rtc-node`)
-- Test: `scripts/chat.test.ts`
+- Modify: `apps/game-server/src/livekit.ts` (право `canUpdateOwnMetadata`, D-0011), `package.json` (корень: скрипт `chat`, devDependency `@livekit/rtc-node`)
+- Test: `apps/game-server/src/livekit.test.ts`, `apps/game-server/src/app.test.ts` (ожидаемые права токена), `scripts/chat.test.ts`
 
 **Interfaces:**
-- Consumes: `createClient` из `@goko/protocol` (`createSession`, `events`, `ascii`); `Room`, `RoomEvent` из `@livekit/rtc-node`; воркер из Task 4, зарегистрированный под тем же `AGENT_NAME`, что и game-server.
-- Produces: `node scripts/chat.mjs [--api http://127.0.0.1:8787]` (`npm run chat`): создаёт сессию через game-server, входит в комнату с токеном сессии (агент диспетчеризуется сам), stdin → `lk.chat`, ответы из `lk.transcription` и события SSE → stdout; команда `/board` печатает ascii-доску; `describeEvent(ev): string` — экспорт для теста. Реплики печатаются по одному разу на `lk.segment_id`; по EOF на stdin скрипт ждёт тишины (`CHAT_QUIET_MS`, потолок `CHAT_MAX_WAIT_MS`) и закрывается сам, по `Ctrl+C` — отключается от комнаты; коды возврата: 0 — штатно, 1 — сбой LiveKit или game-server, 2 — нет `APP_KEY`.
+- Consumes: `createClient` из `@goko/protocol` (`createSession`, `events`, `ascii`); `Room`, `RoomEvent` из `@livekit/rtc-node`; воркер из Task 4, зарегистрированный под тем же `AGENT_NAME`, что и game-server; `mintToken` из `apps/game-server/src/livekit.ts`.
+- Produces: токен телефона с правами `{ roomJoin, room, canPublish, canSubscribe, canPublishData, canUpdateOwnMetadata }` — без `roomCreate` и `roomConfig`, как и прежде; `node scripts/chat.mjs [--api http://127.0.0.1:8787]` (`npm run chat`): создаёт сессию через game-server (комнату с агентом создаёт сервер, D-0001; скрипт комнат не создаёт), входит в комнату с токеном сессии (агент диспетчеризуется сам), выставляет атрибут `goko.mode=chat` (D-0011: агент отвечает только текстом), stdin → `lk.chat`, ответы из `lk.transcription` и события SSE → stdout; команда `/board` печатает ascii-доску; `describeEvent(ev): string` и `CHAT_ATTRIBUTES` — экспорт для теста. Реплики печатаются по одному разу на `lk.segment_id`; по EOF на stdin скрипт ждёт тишины (`CHAT_QUIET_MS`, потолок `CHAT_MAX_WAIT_MS`) и закрывается сам, по `Ctrl+C` — отключается от комнаты; коды возврата: 0 — штатно, 1 — сбой LiveKit или game-server, 2 — нет `APP_KEY`.
 
-- [ ] **Step 1: Тест `scripts/chat.test.ts`**
+- [ ] **Step 1: game-server — право `canUpdateOwnMetadata` в токене телефона (D-0011)**
+
+Без этого права LiveKit отклоняет `setAttributes` участника: по умолчанию участник не может менять свои метаданные и атрибуты (комментарий к `canUpdateOwnMetadata` в `livekit-server-sdk`, документация LiveKit «Participant attributes and metadata»). Право касается только своих имени, метаданных и атрибутов; комнат оно не создаёт и агентов не диспетчеризует, так что граница D-0001 не сдвигается.
+
+Сначала тесты. В `apps/game-server/src/livekit.test.ts` заменить заголовок `describe` и ожидание прав:
+
+```ts
+describe('mintToken (D-0001, D-0011): roomJoin на комнату сессии и право на свои атрибуты', () => {
+```
+
+```ts
+    expect(claims.video).toEqual({ roomJoin: true, room: 'goko-s1', canPublish: true, canSubscribe: true, canPublishData: true, canUpdateOwnMetadata: true });
+```
+
+В `apps/game-server/src/app.test.ts` в тесте создания сессии заменить заголовок и ожидание прав:
+
+```ts
+  it('создание сессии (D-0001, D-0011): комнату с агентом создаёт сервер, токен — roomJoin и право на свои атрибуты; session.game в потоке', async () => {
+```
+
+```ts
+    expect(claims.video).toEqual({ room: session.room, roomJoin: true, canPublish: true, canSubscribe: true, canPublishData: true, canUpdateOwnMetadata: true });
+```
+
+Run: `npx vitest run apps/game-server/src/livekit.test.ts apps/game-server/src/app.test.ts`
+Expected: FAIL — в `claims.video` нет `canUpdateOwnMetadata`.
+
+В `apps/game-server/src/livekit.ts` заменить вторую и третью строки шапки и грант:
+
+```ts
+// RoomServiceClient.createRoom, телефон получает токен с roomJoin на эту комнату, без roomCreate
+// и без roomConfig. Токен с roomCreate дал бы любому, кто открыл веб, неограниченное число платных агентов.
+// canUpdateOwnMetadata (D-0011) — только свои атрибуты: веб выставляет goko.mode = voice | chat.
+```
+
+```ts
+  at.addGrant({ roomJoin: true, room: opts.room, canPublish: true, canSubscribe: true, canPublishData: true, canUpdateOwnMetadata: true });
+```
+
+Run: `npx vitest run apps/game-server/src/livekit.test.ts apps/game-server/src/app.test.ts && npm run typecheck`
+Expected: PASS, typecheck без ошибок.
+
+```bash
+git add apps/game-server/src/livekit.ts apps/game-server/src/livekit.test.ts apps/game-server/src/app.test.ts
+git commit -m "game-server: право canUpdateOwnMetadata в токене телефона для атрибута режима (D-0011)"
+```
+
+- [ ] **Step 2: Тест `scripts/chat.test.ts`**
 
 ```ts
 import { describe, expect, it } from 'vitest';
-import { describeEvent } from './chat.mjs';
+import { CHAT_ATTRIBUTES, describeEvent } from './chat.mjs';
+
+describe('CHAT_ATTRIBUTES', () => {
+  it('консоль — режим «Чат» (D-0011): агент отвечает текстом, без звука', () => {
+    expect(CHAT_ATTRIBUTES).toEqual({ 'goko.mode': 'chat' });
+  });
+});
 
 describe('describeEvent', () => {
   it('коротко описывает события сессии', () => {
@@ -1973,24 +2490,26 @@ describe('describeEvent', () => {
 });
 ```
 
-- [ ] **Step 2: Запустить тест, убедиться, что падает**
+- [ ] **Step 3: Запустить тест, убедиться, что падает**
 
 Run: `npx vitest run scripts/chat.test.ts`
 Expected: FAIL — `Cannot find module './chat.mjs'`.
 
-- [ ] **Step 3: `scripts/chat.mjs`**
+- [ ] **Step 4: `scripts/chat.mjs`**
 
 Код ниже — полный, вместе с уроками спайка стадии 0 (живой прогон и два круга ревью 08.09):
 печать сегмента ровно один раз (сразу при честном `final="true"`, иначе по короткой паузе без
 новых кусков того же сегмента), дедуп по `lk.segment_id`, ожидание тишины перед выходом,
-корректный `SIGINT` и диагностика потерянных реплик. `spike/` к этому моменту удалён
-(последняя задача плана стадии 0), подсматривать там нечего — код здесь самодостаточный.
+корректный `SIGINT` и диагностика потерянных реплик. Код здесь самодостаточный. `spike/` к этому
+моменту ещё в репозитории (его удаляют после голосового прогона founder'а), но оттуда ничего не
+копировать: `spike/token.mjs` и `spike/chat.mjs` выдают себе токен с `roomCreate` и `roomConfig`,
+а по D-0001 комнату создаёт только game-server.
 
 ```js
 #!/usr/bin/env node
-// Текстовый диалог с Гоко без микрофона (раздел 12 спеки): сессия через game-server, комната LiveKit,
-// stdin -> lk.chat, lk.transcription и события SSE -> stdout. Нужны LIVEKIT на VPS и запущенный воркер
-// с тем же AGENT_NAME, что у game-server (npm run dev поднимает оба под goko-dev).
+// Текстовый диалог с Гоко без микрофона (раздел 12 спеки): сессия через game-server (он же создаёт
+// комнату с агентом, D-0001), stdin -> lk.chat, lk.transcription и события SSE -> stdout. Нужны LIVEKIT
+// на VPS и запущенный воркер с тем же AGENT_NAME, что у game-server (npm run dev поднимает оба под goko-dev).
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline';
@@ -1999,17 +2518,30 @@ import { fileURLToPath } from 'node:url';
 import { Room, RoomEvent } from '@livekit/rtc-node';
 import { createClient, humanText } from '@goko/protocol';
 
+// Режим «Чат» (D-0011): агент выключает звук сессии и отвечает только текстом в lk.transcription.
+export const CHAT_ATTRIBUTES = { 'goko.mode': 'chat' };
+
+// Пустая строка и строка из пробелов — «не задано», как в doctor и game-server.
+const env = (name) => {
+  const v = process.env[name];
+  return v === undefined || v.trim() === '' ? undefined : v;
+};
+const envMs = (name, fallback) => {
+  const n = Number(env(name) ?? fallback);
+  return Number.isFinite(n) && n >= 0 ? n : fallback;
+};
+
 // Сколько ждать тишины после EOF на stdin: ответ на последнюю фразу приходит позже конца ввода,
 // и при скриптовом прогоне (echo 'дэ четыре' | npm run chat) он иначе теряется целиком.
-const QUIET_MS = Number(process.env.CHAT_QUIET_MS ?? 5000);
+const QUIET_MS = envMs('CHAT_QUIET_MS', 5000);
 // Потолок ожидания: агент может замолчать или зациклиться, а висящая комната — это живые деньги
 // за сессию Realtime (empty_timeout закрывает её только через 5 минут).
-const MAX_WAIT_MS = Number(process.env.CHAT_MAX_WAIT_MS ?? 60000);
+const MAX_WAIT_MS = envMs('CHAT_MAX_WAIT_MS', 60000);
 // Пауза без новых кусков сегмента, после которой считаем сегмент законченным.
 const SEGMENT_DEBOUNCE_MS = 500;
 // Диспетчеризация воркера занимает 3-5 с; фраза, отправленная в эту щель, до агента не доходит
 // и пропадает молча — поэтому приглашение печатаем только после входа агента.
-const AGENT_WAIT_MS = Number(process.env.CHAT_AGENT_WAIT_MS ?? 15000);
+const AGENT_WAIT_MS = envMs('CHAT_AGENT_WAIT_MS', 15000);
 const POLL_MS = 200;
 
 export function describeEvent(ev) {
@@ -2038,16 +2570,17 @@ async function main() {
   if (existsSync(path.join(root, '.env'))) process.loadEnvFile(path.join(root, '.env'));
   const argv = process.argv.slice(2);
   const apiIndex = argv.indexOf('--api');
-  const api = apiIndex >= 0 ? argv[apiIndex + 1] : (process.env.API_BASE ?? 'http://127.0.0.1:8787');
-  const appKey = process.env.APP_KEY;
+  const api = apiIndex >= 0 ? argv[apiIndex + 1] : (env('API_BASE') ?? 'http://127.0.0.1:8787');
+  const appKey = env('APP_KEY');
   if (!appKey) {
     console.error('[X] chat: нужен APP_KEY в .env');
     process.exit(2);
   }
 
   const client = createClient({ baseUrl: api, appKey });
+  // Комнату и диспетчеризацию агента создаёт game-server в POST /api/sessions (D-0001); токен — только на эту комнату.
   const { session, livekit } = await client.createSession();
-  console.log(`[OK] сессия ${session.id}, комната ${session.room}, агент ${process.env.AGENT_NAME ?? 'goko'}`);
+  console.log(`[OK] сессия ${session.id}, комната ${session.room}, агент ${env('AGENT_NAME') ?? 'goko'}`);
 
   let gameId = session.currentGameId;
   const room = new Room();
@@ -2196,6 +2729,15 @@ async function main() {
     process.exit(1);
   }
   console.log(`[OK] вошёл как ${room.localParticipant?.identity}; жду агента...`);
+  // Режим «Чат» (D-0011). Агент читает атрибут, когда дождётся участника, и следит за его сменой,
+  // так что выставить его сразу после connect достаточно. Без права canUpdateOwnMetadata в токене
+  // (задача 5, шаг 1) сервер откажет: разговор всё равно работает, но агент ответит и голосом.
+  try {
+    await room.localParticipant.setAttributes(CHAT_ATTRIBUTES);
+    console.log('[OK] режим чата: агент отвечает текстом');
+  } catch {
+    console.error('[!] не удалось выставить режим чата (goko.mode): агент будет отвечать и голосом');
+  }
 
   // Ctrl+C без обработчика убил бы процесс молча: участник отвалился бы не по причине из
   // CLOSE_ON_DISCONNECT_REASONS, сессия Realtime висела бы до empty_timeout и стоила денег.
@@ -2284,20 +2826,21 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
 - **`SIGINT`/`SIGTERM` через `shutdown`** — без него участник отваливается не по причине из `CLOSE_ON_DISCONNECT_REASONS`, сессия Realtime доживает до `empty_timeout`.
 - **`[!]` о потерянных репликах** на выходе по потолку ожидания и по Ctrl+C — и о сегментах, ждавших подтверждения, и о незакрытых потоках (`openStreams`). Смотреть только на ожидающие подтверждения бесполезно: там сегмент живёт полсекунды, а выход по потолку случается как раз из-за зависшего потока, чей текст иначе не виден нигде.
 - **Ожидание входа агента до приглашения** — диспетчеризация занимает 3-5 с, отправленная в эту щель фраза пропадает без следа.
+- **Атрибут `goko.mode=chat`** (D-0011) — консоль не слушает звук, и агент в этом режиме не тратит время на озвучку; Realtime аудио всё равно генерирует (цена D-0011). Отказ `setAttributes` не валит скрипт: разговор важнее режима.
 
-Если `sendText` в установленной версии `@livekit/rtc-node` отсутствует — отправлять через `publishData` с `topic: 'lk.chat'`; обёртка `try/catch` та же.
+Если `sendText` в установленной версии `@livekit/rtc-node` отсутствует — отправлять через `publishData` с `topic: 'lk.chat'`; обёртка `try/catch` та же. `LocalParticipant.setAttributes(attributes)` в `@livekit/rtc-node` 0.13.34 есть (`src/participant.ts`); если его подпись в установленной версии другая — взять из типа `LocalParticipant`.
 
-- [ ] **Step 4: Корневой `package.json`**
+- [ ] **Step 5: Корневой `package.json`**
 
-В `"scripts"` добавить `"chat": "node scripts/chat.mjs"`. В `"devDependencies"` добавить `"@livekit/rtc-node": "^0.13.34"` (нужен только скрипту; воркер тянет свою копию через `@livekit/agents`). Затем `npm install`.
+В `"scripts"` добавить `"chat": "node scripts/chat.mjs"`. В `"devDependencies"` добавить `"@livekit/rtc-node": "^0.13.34"` (корень — для скрипта; воркер объявил ту же версию у себя в задаче 1, npm поднимет одну копию). Затем `npm install`.
 
-- [ ] **Step 5: Тест и прогон**
+- [ ] **Step 6: Тест и прогон**
 
 Run: `npx vitest run scripts/chat.test.ts`
 Expected: PASS.
 
 Run (нужны `.env` с `LIVEKIT_*`, `OPENAI_API_KEY`, `APP_KEY`; в одном терминале `npm run dev`): `npm run chat`
-Expected: `[OK] сессия ...`, `[OK] вошёл как phone-<id>`, через 1–3 с `[OK] в комнате: <identity агента>` и приветствие `[<identity агента>] ...`. Ввести `давай партию` → `[event] партия g...`, `[event] new by human via voice ...`, реплика агента; `дэ четыре` → `[event] play by human via voice: ход 1 B D4 ...`, `[event] engine by engine: ход 2 W ...`, агент называет ход; `/board` печатает ascii-доску с двумя камнями; `кто впереди` → `[event]`-строк нет (analyze событий не шлёт), агент отвечает без лучшего хода. Каждая реплика агента печатается ровно один раз (с задержкой ~0.5 с после конца потока), растущих префиксов нет даже когда в той же комнате говорит телефон. `Ctrl+C` → `[OK] сессия закрыта`, код 0.
+Expected: `[OK] сессия ...`, `[OK] вошёл как phone-<id>`, `[OK] режим чата: агент отвечает текстом` (в логе воркера — `[OK] voice-agent: режим chat`), через 1–3 с `[OK] в комнате: <identity агента>` и приветствие `[<identity агента>] ...`. Ввести `давай партию` → `[event] партия g...`, `[event] new by system: ходов 0, rev 0, дальше B`, реплика агента; `дэ четыре` → `[event] play by human via voice: ход 1 B D4 ...`, `[event] engine by engine: ход 2 W ...`, агент называет ход; `/board` печатает ascii-доску с двумя камнями; `кто впереди` → `[event]`-строк нет (analyze событий не шлёт), агент отвечает без лучшего хода. Каждая реплика агента печатается ровно один раз (с задержкой ~0.5 с после конца потока), растущих префиксов нет даже когда в той же комнате говорит телефон. `Ctrl+C` → `[OK] сессия закрыта`, код 0.
 
 Run (сценарный прогон без клавиатуры): `echo 'дэ четыре' | npm run chat`
 Expected: ответ агента на последнюю фразу успевает напечататься (скрипт ждёт тишины, а не рвёт комнату по EOF), затем `[OK] сессия закрыта`, код 0. При зависшем агенте — `[!] тишины не дождался за 60 с...` и следом диагностика потери: `[!] сегмент SG_... не подтверждён, недопечатано: ...` для дочитанного сегмента, `[!] сегмент SG_... поток не закрыт, недопечатано: ...` для зависшего потока с текстом, `[!] открытых потоков: N, хвост реплики не получен` — если текста не пришло вовсе. Молчания на этом пути быть не должно.
@@ -2306,24 +2849,24 @@ Run (проверка диагностики без сети, на заведо�
 
 Без VPS живые шаги пропускаются и отмечаются в `docs/NOW.md` как `[TODO founder]` проверка.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
 git add scripts/chat.mjs scripts/chat.test.ts package.json package-lock.json
-git commit -m "scripts: chat — текстовый диалог с Гоко в комнате LiveKit"
+git commit -m "scripts: chat — текстовый диалог с Гоко в комнате LiveKit, режим чата"
 ```
 
 ---
-### Task 6: `web` — каркас Vite, геометрия доски, лента, поток событий, тексты
+### Task 6: `web` — каркас Vite, геометрия доски, лента, поток событий, тексты, настройки и чат
 
 **Files:**
-- Create: `apps/web/package.json`, `apps/web/tsconfig.json`, `apps/web/vite.config.ts`, `apps/web/index.html`, `apps/web/src/vite-env.d.ts`, `apps/web/src/geometry.ts`, `apps/web/src/transcript.ts`, `apps/web/src/stream.ts`, `apps/web/src/text.ts`
+- Create: `apps/web/package.json`, `apps/web/tsconfig.json`, `apps/web/vite.config.ts`, `apps/web/index.html`, `apps/web/src/vite-env.d.ts`, `apps/web/src/geometry.ts`, `apps/web/src/transcript.ts`, `apps/web/src/stream.ts`, `apps/web/src/text.ts`, `apps/web/src/prefs.ts`, `apps/web/src/chat.ts`
 - Modify: `package.json` (корень: `typecheck` с веб-конфигом, скрипт `build:web`)
-- Test: `apps/web/src/geometry.test.ts`, `apps/web/src/transcript.test.ts`, `apps/web/src/stream.test.ts`, `apps/web/src/text.test.ts`
+- Test: `apps/web/src/geometry.test.ts`, `apps/web/src/transcript.test.ts`, `apps/web/src/stream.test.ts`, `apps/web/src/text.test.ts`, `apps/web/src/prefs.test.ts`, `apps/web/src/chat.test.ts`
 
 **Interfaces:**
-- Consumes: `formatCoord`, `type Point` из `@goko/go-core`; `ApiError`, `GameEvent`, `GameState`, `GokoClient`, `Color`, `seatColor` из `@goko/protocol`.
-- Produces: `VIEW = 1000`; `type Layout = { size; step; margin }`; `layout(size): Layout`; `x(l, col)`, `y(l, row)`; `pointAt(l, px, py): Point | null`; `coordAt(p): string`; `hoshi(size): Point[]`; `type Stone = { col; row; color }`; `stones(board, size): Stone[]`; `indexOf(p, size): number`. `type Who = 'me' | 'goko'`; `type Line = { id; who; text; final }`; `MAX_LINES = 200`; `upsertLine(lines, line): Line[]`; `whoOf(attrs, myTrackSids, senderIdentity, myIdentity): Who`; `lineId(attrs, streamId): string`. `streamEvents(client, sessionId, signal, handlers, sleep?)`, `RETRY_MS = [1000, 2000, 5000]`, `type StreamHandlers = { onEvent; onConnected?; onLost }`. `describeError(e): string`; `humanColorOf(g): Color`; `resultText(g): string`; `statusText(g, thinking): string`; `capturesText(g)`, `rankText(g)`.
+- Consumes: `formatCoord`, `type Point` из `@goko/go-core`; `ApiError`, `GameEvent`, `GameState`, `GokoClient`, `Color`, `Rank`, `RANKS`, `NewGameRequest`, `humanText`, `seatColor` из `@goko/protocol` (`seatColor` добавляет задача 1).
+- Produces: `VIEW = 1000`; `type Layout = { size; step; margin }`; `layout(size): Layout`; `x(l, col)`, `y(l, row)`; `pointAt(l, px, py): Point | null`; `coordAt(p): string`; `hoshi(size): Point[]`; `type Stone = { col; row; color }`; `stones(board, size): Stone[]`; `indexOf(p, size): number`. `type Who = 'me' | 'goko'`; `type Line = { id; who; text; final }`; `MAX_LINES = 200`; `upsertLine(lines, line): Line[]`; `whoOf(attrs, myTrackSids, senderIdentity, myIdentity): Who`; `lineId(attrs, streamId): string`; `acceptLine(attrs, who): boolean`. `streamEvents(client, sessionId, signal, handlers, sleep?): StreamHandle`, `type StreamHandle = { done: Promise<void>; reopen(): void }`, `RETRY_MS = [1000, 2000, 5000]`, `type StreamHandlers = { onEvent; onConnected?; onLost }`, `needsRetry(prev: boolean, ev: GameEvent): boolean`. `describeError(e): string`; `hasEngine(g): boolean`; `humanColorOf(g): Color` (без движка — цвет того, чей ход, как у агента в задаче 2); `resultText(g): string`; `statusText(g, thinking): string`; `capturesText(g)`, `rankText(g)`. `type Mode = 'voice' | 'chat'`; `type ColorChoice = 'black' | 'white' | 'random'`; `type Prefs = { mode; color; rank }`; `PREFS_KEY = 'goko.prefs'`, `MODE_ATTRIBUTE = 'goko.mode'`, `DEFAULT_PREFS`, `DEFAULT_KOMI = 7.5`; `loadPrefs(storage: () => Pick<Storage, 'getItem'>): Prefs`; `savePrefs(storage: () => Pick<Storage, 'setItem'>, prefs): boolean`; `stepRank(rank, delta): Rank`; `newGameRequest(prefs, current: GameState | null, random?): NewGameRequest`; `modeAttributes(mode): Record<string, string>`. `CHAT_MAX_CHARS = 500`; `type ChatDeps = { send(text): Promise<unknown>; id(): string }`; `type ChatResult = { draft; line: Line | null; error: string | null }`; `sendChat(draft, deps): Promise<ChatResult>`; `agentReady(attrs?): boolean`.
 
 - [ ] **Step 1: Файлы конфигурации**
 
@@ -2490,7 +3033,7 @@ describe('geometry 13x13', () => {
 
 ```ts
 import { describe, expect, it } from 'vitest';
-import { type Line, MAX_LINES, lineId, upsertLine, whoOf } from './transcript.ts';
+import { type Line, MAX_LINES, acceptLine, lineId, upsertLine, whoOf } from './transcript.ts';
 
 const line = (id: string, text: string, who: 'me' | 'goko' = 'goko', final = true): Line => ({ id, who, text, final });
 
@@ -2522,14 +3065,44 @@ describe('whoOf / lineId', () => {
     expect(lineId({}, 'ST_9')).toBe('ST_9');
   });
 });
+
+describe('acceptLine (D-0011: лента — диалог без дублей)', () => {
+  it('реплику Гоко берёт всегда, реплику человека — только финальный сегмент', () => {
+    expect(acceptLine({ 'lk.transcription_final': 'false' }, 'goko')).toBe(true);
+    expect(acceptLine({}, 'goko')).toBe(true);
+    expect(acceptLine({ 'lk.transcription_final': 'false' }, 'me')).toBe(false);
+    expect(acceptLine({}, 'me')).toBe(false);
+    expect(acceptLine({ 'lk.transcription_final': 'true' }, 'me')).toBe(true);
+  });
+  it('промежуточные куски человека отброшены, финал того же сегмента — одна строка', () => {
+    const chunks: Array<[Record<string, string>, string]> = [
+      [{ 'lk.segment_id': 'SG_7', 'lk.transcription_final': 'false' }, 'дэ'],
+      [{ 'lk.segment_id': 'SG_7', 'lk.transcription_final': 'false' }, 'дэ чет'],
+      [{ 'lk.segment_id': 'SG_7', 'lk.transcription_final': 'true' }, 'дэ четыре'],
+      [{ 'lk.segment_id': 'SG_7', 'lk.transcription_final': 'true' }, 'дэ четыре'],
+    ];
+    let lines: Line[] = [];
+    for (const [attrs, text] of chunks) {
+      if (acceptLine(attrs, 'me')) lines = upsertLine(lines, { id: lineId(attrs, 'ST_x'), who: 'me', text, final: true });
+    }
+    expect(lines).toEqual([line('SG_7', 'дэ четыре', 'me')]);
+  });
+});
 ```
 
 `apps/web/src/stream.test.ts`:
 
 ```ts
-import { describe, expect, it } from 'vitest';
-import { ApiError, type GameEvent } from '@goko/protocol';
-import { RETRY_MS, streamEvents } from './stream.ts';
+import { describe, expect, it, vi } from 'vitest';
+import { ApiError, type EventsTarget, type GameEvent } from '@goko/protocol';
+import { RETRY_MS, needsRetry, streamEvents } from './stream.ts';
+
+// Живой поток, который ничего не шлёт и кончается только отменой своего сигнала — как fetch SSE.
+function untilAborted(signal: AbortSignal | undefined): Promise<never> {
+  return new Promise((_resolve, reject) => {
+    signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')), { once: true });
+  });
+}
 
 describe('streamEvents', () => {
   it('отдаёт события, переподключается с паузой, останавливается по сигналу', async () => {
@@ -2549,7 +3122,7 @@ describe('streamEvents', () => {
     const got: string[] = [];
     const conn: boolean[] = [];
     const slept: number[] = [];
-    await streamEvents(client, 's1', abort.signal, { onEvent: (ev) => got.push(ev.type), onConnected: (c) => conn.push(c), onLost: () => got.push('LOST') }, async (ms) => void slept.push(ms));
+    await streamEvents(client, 's1', abort.signal, { onEvent: (ev) => got.push(ev.type), onConnected: (c) => conn.push(c), onLost: () => got.push('LOST') }, async (ms) => void slept.push(ms)).done;
     expect(got).toEqual(['session.game', 'engine.thinking']);
     expect(conn).toEqual([true, false, true]);
     expect(slept).toEqual([RETRY_MS[0]]);
@@ -2567,7 +3140,7 @@ describe('streamEvents', () => {
       },
     };
     const slept: number[] = [];
-    await streamEvents(client, 's1', abort.signal, { onEvent: () => {}, onLost: () => {} }, async (ms) => void slept.push(ms));
+    await streamEvents(client, 's1', abort.signal, { onEvent: () => {}, onLost: () => {} }, async (ms) => void slept.push(ms)).done;
     expect(slept).toEqual([1000, 2000, 5000]);
   });
   it('not_found — сессия истекла: onLost и выход без повторов', async () => {
@@ -2575,12 +3148,86 @@ describe('streamEvents', () => {
     const client = {
       // eslint-disable-next-line require-yield
       async *events(): AsyncGenerator<GameEvent, void, undefined> {
-        throw new ApiError('not_found', 'сессии нет');
+        throw new ApiError('not_found', 'session not found');
       },
     };
     let lost = 0;
-    await streamEvents(client, 's1', abort.signal, { onEvent: () => {}, onLost: () => lost++ }, async () => {});
+    await streamEvents(client, 's1', abort.signal, { onEvent: () => {}, onLost: () => lost++ }, async () => {}).done;
     expect(lost).toBe(1);
+  });
+  it('reopen на живом потоке (кнопка «Повторить», D-0006): закрывает соединение и сразу открывает новое', async () => {
+    const abort = new AbortController();
+    let connects = 0;
+    const client = {
+      async *events(_target: EventsTarget, signal?: AbortSignal): AsyncGenerator<GameEvent, void, undefined> {
+        connects++;
+        if (connects === 1) {
+          yield { type: 'error', code: 'retries_exhausted', message: 'engine move retries exhausted' };
+          await untilAborted(signal);
+        }
+        yield { type: 'session.game', gameId: 'g1' };
+        abort.abort();
+      },
+    };
+    const got: string[] = [];
+    const conn: boolean[] = [];
+    const slept: number[] = [];
+    const handle = streamEvents(client, 's1', abort.signal, { onEvent: (ev) => got.push(ev.type), onConnected: (c) => conn.push(c), onLost: () => got.push('LOST') }, async (ms) => void slept.push(ms));
+    await vi.waitFor(() => expect(got).toEqual(['error']));
+    handle.reopen();
+    await handle.done;
+    expect(got).toEqual(['error', 'session.game']);
+    expect(connects).toBe(2);
+    expect(slept).toEqual([]);
+    expect(conn).toEqual([true, true]);
+  });
+  it('reopen во время паузы между попытками не ждёт конца паузы', async () => {
+    const abort = new AbortController();
+    let connects = 0;
+    const client = {
+      async *events(): AsyncGenerator<GameEvent, void, undefined> {
+        connects++;
+        if (connects === 1) throw new TypeError('network error');
+        yield { type: 'session.game', gameId: 'g1' };
+        abort.abort();
+      },
+    };
+    const slept: number[] = [];
+    const handle = streamEvents(client, 's1', abort.signal, { onEvent: () => {}, onLost: () => {} }, (ms) => {
+      slept.push(ms);
+      handle.reopen();
+      return new Promise<void>(() => {}); // пауза, которая сама не кончится
+    });
+    await handle.done;
+    expect(slept).toEqual([RETRY_MS[0]]);
+    expect(connects).toBe(2);
+  });
+  it('reopen после остановки ничего не делает', async () => {
+    const abort = new AbortController();
+    let connects = 0;
+    const client = {
+      async *events(_target: EventsTarget, signal?: AbortSignal): AsyncGenerator<GameEvent, void, undefined> {
+        connects++;
+        await untilAborted(signal);
+      },
+    };
+    const handle = streamEvents(client, 's1', abort.signal, { onEvent: () => {}, onLost: () => {} }, async () => {});
+    abort.abort();
+    handle.reopen();
+    await handle.done;
+    expect(connects).toBe(1);
+  });
+});
+
+describe('needsRetry', () => {
+  it('«Повторить» видна после retries_exhausted и до следующего состояния партии', () => {
+    const exhausted: GameEvent = { type: 'error', code: 'retries_exhausted', message: 'engine move retries exhausted' };
+    const other: GameEvent = { type: 'error', code: 'engine_unavailable', message: 'engine is down' };
+    expect(needsRetry(false, exhausted)).toBe(true);
+    expect(needsRetry(true, other)).toBe(true);
+    expect(needsRetry(false, other)).toBe(false);
+    expect(needsRetry(true, { type: 'engine.thinking', color: 'W' })).toBe(true);
+    expect(needsRetry(true, { type: 'session.game', gameId: 'g2' })).toBe(false);
   });
 });
 ```
@@ -2590,7 +3237,7 @@ describe('streamEvents', () => {
 ```ts
 import { describe, expect, it } from 'vitest';
 import { ApiError, type GameState } from '@goko/protocol';
-import { capturesText, describeError, rankText, resultText, statusText } from './text.ts';
+import { capturesText, describeError, hasEngine, humanColorOf, rankText, resultText, statusText } from './text.ts';
 
 function game(over: Partial<GameState> = {}): GameState {
   return {
@@ -2618,7 +3265,7 @@ describe('text', () => {
     expect(describeError(new TypeError('Failed to fetch'))).toBe('нет связи с сервером');
   });
   it('statusText', () => {
-    expect(statusText(null, false)).toBe('Партии нет: скажи «давай партию» или нажми «Новая партия»');
+    expect(statusText(null, false)).toBe('Партии нет: нажми «Новая партия» или попроси Гоко');
     expect(statusText(game(), false)).toBe('Ход 1, твой ход (чёрные)');
     expect(statusText(game({ toPlay: 'W', pendingEngineMove: true, moves: [{ n: 1, color: 'B', coord: 'D4', captured: 0, at: 't' }] }), false)).toBe('Ход 2, ход Гоко (белые)');
     expect(statusText(game({ toPlay: 'W', pendingEngineMove: true }), true)).toBe('Ход 1, Гоко думает (белые)');
@@ -2631,13 +3278,166 @@ describe('text', () => {
     expect(rankText(game())).toBe('Гоко 10k');
     expect(rankText(game({ seats: { B: { controller: 'engine' }, W: { controller: 'human' } } }))).toBe('Гоко');
   });
+  it('человек против человека (D-0005): «ты» — тот, чей ход, победа по цвету', () => {
+    const hvh = { B: { controller: 'human' as const }, W: { controller: 'human' as const } };
+    const d4 = { n: 1, color: 'B' as const, coord: 'D4', captured: 0, at: 't' };
+    expect(hasEngine(game())).toBe(true);
+    expect(hasEngine(game({ seats: hvh }))).toBe(false);
+    expect(humanColorOf(game())).toBe('B');
+    expect(humanColorOf(game({ seats: hvh, toPlay: 'W', moves: [d4] }))).toBe('W');
+    expect(statusText(game({ seats: hvh, toPlay: 'W', moves: [d4] }), false)).toBe('Ход 2, ходят белые');
+    expect(resultText(game({ seats: hvh, status: 'finished', result: { winner: 'B', reason: 'resign' } }))).toBe('Победа чёрных: сдача');
+    expect(resultText(game({ seats: hvh, status: 'finished', result: { winner: 'W', margin: 2.5, reason: 'score' } }))).toBe('Победа белых: +2,5');
+    expect(rankText(game({ seats: hvh }))).toBe('Два игрока');
+  });
+});
+```
+
+`apps/web/src/prefs.test.ts`:
+
+```ts
+import { describe, expect, it } from 'vitest';
+import type { GameState } from '@goko/protocol';
+import { DEFAULT_PREFS, PREFS_KEY, loadPrefs, modeAttributes, newGameRequest, savePrefs, stepRank } from './prefs.ts';
+
+function memory(initial: Record<string, string> = {}) {
+  const data = new Map(Object.entries(initial));
+  return {
+    getItem: (k: string): string | null => data.get(k) ?? null,
+    setItem: (k: string, v: string): void => void data.set(k, v),
+  };
+}
+
+describe('prefs: хранение режима, цвета и ранга (D-0011)', () => {
+  it('без записи — умолчания: Голос, чёрные, 10k', () => {
+    expect(loadPrefs(() => memory())).toEqual({ mode: 'voice', color: 'black', rank: '10k' });
+  });
+  it('сохраняет и читает обратно', () => {
+    const s = memory();
+    expect(savePrefs(() => s, { mode: 'chat', color: 'random', rank: '3d' })).toBe(true);
+    expect(loadPrefs(() => s)).toEqual({ mode: 'chat', color: 'random', rank: '3d' });
+  });
+  it('битый JSON и чужие значения — умолчание по каждому полю отдельно', () => {
+    expect(loadPrefs(() => memory({ [PREFS_KEY]: '{oops' }))).toEqual(DEFAULT_PREFS);
+    expect(loadPrefs(() => memory({ [PREFS_KEY]: 'null' }))).toEqual(DEFAULT_PREFS);
+    expect(loadPrefs(() => memory({ [PREFS_KEY]: '7' }))).toEqual(DEFAULT_PREFS);
+    expect(loadPrefs(() => memory({ [PREFS_KEY]: JSON.stringify({ mode: 'video', color: 'white', rank: '30k' }) }))).toEqual({
+      mode: 'voice',
+      color: 'white',
+      rank: '10k',
+    });
+  });
+  it('исключение localStorage при чтении и записи не роняет страницу', () => {
+    const denied = (): never => {
+      throw new DOMException('The operation is insecure.', 'SecurityError'); // Safari с запретом данных сайта
+    };
+    expect(loadPrefs(denied)).toEqual(DEFAULT_PREFS);
+    expect(savePrefs(denied, DEFAULT_PREFS)).toBe(false);
+    const broken = {
+      getItem: (): string | null => {
+        throw new Error('storage is broken');
+      },
+    };
+    expect(loadPrefs(() => broken)).toEqual(DEFAULT_PREFS);
+    const full = {
+      setItem: (): void => {
+        throw new DOMException('quota', 'QuotaExceededError');
+      },
+    };
+    expect(savePrefs(() => full, { mode: 'chat', color: 'white', rank: '5k' })).toBe(false);
+  });
+});
+
+describe('prefs: новая партия только полями NewGameRequest', () => {
+  it('человек чёрными, Гоко белыми выбранного ранга, ответ движка не ждём', () => {
+    expect(newGameRequest({ mode: 'voice', color: 'black', rank: '5k' }, null)).toEqual({
+      black: { controller: 'human' },
+      white: { controller: 'engine', rank: '5k' },
+      settings: { komi: 7.5 },
+      waitForReply: false,
+    });
+  });
+  it('белыми — места меняются; случайно — по жребию', () => {
+    expect(newGameRequest({ ...DEFAULT_PREFS, color: 'white' }, null)).toMatchObject({
+      black: { controller: 'engine', rank: '10k' },
+      white: { controller: 'human' },
+    });
+    expect(newGameRequest({ ...DEFAULT_PREFS, color: 'random' }, null, () => 0.2).black).toEqual({ controller: 'human' });
+    expect(newGameRequest({ ...DEFAULT_PREFS, color: 'random' }, null, () => 0.7).black).toEqual({ controller: 'engine', rank: '10k' });
+  });
+  it('размер доски и коми берёт у текущей партии', () => {
+    const current = { settings: { boardSize: 9, rules: 'chinese', komi: 5.5 } } as const;
+    expect(newGameRequest(DEFAULT_PREFS, current as unknown as GameState).settings).toEqual({ boardSize: 9, komi: 5.5 });
+  });
+  it('stepRank ходит по списку рангов и упирается в края', () => {
+    expect(stepRank('10k', 1)).toBe('9k');
+    expect(stepRank('1k', 1)).toBe('1d');
+    expect(stepRank('1d', -1)).toBe('1k');
+    expect(stepRank('20k', -1)).toBe('20k');
+    expect(stepRank('9d', 1)).toBe('9d');
+  });
+  it('атрибут участника для режима', () => {
+    expect(modeAttributes('chat')).toEqual({ 'goko.mode': 'chat' });
+    expect(modeAttributes('voice')).toEqual({ 'goko.mode': 'voice' });
+  });
+});
+```
+
+`apps/web/src/chat.test.ts`:
+
+```ts
+import { describe, expect, it } from 'vitest';
+import { CHAT_MAX_CHARS, agentReady, sendChat } from './chat.ts';
+
+function deps(fail = false) {
+  const sent: string[] = [];
+  return {
+    sent,
+    send: async (text: string) => {
+      if (fail) throw new Error('not connected');
+      sent.push(text);
+    },
+    id: () => 'chat-1',
+  };
+}
+
+describe('sendChat — форма ввода режима «Чат» (D-0011)', () => {
+  it('отправляет обрезанный текст, очищает поле и добавляет свою строку в ленту', async () => {
+    const d = deps();
+    expect(await sendChat('  дэ четыре  ', d)).toEqual({ draft: '', line: { id: 'chat-1', who: 'me', text: 'дэ четыре', final: true }, error: null });
+    expect(d.sent).toEqual(['дэ четыре']);
+  });
+  it('пустое поле не отправляет', async () => {
+    const d = deps();
+    expect(await sendChat('   ', d)).toEqual({ draft: '', line: null, error: null });
+    expect(d.sent).toEqual([]);
+  });
+  it('слишком длинный текст не отправляет и оставляет черновик', async () => {
+    const d = deps();
+    const long = 'а'.repeat(CHAT_MAX_CHARS + 1);
+    expect(await sendChat(long, d)).toEqual({ draft: long, line: null, error: `слишком длинно: не больше ${CHAT_MAX_CHARS} знаков` });
+    expect(d.sent).toEqual([]);
+  });
+  it('ошибка отправки оставляет черновик и говорит по-русски', async () => {
+    expect(await sendChat('кто впереди', deps(true))).toEqual({ draft: 'кто впереди', line: null, error: 'не удалось отправить: нет связи с Гоко' });
+  });
+});
+
+describe('agentReady', () => {
+  it('агент готов, когда выставил lk.agent.state и уже не инициализируется', () => {
+    expect(agentReady(undefined)).toBe(false);
+    expect(agentReady({})).toBe(false);
+    expect(agentReady({ 'lk.agent.state': 'initializing' })).toBe(false);
+    expect(agentReady({ 'lk.agent.state': 'listening' })).toBe(true);
+    expect(agentReady({ 'lk.agent.state': 'speaking' })).toBe(true);
+  });
 });
 ```
 
 - [ ] **Step 3: Запустить тесты, убедиться, что падают**
 
 Run: `npx vitest run apps/web`
-Expected: FAIL — четыре модуля не найдены.
+Expected: FAIL — шесть модулей не найдены (`geometry`, `transcript`, `stream`, `text`, `prefs`, `chat`).
 
 - [ ] **Step 4: `apps/web/src/geometry.ts`**
 
@@ -2722,6 +3522,12 @@ export function whoOf(
 }
 
 export const lineId = (attrs: Readonly<Record<string, string>>, streamId: string): string => attrs['lk.segment_id'] ?? streamId;
+
+// Лента — диалог без дублей (D-0011). Реплика Гоко идёт дельта-потоком с lk.transcription_final навсегда 'false'
+// (agents 1.8.0), поэтому её берём всегда и держим строку по сегменту. Реплика человека: каждый промежуточный
+// результат STT — отдельный закрытый поток того же сегмента, атрибут у него честный; берём только финал.
+export const acceptLine = (attrs: Readonly<Record<string, string>>, who: Who): boolean =>
+  who === 'goko' || attrs['lk.transcription_final'] === 'true';
 ```
 
 - [ ] **Step 6: `apps/web/src/stream.ts`**
@@ -2729,6 +3535,8 @@ export const lineId = (attrs: Readonly<Record<string, string>>, streamId: string
 ```ts
 // Поток событий сессии с переподключением. После обрыва сервер первым сообщением шлёт session.game и sync
 // с полным состоянием — это и есть «get_game при переподключении» из раздела 10 спеки.
+// reopen() — кнопка «Повторить» (D-0006): открытие потока сессии заново запускает серию повторов сервера
+// после retries_exhausted. Живое соединение закрывается своим AbortController, пауза между попытками прерывается.
 import { ApiError, type GameEvent, type GokoClient } from '@goko/protocol';
 
 export type StreamHandlers = {
@@ -2737,41 +3545,89 @@ export type StreamHandlers = {
   onLost: () => void; // сессия истекла (not_found): нужна новая
 };
 
+export type StreamHandle = { done: Promise<void>; reopen: () => void };
+
 export const RETRY_MS = [1000, 2000, 5000] as const;
 
 const defaultSleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
-export async function streamEvents(
+export function streamEvents(
   client: Pick<GokoClient, 'events'>,
   sessionId: string,
   signal: AbortSignal,
   handlers: StreamHandlers,
   sleep: (ms: number) => Promise<void> = defaultSleep,
-): Promise<void> {
-  let attempt = 0;
-  while (!signal.aborted) {
-    try {
-      let first = true;
-      for await (const ev of client.events({ sessionId }, signal)) {
-        if (first) {
-          first = false;
-          attempt = 0;
-          handlers.onConnected?.(true);
+): StreamHandle {
+  let conn: AbortController | null = null;
+  let wake: (() => void) | null = null;
+  let reopening = false;
+  signal.addEventListener('abort', () => wake?.(), { once: true });
+
+  const reopen = (): void => {
+    if (signal.aborted || reopening) return;
+    reopening = true;
+    conn?.abort();
+    wake?.();
+  };
+
+  const done = (async () => {
+    let attempt = 0;
+    while (!signal.aborted) {
+      const current = new AbortController();
+      conn = current;
+      const stop = () => current.abort();
+      signal.addEventListener('abort', stop, { once: true });
+      try {
+        let first = true;
+        for await (const ev of client.events({ sessionId }, current.signal)) {
+          if (first) {
+            first = false;
+            attempt = 0;
+            handlers.onConnected?.(true);
+          }
+          handlers.onEvent(ev);
         }
-        handlers.onEvent(ev);
+      } catch (e) {
+        if (signal.aborted) return;
+        if (!reopening && e instanceof ApiError && e.code === 'not_found') {
+          handlers.onLost();
+          return;
+        }
+      } finally {
+        signal.removeEventListener('abort', stop);
+        conn = null;
       }
-    } catch (e) {
       if (signal.aborted) return;
-      if (e instanceof ApiError && e.code === 'not_found') {
-        handlers.onLost();
-        return;
+      if (reopening) {
+        reopening = false;
+        attempt = 0;
+        continue;
       }
+      handlers.onConnected?.(false);
+      // Промис пробуждения создаётся до вызова sleep: reopen() может прийти прямо из него.
+      const woken = new Promise<void>((resolve) => {
+        wake = resolve;
+      });
+      await Promise.race([sleep(RETRY_MS[Math.min(attempt, RETRY_MS.length - 1)] ?? 5000), woken]);
+      wake = null;
+      if (reopening) {
+        reopening = false;
+        attempt = 0;
+        continue;
+      }
+      attempt++;
     }
-    if (signal.aborted) return;
-    handlers.onConnected?.(false);
-    await sleep(RETRY_MS[Math.min(attempt, RETRY_MS.length - 1)] ?? 5000);
-    attempt++;
-  }
+  })();
+
+  return { done, reopen };
+}
+
+// Показывать ли «Повторить»: после error с кодом retries_exhausted — да, до следующего состояния партии
+// (session.game или state.updated, в том числе sync после переоткрытия). Прочие события флаг не меняют.
+export function needsRetry(prev: boolean, ev: GameEvent): boolean {
+  if (ev.type === 'error') return ev.code === 'retries_exhausted' ? true : prev;
+  if (ev.type === 'state.updated' || ev.type === 'session.game') return false;
+  return prev;
 }
 ```
 
@@ -2787,46 +3643,154 @@ export function describeError(e: unknown): string {
   return 'нет связи с сервером';
 }
 
+export const hasEngine = (g: GameState): boolean => seatColor(g.seats, 'engine') !== null;
+
+// Как у агента (задача 2): в партии без движка (D-0005) людей двое, и «ты» — тот, чей сейчас ход.
 export function humanColorOf(g: GameState): Color {
+  if (!hasEngine(g) && g.seats[g.toPlay].controller === 'human') return g.toPlay;
   return seatColor(g.seats, 'human') ?? 'B';
 }
 
 const colorName = (c: Color) => (c === 'B' ? 'чёрные' : 'белые');
+const colorGenitive = (c: Color) => (c === 'B' ? 'чёрных' : 'белых');
 const margin = (n: number) => (Number.isInteger(n) ? String(n) : n.toFixed(1).replace('.', ','));
 
 export function resultText(g: GameState): string {
   const r = g.result;
   if (!r) return 'Партия окончена';
-  const who = r.winner === humanColorOf(g) ? 'Победа твоя' : 'Победа Гоко';
+  const who = !hasEngine(g) ? `Победа ${colorGenitive(r.winner)}` : r.winner === humanColorOf(g) ? 'Победа твоя' : 'Победа Гоко';
   return r.reason === 'resign' ? `${who}: сдача` : `${who}: +${margin(r.margin ?? 0)}`;
 }
 
 export function statusText(g: GameState | null, thinking: boolean): string {
-  if (!g) return 'Партии нет: скажи «давай партию» или нажми «Новая партия»';
+  if (!g) return 'Партии нет: нажми «Новая партия» или попроси Гоко';
   if (g.status === 'finished') return resultText(g);
+  const n = g.moves.length + 1;
+  if (!hasEngine(g)) return `Ход ${n}, ходят ${colorName(g.toPlay)}`;
   const whose = g.toPlay === humanColorOf(g) ? 'твой ход' : thinking ? 'Гоко думает' : 'ход Гоко';
-  return `Ход ${g.moves.length + 1}, ${whose} (${colorName(g.toPlay)})`;
+  return `Ход ${n}, ${whose} (${colorName(g.toPlay)})`;
 }
 
 export const capturesText = (g: GameState): string => `Пленные: чёрные ${g.captures.B}, белые ${g.captures.W}`;
 
 export function rankText(g: GameState): string {
   const engine = seatColor(g.seats, 'engine');
-  const rank = engine ? g.seats[engine].rank : undefined;
+  if (!engine) return 'Два игрока';
+  const rank = g.seats[engine].rank;
   return rank ? `Гоко ${rank}` : 'Гоко';
 }
 ```
 
-- [ ] **Step 8: Тесты и typecheck зелёные**
+- [ ] **Step 8: `apps/web/src/prefs.ts`**
+
+```ts
+// Настройки телефона (D-0011): режим «Голос / Чат», цвет человека и ранг Гоко для «Новой партии».
+// Хранятся в localStorage. storage передаётся функцией: в Safari с запретом данных сайта исключение бросает
+// уже обращение к window.localStorage, а не только getItem/setItem. Любое исключение — работаем с умолчаниями.
+// Форы в NewGameRequest нет: выбор только цвета и ранга, коми и размер доски — от текущей партии.
+import { RANKS, Rank, type GameState, type NewGameRequest } from '@goko/protocol';
+
+export type Mode = 'voice' | 'chat';
+export type ColorChoice = 'black' | 'white' | 'random';
+export type Prefs = { mode: Mode; color: ColorChoice; rank: Rank };
+
+export const PREFS_KEY = 'goko.prefs';
+export const MODE_ATTRIBUTE = 'goko.mode';
+export const DEFAULT_PREFS: Prefs = { mode: 'voice', color: 'black', rank: '10k' };
+export const DEFAULT_KOMI = 7.5;
+
+const isMode = (v: unknown): v is Mode => v === 'voice' || v === 'chat';
+const isColor = (v: unknown): v is ColorChoice => v === 'black' || v === 'white' || v === 'random';
+const isRank = (v: unknown): v is Rank => Rank.safeParse(v).success;
+
+export function loadPrefs(storage: () => Pick<Storage, 'getItem'>): Prefs {
+  try {
+    const raw = storage().getItem(PREFS_KEY);
+    if (!raw) return { ...DEFAULT_PREFS };
+    const parsed: unknown = JSON.parse(raw);
+    const o = (typeof parsed === 'object' && parsed !== null ? parsed : {}) as { mode?: unknown; color?: unknown; rank?: unknown };
+    return {
+      mode: isMode(o.mode) ? o.mode : DEFAULT_PREFS.mode,
+      color: isColor(o.color) ? o.color : DEFAULT_PREFS.color,
+      rank: isRank(o.rank) ? o.rank : DEFAULT_PREFS.rank,
+    };
+  } catch {
+    return { ...DEFAULT_PREFS };
+  }
+}
+
+export function savePrefs(storage: () => Pick<Storage, 'setItem'>, prefs: Prefs): boolean {
+  try {
+    storage().setItem(PREFS_KEY, JSON.stringify(prefs));
+    return true;
+  } catch {
+    return false; // приватный режим или квота: выбор живёт до перезагрузки
+  }
+}
+
+// RANKS упорядочен от 20k к 9d: +1 — сильнее, -1 — слабее.
+export function stepRank(rank: Rank, delta: number): Rank {
+  const i = RANKS.indexOf(rank);
+  return RANKS[Math.max(0, Math.min(RANKS.length - 1, i + delta))] ?? rank;
+}
+
+export function newGameRequest(prefs: Prefs, current: GameState | null, random: () => number = Math.random): NewGameRequest {
+  const humanBlack = prefs.color === 'black' || (prefs.color === 'random' && random() < 0.5);
+  const human = { controller: 'human' as const };
+  const engine = { controller: 'engine' as const, rank: prefs.rank };
+  return {
+    black: humanBlack ? human : engine,
+    white: humanBlack ? engine : human,
+    settings: current ? { boardSize: current.settings.boardSize, komi: current.settings.komi } : { komi: DEFAULT_KOMI },
+    waitForReply: false, // ответ движка придёт событием
+  };
+}
+
+export const modeAttributes = (mode: Mode): Record<string, string> => ({ [MODE_ATTRIBUTE]: mode });
+```
+
+- [ ] **Step 9: `apps/web/src/chat.ts`**
+
+```ts
+// Режим «Чат» (D-0011): логика формы ввода без React и LiveKit. send — localParticipant.sendText в lk.chat;
+// своя строка добавляется в ленту здесь, потому что lk.chat отправителю не возвращается.
+import type { Line } from './transcript.ts';
+
+export const CHAT_MAX_CHARS = 500;
+
+export type ChatDeps = { send: (text: string) => Promise<unknown>; id: () => string };
+export type ChatResult = { draft: string; line: Line | null; error: string | null };
+
+export async function sendChat(draft: string, deps: ChatDeps): Promise<ChatResult> {
+  const text = draft.trim();
+  if (!text) return { draft: '', line: null, error: null };
+  if (text.length > CHAT_MAX_CHARS) return { draft, line: null, error: `слишком длинно: не больше ${CHAT_MAX_CHARS} знаков` };
+  try {
+    await deps.send(text);
+    return { draft: '', line: { id: deps.id(), who: 'me', text, final: true }, error: null };
+  } catch {
+    return { draft, line: null, error: 'не удалось отправить: нет связи с Гоко' };
+  }
+}
+
+// Агент в комнате и слушает: атрибут lk.agent.state выставляет RoomIO @livekit/agents 1.8
+// (initializing, idle, listening, thinking, speaking). До этого текст в lk.chat некому принять.
+export function agentReady(attrs: Readonly<Record<string, string>> | undefined): boolean {
+  const state = attrs?.['lk.agent.state'];
+  return state !== undefined && state !== 'initializing';
+}
+```
+
+- [ ] **Step 10: Тесты и typecheck зелёные**
 
 Run: `npx vitest run apps/web && npm run typecheck`
-Expected: все четыре файла тестов проходят; `tsc -p apps/web/tsconfig.json` без ошибок (пока в `src` только эти модули; `main.tsx` появится в Task 8).
+Expected: все шесть файлов тестов проходят; `tsc -p apps/web/tsconfig.json` без ошибок (пока в `src` только эти модули; `main.tsx` появится в Task 8). Тесты `prefs` и `chat` не трогают `window`: storage и отправка передаются функциями, vitest остаётся в окружении `node`.
 
-- [ ] **Step 9: Commit**
+- [ ] **Step 11: Commit**
 
 ```bash
-git add package.json package-lock.json apps/web/package.json apps/web/tsconfig.json apps/web/vite.config.ts apps/web/index.html apps/web/src/vite-env.d.ts apps/web/src/geometry.ts apps/web/src/geometry.test.ts apps/web/src/transcript.ts apps/web/src/transcript.test.ts apps/web/src/stream.ts apps/web/src/stream.test.ts apps/web/src/text.ts apps/web/src/text.test.ts
-git commit -m "web: каркас Vite, геометрия доски, лента, поток событий, тексты статуса"
+git add package.json package-lock.json apps/web/package.json apps/web/tsconfig.json apps/web/vite.config.ts apps/web/index.html apps/web/src/vite-env.d.ts apps/web/src/geometry.ts apps/web/src/geometry.test.ts apps/web/src/transcript.ts apps/web/src/transcript.test.ts apps/web/src/stream.ts apps/web/src/stream.test.ts apps/web/src/text.ts apps/web/src/text.test.ts apps/web/src/prefs.ts apps/web/src/prefs.test.ts apps/web/src/chat.ts apps/web/src/chat.test.ts
+git commit -m "web: каркас Vite, геометрия доски, лента без дублей, поток событий с «Повторить», тексты, настройки и чат"
 ```
 
 ---
@@ -2837,8 +3801,8 @@ git commit -m "web: каркас Vite, геометрия доски, лента
 - Create: `apps/web/src/api.ts`, `apps/web/src/hooks/useSession.ts`, `apps/web/src/hooks/useGame.ts`
 
 **Interfaces:**
-- Consumes: `createClient`, `CreateSessionResponse`, `GameState`, `NewGameRequest` из `@goko/protocol`; `Room`, `RoomEvent`, `Track` из `livekit-client`; `upsertLine`, `whoOf`, `lineId`, `Line` (Task 6); `streamEvents`; `describeError`, `humanColorOf`.
-- Produces: `client: GokoClient`; `useSession(): { session: Session | null; lines: Line[]; mic: MicState; error: string | null; clearError(): void; enableMic(): Promise<void>; reset(): void }`, `type MicState = 'off' | 'connecting' | 'on' | 'failed'`; `useGame(sessionId: string | null, onLost: () => void): { state: GameState | null; gameId: string | null; thinking: boolean; connected: boolean; message: string | null; play(coord): Promise<void>; pass(); resign(); undo(); newGame() }`; `DEFAULT_NEW_GAME: NewGameRequest`.
+- Consumes: `createClient`, `CreateSessionResponse`, `GameState`, `humanText` из `@goko/protocol`; `Room`, `RoomEvent`, `Track` из `livekit-client` 2.22 (`Room.connect`, `Room.startAudio`, `Room.disconnect`, `Room.registerTextStreamHandler`, `Room.remoteParticipants`, `LocalParticipant.setMicrophoneEnabled`, `LocalParticipant.setAttributes`, `LocalParticipant.sendText(text, { topic })`, `Participant.getTrackPublications()`, `RemoteTrackPublication.setSubscribed`, `Track.attach/detach`, `TextStreamReader.readAll()`); из Task 6: `upsertLine`, `whoOf`, `lineId`, `acceptLine`, `Line`, `streamEvents`, `StreamHandle`, `needsRetry`, `describeError`, `hasEngine`, `humanColorOf`, `loadPrefs`, `savePrefs`, `modeAttributes`, `newGameRequest`, `Prefs`, `Mode`, `sendChat`, `agentReady`.
+- Produces: `client: GokoClient`; `useSession(): { session: Session | null; lines: Line[]; mic: MicState; link: LinkState; agent: boolean; prefs: Prefs; error: string | null; clearError(): void; activate(): Promise<void>; enableMic(): Promise<void>; setMode(mode: Mode): Promise<void>; updatePrefs(patch: Partial<Prefs>): void; sendText(draft: string): Promise<string>; reset(): void }`, `type MicState = 'off' | 'connecting' | 'on' | 'failed'`, `type LinkState = 'idle' | 'connecting' | 'connected' | 'failed'`; `useGame(sessionId: string | null, onLost: () => void): { state: GameState | null; gameId: string | null; thinking: boolean; connected: boolean; retry: boolean; message: string | null; play(coord): Promise<void>; pass(); resign(); undo(); newGame(prefs: Prefs): Promise<void>; reopen(): void }`.
 
 - [ ] **Step 1: `apps/web/src/api.ts`**
 
@@ -2854,19 +3818,35 @@ export const client = createClient({
 
 - [ ] **Step 2: `apps/web/src/hooks/useSession.ts`**
 
+Как устроено (D-0001, D-0008, D-0011):
+
+- Сессию создаёт `POST /api/sessions`; комнату с диспетчеризацией агента создаёт сервер там же. Веб комнат не создаёт: только `room.connect(url, token)` по токену из ответа. Ответ хранится в `sessionStorage`, чтобы перезагрузка страницы не плодила сессии.
+- В комнату страница входит по первому касанию в любом месте (`activate`, вызывает `App`): `room.startAudio()` на iOS работает только из жеста, а агент открывает Realtime только после входа телефона. В «Голосе» тот же жест включает микрофон; кнопка «Микрофон» остаётся для повтора после отказа.
+- Режим: сразу после входа и при каждом переключении — `localParticipant.setAttributes({ 'goko.mode': mode })`. Для этого токену нужно право `canUpdateOwnMetadata` (задача 5, шаг 1). Отказ атрибута не ломает страницу: в «Чате» веб всё равно отписывается от аудиотрека агента (запасной путь D-0011), а микрофон выключен.
+- «Чат»: `setMicrophoneEnabled(false)`, аудиотреки агента `setSubscribed(false)`; текст — `sendText(text, { topic: 'lk.chat' })`, своя строка добавляется в ленту сразу. «Голос»: подписка обратно, `TrackSubscribed` прикрепляет `<audio>`, микрофон включается.
+- Лента: реплику Гоко переписываем по сегменту с каждым куском, реплику человека добавляем один раз — финальный сегмент (`acceptLine`).
+- `agent` — в комнате есть участник с атрибутом `lk.agent.state` не `initializing` (`agentReady`); пересчитывается по событиям входа, выхода и смены атрибутов, аргументы событий не используются.
+- Токен LiveKit живёт TTL сессии от её создания (D-0008) и может истечь раньше продлённой сессии. Если вход в комнату не удался, страница забывает сохранённую сессию: партия продолжается тапами, а перезагрузка страницы создаст новую сессию с новым токеном.
+
 ```ts
-// Сессия Гоко на телефоне: создание через game-server (хранится в sessionStorage, чтобы перезагрузка страницы
-// не плодила сессии), комната LiveKit по токену сессии, микрофон по первому касанию, лента транскриптов.
+// Сессия Гоко на телефоне: сессия через game-server (sessionStorage), комната LiveKit по её токену, режим
+// «Голос / Чат» атрибутом goko.mode, микрофон, чат и лента диалога. Комнат страница не создаёт (D-0001).
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Room, RoomEvent, Track } from 'livekit-client';
 import { CreateSessionResponse } from '@goko/protocol';
 import { client } from '../api.ts';
+import { agentReady, sendChat } from '../chat.ts';
+import { type Mode, type Prefs, loadPrefs, modeAttributes, savePrefs } from '../prefs.ts';
 import { describeError } from '../text.ts';
-import { type Line, lineId, upsertLine, whoOf } from '../transcript.ts';
+import { type Line, acceptLine, lineId, upsertLine, whoOf } from '../transcript.ts';
 
 const STORAGE_KEY = 'goko.session';
 
 export type MicState = 'off' | 'connecting' | 'on' | 'failed';
+export type LinkState = 'idle' | 'connecting' | 'connected' | 'failed';
+
+// Функцией: в Safari с запретом данных сайта исключение бросает уже обращение к localStorage (prefs.ts ловит).
+const local = () => localStorage;
 
 function loadStored(): CreateSessionResponse | null {
   try {
@@ -2888,13 +3868,32 @@ function saveStored(res: CreateSessionResponse | null) {
   }
 }
 
+function setRemoteAudio(room: Room, on: boolean) {
+  for (const p of room.remoteParticipants.values()) {
+    for (const pub of p.getTrackPublications()) {
+      if (pub.kind === Track.Kind.Audio) pub.setSubscribed(on);
+    }
+  }
+}
+
+const chatLineId = () => `chat-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+
 export function useSession() {
   const [info, setInfo] = useState<CreateSessionResponse | null>(loadStored);
   const [error, setError] = useState<string | null>(null);
   const [lines, setLines] = useState<Line[]>([]);
   const [mic, setMic] = useState<MicState>('off');
+  const [link, setLink] = useState<LinkState>('idle');
+  const [agent, setAgent] = useState(false);
+  const [prefs, setPrefs] = useState<Prefs>(() => loadPrefs(local));
+  const modeRef = useRef<Mode>(prefs.mode);
   const roomRef = useRef<Room | null>(null);
+  const joining = useRef<Promise<Room | null> | null>(null);
   const creating = useRef(false);
+
+  useEffect(() => {
+    savePrefs(local, prefs);
+  }, [prefs]);
 
   useEffect(() => {
     if (info || creating.current) return;
@@ -2914,25 +3913,50 @@ export function useSession() {
   // Сессия истекла на сервере (SSE ответил not_found): комната тоже мертва — отключаемся и создаём новую.
   const reset = useCallback(() => {
     saveStored(null);
-    void roomRef.current?.disconnect();
+    const room = roomRef.current;
     roomRef.current = null;
+    joining.current = null;
+    void room?.disconnect();
     setMic('off');
+    setLink('idle');
+    setAgent(false);
     setLines([]);
     setInfo(null);
   }, []);
 
-  const enableMic = useCallback(async () => {
-    if (!info || roomRef.current) return;
-    setMic('connecting');
+  const sendMode = useCallback(async (room: Room, mode: Mode) => {
+    try {
+      await room.localParticipant.setAttributes(modeAttributes(mode));
+    } catch (e) {
+      // Нет права canUpdateOwnMetadata или сервер не ответил: агент останется в прежнем режиме.
+      console.warn('[!] web: не удалось выставить goko.mode', e);
+    }
+  }, []);
+
+  // Вход в комнату, идемпотентный: повторные касания получают тот же промис.
+  const connect = useCallback((): Promise<Room | null> => {
+    if (!info) return Promise.resolve(null);
+    if (joining.current) return joining.current;
     const room = new Room();
-    roomRef.current = room;
     const audioHost = document.getElementById('audio') ?? document.body;
-    room.on(RoomEvent.TrackSubscribed, (track) => {
-      if (track.kind === Track.Kind.Audio) audioHost.appendChild(track.attach());
+    const refreshAgent = () => setAgent([...room.remoteParticipants.values()].some((p) => agentReady(p.attributes)));
+    room.on(RoomEvent.TrackSubscribed, (track, publication) => {
+      if (track.kind !== Track.Kind.Audio) return;
+      if (modeRef.current === 'voice') audioHost.appendChild(track.attach());
+      else publication.setSubscribed(false); // «Чат»: звук агента не принимаем (запасной путь D-0011)
     });
+    room.on(RoomEvent.TrackUnsubscribed, (track) => {
+      for (const el of track.detach()) el.remove();
+    });
+    room.on(RoomEvent.ParticipantConnected, refreshAgent);
+    room.on(RoomEvent.ParticipantDisconnected, refreshAgent);
+    room.on(RoomEvent.ParticipantAttributesChanged, refreshAgent);
     room.on(RoomEvent.Disconnected, () => {
-      roomRef.current = null;
+      if (roomRef.current === room) roomRef.current = null;
+      joining.current = null;
+      setLink('idle');
       setMic('off');
+      setAgent(false);
     });
     // Регистрировать до connect: первые реплики агента приходят сразу после входа.
     room.registerTextStreamHandler('lk.transcription', async (reader, participant) => {
@@ -2940,37 +3964,128 @@ export function useSession() {
       const id = lineId(attrs, reader.info.id);
       const mySids = new Set(room.localParticipant.getTrackPublications().map((p) => p.trackSid));
       const who = whoOf(attrs, mySids, participant?.identity ?? '', room.localParticipant.identity);
+      if (who === 'me') {
+        // Человек: промежуточные результаты STT — отдельные закрытые потоки того же сегмента; берём только финал.
+        const text = await reader.readAll();
+        if (acceptLine(attrs, who) && text.trim()) setLines((ls) => upsertLine(ls, { id, who, text, final: true }));
+        return;
+      }
+      // Гоко: дельта-поток, lk.transcription_final у него навсегда 'false' (agents 1.8.0) — финал = дочитанный поток.
       let text = '';
       for await (const chunk of reader) {
         text += chunk;
         setLines((ls) => upsertLine(ls, { id, who, text, final: false }));
       }
-      // Атрибут lk.transcription_final здесь не читаем вовсе: у дельта-потока агента он
-      // навсегда 'false' (agents 1.8.0), и строка никогда не перестала бы мигать, а у человека
-      // промежуточный кусок — это отдельный уже закрытый поток. Единица реплики — lk.segment_id:
-      // строка ленты живёт по нему (lineId), и следующий кусок того же сегмента перепишет её
-      // целиком, а не добавит растущий дубль. Следствие: у человека промежуточный кусок на
-      // мгновение выставляет final: true, строка теряет класс line-partial до следующего куска —
-      // косметика, чинить не нужно.
       setLines((ls) => upsertLine(ls, { id, who, text, final: true }));
     });
+    setLink('connecting');
+    const joined = (async (): Promise<Room | null> => {
+      try {
+        await room.connect(info.livekit.url, info.livekit.token);
+        await room.startAudio(); // iOS: воспроизведение только после жеста пользователя
+        roomRef.current = room;
+        await sendMode(room, modeRef.current);
+        setLink('connected');
+        refreshAgent();
+        return room;
+      } catch (e) {
+        console.warn('[!] web: вход в комнату не удался', e);
+        joining.current = null;
+        void room.disconnect();
+        // Токен мог истечь раньше продлённой сессии (D-0008): перезагрузка страницы создаст новую.
+        saveStored(null);
+        setLink('failed');
+        setError('нет связи с Гоко: доска работает тапами, перезагрузи страницу, чтобы подключиться заново');
+        return null;
+      }
+    })();
+    joining.current = joined;
+    return joined;
+  }, [info, sendMode]);
+
+  const enableMic = useCallback(async () => {
+    const room = await connect();
+    if (!room || modeRef.current !== 'voice') return;
+    setMic('connecting');
     try {
-      await room.connect(info.livekit.url, info.livekit.token);
-      await room.startAudio(); // iOS: воспроизведение только после жеста пользователя
       await room.localParticipant.setMicrophoneEnabled(true);
       setMic('on');
-    } catch (e) {
+    } catch {
       setMic('failed');
-      setError(describeError(e) === 'нет связи с сервером' ? 'не удалось подключить микрофон' : describeError(e));
-      roomRef.current = null;
+      setError('не удалось включить микрофон: разреши его в браузере или переключись на «Чат»');
     }
-  }, [info]);
+  }, [connect]);
+
+  // Первое касание страницы: вход в комнату; в «Голосе» — ещё и микрофон.
+  const activate = useCallback(async () => {
+    if (modeRef.current === 'voice') await enableMic();
+    else await connect();
+  }, [connect, enableMic]);
+
+  const setMode = useCallback(
+    async (mode: Mode) => {
+      modeRef.current = mode;
+      setPrefs((p) => ({ ...p, mode }));
+      const room = await connect();
+      if (!room) return;
+      await sendMode(room, mode);
+      if (mode === 'chat') {
+        try {
+          await room.localParticipant.setMicrophoneEnabled(false);
+        } catch {
+          // микрофона и не было
+        }
+        setMic('off');
+        setRemoteAudio(room, false);
+      } else {
+        setRemoteAudio(room, true);
+        await enableMic();
+      }
+    },
+    [connect, sendMode, enableMic],
+  );
+
+  const updatePrefs = useCallback((patch: Partial<Prefs>) => setPrefs((p) => ({ ...p, ...patch })), []);
+
+  // Отправка из поля ввода «Чата». Возвращает, что оставить в поле: '' после успеха, черновик при ошибке.
+  const sendText = useCallback(
+    async (draft: string): Promise<string> => {
+      const room = await connect();
+      if (!room) return draft;
+      const res = await sendChat(draft, {
+        send: (text) => room.localParticipant.sendText(text, { topic: 'lk.chat' }),
+        id: chatLineId,
+      });
+      const line = res.line;
+      if (line) setLines((ls) => upsertLine(ls, line));
+      if (res.error) setError(res.error);
+      return res.draft;
+    },
+    [connect],
+  );
 
   const clearError = useCallback(() => setError(null), []);
 
-  return { session: info?.session ?? null, lines, mic, error, clearError, enableMic, reset };
+  return {
+    session: info?.session ?? null,
+    lines,
+    mic,
+    link,
+    agent,
+    prefs,
+    error,
+    clearError,
+    activate,
+    enableMic,
+    setMode,
+    updatePrefs,
+    sendText,
+    reset,
+  };
 }
 ```
+
+`[!]` Сверить с установленной `livekit-client` 2.22 на шаге 4 (typecheck). По документации (context7, `/livekit/client-sdk-js`) подтверждены `setAttributes`, `sendText(text, { topic })`, `registerTextStreamHandler`, `setMicrophoneEnabled`, `startAudio`, `RemoteTrackPublication.setSubscribed`, `RoomEvent.TrackSubscribed`. Не подтверждены сигнатура `RoomEvent.ParticipantAttributesChanged` и `TextStreamReader.readAll()`: код не читает аргументы события, а если `readAll` нет — дочитать поток циклом `for await` и склеить куски. Если `getTrackPublications()` у участника называется иначе — взять публикации из `trackPublications` (Map). Если `setSubscribed(false)` на треке агента не сработает, запасной путь второго уровня — не прикреплять `<audio>` в «Чате» и при переключении снимать уже прикреплённые элементы (`track.detach()`): звук тогда приходит, но не играет.
 
 - [ ] **Step 3: `apps/web/src/hooks/useGame.ts`**
 
@@ -2978,16 +4093,11 @@ export function useSession() {
 // Партия на экране: состояние из SSE сессии, действия тапами через тот же протокол, что и голос.
 // Проверка «чей ход» — только по полям состояния; правил го здесь нет.
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { GameState, NewGameRequest } from '@goko/protocol';
+import { type GameState, humanText } from '@goko/protocol';
 import { client } from '../api.ts';
-import { streamEvents } from '../stream.ts';
-import { describeError, humanColorOf } from '../text.ts';
-
-export const DEFAULT_NEW_GAME: NewGameRequest = {
-  black: { controller: 'human' },
-  white: { controller: 'engine', rank: '10k' },
-  settings: { komi: 7.5 },
-};
+import { type Prefs, newGameRequest } from '../prefs.ts';
+import { type StreamHandle, needsRetry, streamEvents } from '../stream.ts';
+import { describeError, hasEngine, humanColorOf } from '../text.ts';
 
 const MESSAGE_MS = 3000;
 
@@ -2996,8 +4106,10 @@ export function useGame(sessionId: string | null, onLost: () => void) {
   const [gameId, setGameId] = useState<string | null>(null);
   const [thinking, setThinking] = useState(false);
   const [connected, setConnected] = useState(false);
+  const [retry, setRetry] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const stream = useRef<StreamHandle | null>(null);
 
   const flash = useCallback((text: string) => {
     setMessage(text);
@@ -3008,10 +4120,11 @@ export function useGame(sessionId: string | null, onLost: () => void) {
   useEffect(() => {
     if (!sessionId) return;
     const abort = new AbortController();
-    void streamEvents(client, sessionId, abort.signal, {
+    stream.current = streamEvents(client, sessionId, abort.signal, {
       onConnected: setConnected,
       onLost,
       onEvent: (ev) => {
+        setRetry((r) => needsRetry(r, ev));
         switch (ev.type) {
           case 'session.game':
             setGameId(ev.gameId);
@@ -3029,13 +4142,22 @@ export function useGame(sessionId: string | null, onLost: () => void) {
             break;
           case 'error':
             setThinking(false);
-            flash(humanText(ev.code));
+            flash(humanText(ev.code)); // message события — английский текст для логов (D-0007)
             break;
         }
       },
     });
-    return () => abort.abort();
+    return () => {
+      abort.abort();
+      stream.current = null;
+    };
   }, [sessionId, onLost, flash]);
+
+  // «Повторить» (D-0006): переоткрытие потока сессии заново запускает серию повторов сервера.
+  const reopen = useCallback(() => {
+    setRetry(false);
+    stream.current?.reopen();
+  }, []);
 
   const guard = useCallback((): string | null => {
     if (!gameId || !state) return 'партии ещё нет';
@@ -3043,20 +4165,21 @@ export function useGame(sessionId: string | null, onLost: () => void) {
     return null;
   }, [gameId, state]);
 
-  const humanTurn = Boolean(state && state.status === 'playing' && state.toPlay === humanColorOf(state) && !state.pendingEngineMove);
+  // Ход человека — место того, чей черёд, у человека (в партии двух людей — всегда, D-0005).
+  const humanTurn = Boolean(state && state.status === 'playing' && state.seats[state.toPlay].controller === 'human' && !state.pendingEngineMove);
 
   const act = useCallback(
     async (fn: () => Promise<unknown>, needTurn: boolean) => {
       const g = guard();
       if (g) return flash(g);
-      if (needTurn && !humanTurn) return flash('сейчас ход Гоко');
+      if (needTurn && !humanTurn) return flash(state && hasEngine(state) ? 'сейчас ход Гоко' : 'сейчас не твой ход');
       try {
         await fn();
       } catch (e) {
         flash(describeError(e));
       }
     },
-    [guard, humanTurn, flash],
+    [guard, humanTurn, state, flash],
   );
 
   const play = useCallback(
@@ -3067,34 +4190,34 @@ export function useGame(sessionId: string | null, onLost: () => void) {
   const undo = useCallback(() => act(() => client.undo(gameId!, { via: 'tap' }), false), [act, gameId]);
   const resign = useCallback(() => act(() => client.resign(gameId!, { color: humanColorOf(state!), via: 'tap' }), false), [act, gameId, state]);
 
-  // «Новая партия» — с настройками текущей (цвета, ранг, коми), иначе по умолчанию. Ответ движка ждать не надо:
-  // придёт событием, а Гоко прокомментирует новую партию сам (session.game + state.updated/new).
-  const newGame = useCallback(async () => {
-    if (!sessionId) return;
-    const req: NewGameRequest = state
-      ? { black: state.seats.B, white: state.seats.W, settings: { boardSize: state.settings.boardSize, komi: state.settings.komi } }
-      : DEFAULT_NEW_GAME;
-    try {
-      await client.newGame(sessionId, { ...req, waitForReply: false });
-    } catch (e) {
-      flash(describeError(e));
-    }
-  }, [sessionId, state, flash]);
+  // «Новая партия» — цвет и ранг из выбора на экране (prefs), размер доски и коми от текущей партии.
+  // Ответ движка ждать не надо: придёт событием, а Гоко прокомментирует новую партию сам.
+  const newGame = useCallback(
+    async (prefs: Prefs) => {
+      if (!sessionId) return;
+      try {
+        await client.newGame(sessionId, newGameRequest(prefs, state));
+      } catch (e) {
+        flash(describeError(e));
+      }
+    },
+    [sessionId, state, flash],
+  );
 
-  return { state, gameId, thinking, connected, message, play, pass, undo, resign, newGame };
+  return { state, gameId, thinking, connected, retry, message, play, pass, undo, resign, newGame, reopen };
 }
 ```
 
 - [ ] **Step 4: Typecheck**
 
 Run: `npm run typecheck`
-Expected: без ошибок. Если у `livekit-client` 2.22 метод `getTrackPublications()` называется иначе — взять список публикаций локального участника из типа `LocalParticipant` (нужны `trackSid` аудиотреков).
+Expected: без ошибок. Расхождения с установленной `livekit-client` — по примечанию к шагу 2; тексты и логику страницы не менять.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add apps/web/src/api.ts apps/web/src/hooks/useSession.ts apps/web/src/hooks/useGame.ts
-git commit -m "web: клиент протокола, useSession (комната, микрофон, лента), useGame (SSE, действия тапами)"
+git commit -m "web: клиент протокола, useSession (комната, режим Голос/Чат, микрофон, чат, лента), useGame (SSE, «Повторить», тапы)"
 ```
 
 ---
@@ -3102,11 +4225,11 @@ git commit -m "web: клиент протокола, useSession (комната,
 ### Task 8: `web` — компоненты, страница, стили, проверка в браузере
 
 **Files:**
-- Create: `apps/web/src/components/Board.tsx`, `apps/web/src/components/Transcript.tsx`, `apps/web/src/components/StatusBar.tsx`, `apps/web/src/components/Controls.tsx`, `apps/web/src/App.tsx`, `apps/web/src/main.tsx`, `apps/web/src/styles.css`
+- Create: `apps/web/src/components/Board.tsx`, `apps/web/src/components/Transcript.tsx`, `apps/web/src/components/StatusBar.tsx`, `apps/web/src/components/Controls.tsx`, `apps/web/src/components/ModeSwitch.tsx`, `apps/web/src/components/NewGame.tsx`, `apps/web/src/components/ChatInput.tsx`, `apps/web/src/App.tsx`, `apps/web/src/main.tsx`, `apps/web/src/styles.css`
 
 **Interfaces:**
-- Consumes: `geometry.ts`, `transcript.ts`, `text.ts`, хуки Task 7; `parseCoord` из `@goko/go-core`; `GameState` из `@goko/protocol`.
-- Produces: `Board({ state, size, onTap })`, `Transcript({ lines })`, `StatusBar({ state, thinking, message, connected })`, `Controls({ mic, canAct, onMic, onPass, onResign, onUndo, onNewGame })`, `App()`; сборка `npm run build:web` → `apps/web/dist`.
+- Consumes: `geometry.ts`, `transcript.ts`, `text.ts`, `prefs.ts` (`Mode`, `Prefs`, `ColorChoice`, `stepRank`), `chat.ts` (`CHAT_MAX_CHARS`), хуки Task 7; `COLUMN_LETTERS`, `parseCoord` из `@goko/go-core`; `GameState` из `@goko/protocol`.
+- Produces: `Board({ state, size, onTap })`, `Transcript({ lines, mode })`, `StatusBar({ state, thinking, message, connected, retry, onRetry })`, `Controls({ mode, mic, canAct, onMic, onPass, onResign, onUndo })`, `ModeSwitch({ mode, onChange })`, `NewGame({ prefs, onChange, onStart })`, `ChatInput({ ready, onSend })`, `App()`; сборка `npm run build:web` → `apps/web/dist`.
 
 - [ ] **Step 1: `apps/web/src/components/Board.tsx`**
 
@@ -3189,14 +4312,20 @@ export function Board({ state, size, onTap }: Props) {
 }
 ```
 
-- [ ] **Step 2: `apps/web/src/components/Transcript.tsx`, `StatusBar.tsx`, `Controls.tsx`**
+- [ ] **Step 2: `apps/web/src/components/Transcript.tsx`, `StatusBar.tsx`, `Controls.tsx`, `ModeSwitch.tsx`, `NewGame.tsx`, `ChatInput.tsx`**
 
 ```tsx
-// Transcript.tsx — лента реплик обеих сторон, автопрокрутка к последней.
+// Transcript.tsx — диалог «Ты / Гоко» (D-0011): реплики агента, финальные реплики человека и свои строки чата.
 import { useEffect, useRef } from 'react';
+import type { Mode } from '../prefs.ts';
 import type { Line } from '../transcript.ts';
 
-export function Transcript({ lines }: { lines: Line[] }) {
+const EMPTY: Record<Mode, string> = {
+  voice: 'Здесь будет диалог с Гоко. Коснись экрана и скажи «давай партию».',
+  chat: 'Здесь будет диалог с Гоко. Напиши ему внизу, например «давай партию».',
+};
+
+export function Transcript({ lines, mode }: { lines: Line[]; mode: Mode }) {
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const el = ref.current;
@@ -3204,7 +4333,7 @@ export function Transcript({ lines }: { lines: Line[] }) {
   }, [lines]);
   return (
     <div ref={ref} className="transcript" aria-live="polite">
-      {lines.length === 0 && <p className="muted">Лента диалога появится после включения микрофона.</p>}
+      {lines.length === 0 && <p className="muted">{EMPTY[mode]}</p>}
       {lines.map((l) => (
         <p key={l.id} className={`line line-${l.who}${l.final ? '' : ' line-partial'}`}>
           <span className="who">{l.who === 'me' ? 'Ты' : 'Гоко'}</span> {l.text}
@@ -3216,16 +4345,24 @@ export function Transcript({ lines }: { lines: Line[] }) {
 ```
 
 ```tsx
-// StatusBar.tsx — чей ход, номер хода, ранг, пленные; при finished — результат; сообщения на 3 с.
+// StatusBar.tsx — чей ход, номер хода, ранг, пленные; при finished — результат; сообщения на 3 с;
+// «Повторить» после retries_exhausted (D-0006): переоткрывает поток сессии.
 import type { GameState } from '@goko/protocol';
 import { capturesText, rankText, statusText } from '../text.ts';
 
-type Props = { state: GameState | null; thinking: boolean; message: string | null; connected: boolean };
+type Props = { state: GameState | null; thinking: boolean; message: string | null; connected: boolean; retry: boolean; onRetry: () => void };
 
-export function StatusBar({ state, thinking, message, connected }: Props) {
+export function StatusBar({ state, thinking, message, connected, retry, onRetry }: Props) {
   return (
     <div className="status">
-      <div className="status-main">{message ?? statusText(state, thinking)}</div>
+      <div className="status-row">
+        <div className="status-main">{message ?? statusText(state, thinking)}</div>
+        {retry && (
+          <button type="button" className="btn btn-inline btn-accent" onClick={onRetry}>
+            Повторить
+          </button>
+        )}
+      </div>
       <div className="status-sub muted">
         {state ? `${rankText(state)} · ${capturesText(state)}` : ''}
         {!connected && state ? ' · нет связи, переподключаюсь' : ''}
@@ -3236,23 +4373,25 @@ export function StatusBar({ state, thinking, message, connected }: Props) {
 ```
 
 ```tsx
-// Controls.tsx — «Микрофон» крупно (первое касание: разрешение и startAudio), остальные мелко. Цели ≥ 44 px.
+// Controls.tsx — «Микрофон» крупно, только в «Голосе» (повтор после отказа; первое касание страницы включает его само),
+// остальные мелко. Цели ≥ 44 px.
 import { useEffect, useState } from 'react';
 import type { MicState } from '../hooks/useSession.ts';
+import type { Mode } from '../prefs.ts';
 
 type Props = {
+  mode: Mode;
   mic: MicState;
   canAct: boolean;
   onMic: () => void;
   onPass: () => void;
   onResign: () => void;
   onUndo: () => void;
-  onNewGame: () => void;
 };
 
 const MIC_LABEL: Record<MicState, string> = { off: 'Микрофон', connecting: 'Подключаю…', on: 'Микрофон включён', failed: 'Микрофон: ещё раз' };
 
-export function Controls({ mic, canAct, onMic, onPass, onResign, onUndo, onNewGame }: Props) {
+export function Controls({ mode, mic, canAct, onMic, onPass, onResign, onUndo }: Props) {
   const [armed, setArmed] = useState(false); // «Сдаться» — двумя касаниями за 3 с
   useEffect(() => {
     if (!armed) return;
@@ -3266,16 +4405,144 @@ export function Controls({ mic, canAct, onMic, onPass, onResign, onUndo, onNewGa
   };
   return (
     <div className="controls">
-      <button className="btn btn-mic" onClick={onMic} disabled={mic === 'connecting' || mic === 'on'}>
-        {MIC_LABEL[mic]}
-      </button>
+      {mode === 'voice' && (
+        <button type="button" className="btn btn-mic" onClick={onMic} disabled={mic === 'connecting' || mic === 'on'}>
+          {MIC_LABEL[mic]}
+        </button>
+      )}
       <div className="controls-row">
-        <button className="btn" onClick={onPass} disabled={!canAct}>Пас</button>
-        <button className="btn" onClick={resign} disabled={!canAct}>{armed ? 'Точно?' : 'Сдаться'}</button>
-        <button className="btn" onClick={onUndo} disabled={!canAct}>Отменить</button>
-        <button className="btn" onClick={onNewGame}>Новая партия</button>
+        <button type="button" className="btn" onClick={onPass} disabled={!canAct}>Пас</button>
+        <button type="button" className="btn" onClick={resign} disabled={!canAct}>{armed ? 'Точно?' : 'Сдаться'}</button>
+        <button type="button" className="btn" onClick={onUndo} disabled={!canAct}>Отменить</button>
       </div>
     </div>
+  );
+}
+```
+
+```tsx
+// ModeSwitch.tsx — «Голос / Чат» (D-0011). Выбор хранит prefs.ts, атрибут goko.mode выставляет useSession.
+import type { Mode } from '../prefs.ts';
+
+const MODES: Array<[Mode, string]> = [
+  ['voice', 'Голос'],
+  ['chat', 'Чат'],
+];
+
+export function ModeSwitch({ mode, onChange }: { mode: Mode; onChange: (mode: Mode) => void }) {
+  return (
+    <div className="seg mode-switch" role="group" aria-label="режим">
+      {MODES.map(([m, label]) => (
+        <button key={m} type="button" className="btn seg-btn" aria-pressed={m === mode} onClick={() => m !== mode && onChange(m)}>
+          {label}
+        </button>
+      ))}
+    </div>
+  );
+}
+```
+
+```tsx
+// NewGame.tsx — «Новая партия» (D-0011): перед стартом цвет человека и ранг Гоко тапом, выбор помнится (prefs.ts).
+// Форы в NewGameRequest нет, поэтому здесь только цвет и ранг.
+import { useState } from 'react';
+import { type ColorChoice, type Prefs, stepRank } from '../prefs.ts';
+
+type Props = { prefs: Prefs; onChange: (patch: Partial<Prefs>) => void; onStart: () => void };
+
+const COLORS: Array<[ColorChoice, string]> = [
+  ['black', 'Чёрные'],
+  ['white', 'Белые'],
+  ['random', 'Случайно'],
+];
+
+export function NewGame({ prefs, onChange, onStart }: Props) {
+  const [open, setOpen] = useState(false);
+  if (!open) {
+    return (
+      <button type="button" className="btn" onClick={() => setOpen(true)}>
+        Новая партия
+      </button>
+    );
+  }
+  return (
+    <div className="newgame">
+      <div className="muted">Ты играешь</div>
+      <div className="seg" role="group" aria-label="цвет">
+        {COLORS.map(([c, label]) => (
+          <button key={c} type="button" className="btn seg-btn" aria-pressed={prefs.color === c} onClick={() => onChange({ color: c })}>
+            {label}
+          </button>
+        ))}
+      </div>
+      <div className="muted">Уровень Гоко</div>
+      <div className="rank-row">
+        <button type="button" className="btn btn-square" aria-label="слабее" disabled={prefs.rank === '20k'} onClick={() => onChange({ rank: stepRank(prefs.rank, -1) })}>
+          −
+        </button>
+        <div className="rank-value">{prefs.rank}</div>
+        <button type="button" className="btn btn-square" aria-label="сильнее" disabled={prefs.rank === '9d'} onClick={() => onChange({ rank: stepRank(prefs.rank, 1) })}>
+          +
+        </button>
+      </div>
+      <div className="controls-row">
+        <button type="button" className="btn" onClick={() => setOpen(false)}>
+          Отмена
+        </button>
+        <button
+          type="button"
+          className="btn btn-accent"
+          onClick={() => {
+            setOpen(false);
+            onStart();
+          }}
+        >
+          Начать
+        </button>
+      </div>
+    </div>
+  );
+}
+```
+
+```tsx
+// ChatInput.tsx — поле ввода «Чата» (D-0011): Enter или «Отправить» -> lk.chat через useSession.sendText.
+// Логика отправки и её тесты — chat.ts; до готовности агента кнопка выключена.
+import { useState } from 'react';
+import type { FormEvent } from 'react';
+import { CHAT_MAX_CHARS } from '../chat.ts';
+
+type Props = { ready: boolean; onSend: (draft: string) => Promise<string> };
+
+export function ChatInput({ ready, onSend }: Props) {
+  const [draft, setDraft] = useState('');
+  const [busy, setBusy] = useState(false);
+  const submit = async (e: FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    if (busy || !ready) return;
+    setBusy(true);
+    try {
+      setDraft(await onSend(draft));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <form className="chat-input" onSubmit={(e) => void submit(e)}>
+      <input
+        className="chat-field"
+        value={draft}
+        readOnly={busy}
+        maxLength={CHAT_MAX_CHARS}
+        enterKeyHint="send"
+        aria-label="сообщение Гоко"
+        placeholder={ready ? 'Напиши Гоко' : 'Гоко подключается…'}
+        onChange={(e) => setDraft(e.target.value)}
+      />
+      <button type="submit" className="btn btn-inline btn-accent" disabled={!ready || busy || !draft.trim()}>
+        Отправить
+      </button>
+    </form>
   );
 }
 ```
@@ -3283,9 +4550,15 @@ export function Controls({ mic, canAct, onMic, onPass, onResign, onUndo, onNewGa
 - [ ] **Step 3: `apps/web/src/App.tsx`, `apps/web/src/main.tsx`, `apps/web/src/styles.css`**
 
 ```tsx
-// App.tsx — одна страница: статус, доска, кнопки, лента. Без агента в комнате всё, кроме ленты, работает тапами.
+// App.tsx — одна страница: режим, статус, доска, кнопки, новая партия, лента, поле чата.
+// Без агента в комнате всё, кроме ленты и чата, работает тапами.
+import { useRef } from 'react';
+import type { PointerEvent } from 'react';
 import { Board } from './components/Board.tsx';
+import { ChatInput } from './components/ChatInput.tsx';
 import { Controls } from './components/Controls.tsx';
+import { ModeSwitch } from './components/ModeSwitch.tsx';
+import { NewGame } from './components/NewGame.tsx';
 import { StatusBar } from './components/StatusBar.tsx';
 import { Transcript } from './components/Transcript.tsx';
 import { useGame } from './hooks/useGame.ts';
@@ -3295,20 +4568,36 @@ export function App() {
   const s = useSession();
   const g = useGame(s.session?.id ?? null, s.reset);
   const size = g.state?.settings.boardSize ?? 13;
+  const activated = useRef(false);
+
+  // Первое касание страницы: вход в комнату (startAudio на iOS — только из жеста), в «Голосе» ещё и микрофон.
+  // Касание переключателя режима не считается: setMode сам входит в комнату и включает нужное.
+  const onFirstTouch = (e: PointerEvent<HTMLDivElement>) => {
+    if (activated.current || !s.session) return;
+    if (e.target instanceof Element && e.target.closest('.mode-switch')) return;
+    activated.current = true;
+    void s.activate();
+  };
+
   return (
-    <div className="app">
-      <StatusBar state={g.state} thinking={g.thinking} message={g.message ?? s.error} connected={g.connected} />
+    <div className="app" onPointerDownCapture={onFirstTouch}>
+      <div className="top-row">
+        <ModeSwitch mode={s.prefs.mode} onChange={(m) => void s.setMode(m)} />
+      </div>
+      <StatusBar state={g.state} thinking={g.thinking} message={g.message ?? s.error} connected={g.connected} retry={g.retry} onRetry={g.reopen} />
       <Board state={g.state} size={size} onTap={(coord) => void g.play(coord)} />
       <Controls
+        mode={s.prefs.mode}
         mic={s.mic}
         canAct={g.state?.status === 'playing'}
         onMic={() => void s.enableMic()}
         onPass={() => void g.pass()}
         onResign={() => void g.resign()}
         onUndo={() => void g.undo()}
-        onNewGame={() => void g.newGame()}
       />
-      <Transcript lines={s.lines} />
+      <NewGame prefs={s.prefs} onChange={s.updatePrefs} onStart={() => void g.newGame(s.prefs)} />
+      <Transcript lines={s.lines} mode={s.prefs.mode} />
+      {s.prefs.mode === 'chat' && <ChatInput ready={s.agent} onSend={s.sendText} />}
       <div id="audio" hidden />
     </div>
   );
@@ -3332,7 +4621,7 @@ createRoot(document.getElementById('root')!).render(
 `apps/web/src/styles.css`:
 
 ```css
-/* Несколько переменных, две темы по prefers-color-scheme, никаких библиотек (раздел 10 спеки). */
+/* Несколько переменных, две темы по prefers-color-scheme, никаких библиотек (раздел 10 спеки). Цели касания ≥ 44 px. */
 :root {
   --bg: #f4f1ea;
   --fg: #1d1a16;
@@ -3361,11 +4650,13 @@ createRoot(document.getElementById('root')!).render(
 html, body, #root { margin: 0; height: 100%; }
 body { background: var(--bg); color: var(--fg); font: 16px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; -webkit-tap-highlight-color: transparent; }
 .app { display: flex; flex-direction: column; height: 100dvh; padding: env(safe-area-inset-top) 8px env(safe-area-inset-bottom); gap: 8px; }
-.status { padding: 6px 4px 0; }
-.status-main { font-size: 18px; font-weight: 600; min-height: 26px; }
+.top-row { display: flex; justify-content: flex-end; padding-top: 6px; }
+.status { padding: 0 4px; }
+.status-row { display: flex; align-items: center; gap: 8px; }
+.status-main { flex: 1; font-size: 18px; font-weight: 600; min-height: 26px; }
 .status-sub { font-size: 14px; min-height: 20px; }
 .muted { color: var(--muted); }
-.board { width: min(100%, calc(100dvh - 300px)); max-width: 100%; aspect-ratio: 1; align-self: center; touch-action: manipulation; user-select: none; }
+.board { width: min(100%, calc(100dvh - 380px)); max-width: 100%; aspect-ratio: 1; align-self: center; touch-action: manipulation; user-select: none; }
 .board-bg { fill: var(--board); }
 .grid line { stroke: var(--line); stroke-width: 2.5; }
 .coord { fill: var(--line); font-size: 32px; text-anchor: middle; dominant-baseline: middle; }
@@ -3382,11 +4673,24 @@ body { background: var(--bg); color: var(--fg); font: 16px/1.4 system-ui, -apple
 .btn { min-height: 44px; flex: 1; border: 0; border-radius: 10px; background: var(--btn); color: var(--btn-fg); font-size: 16px; padding: 0 10px; }
 .btn:disabled { opacity: 0.45; }
 .btn-mic { background: var(--accent); color: #fff; font-size: 18px; font-weight: 600; min-height: 52px; }
+.btn-accent { background: var(--accent); color: #fff; font-weight: 600; }
+.btn-inline { flex: 0 0 auto; }
+.btn-square { flex: 0 0 44px; width: 44px; font-size: 22px; padding: 0; }
+.seg { display: flex; gap: 4px; background: var(--btn); border-radius: 12px; padding: 3px; }
+.seg-btn { background: transparent; min-width: 44px; }
+.seg-btn[aria-pressed="true"] { background: var(--accent); color: #fff; font-weight: 600; }
+.mode-switch { width: min(100%, 220px); }
+.newgame { display: flex; flex-direction: column; gap: 6px; background: var(--panel); border-radius: 10px; padding: 8px; }
+.rank-row { display: flex; align-items: center; gap: 8px; }
+.rank-value { flex: 1; text-align: center; font-size: 18px; font-weight: 600; }
 .transcript { flex: 1; min-height: 80px; overflow-y: auto; background: var(--panel); border-radius: 10px; padding: 8px 10px; }
 .line { margin: 0 0 6px; }
 .line .who { font-weight: 600; color: var(--muted); }
 .line-me .who { color: var(--accent); }
 .line-partial { opacity: 0.6; }
+.chat-input { display: flex; gap: 8px; padding-bottom: 4px; }
+/* 16px в поле ввода: iOS не увеличивает страницу при фокусе. */
+.chat-field { flex: 1; min-width: 0; min-height: 44px; font-size: 16px; border-radius: 10px; border: 1px solid var(--muted); background: var(--panel); color: var(--fg); padding: 0 10px; }
 ```
 
 - [ ] **Step 4: Typecheck и сборка**
@@ -3394,34 +4698,55 @@ body { background: var(--bg); color: var(--fg); font: 16px/1.4 system-ui, -apple
 Run: `npm run typecheck && npm run build:web`
 Expected: без ошибок; `apps/web/dist/index.html` и `apps/web/dist/assets/*.js` созданы. `dist/` уже в `.gitignore`.
 
-- [ ] **Step 5: Проверка в браузере на ПК** (без агента и без VPS: `npm run dev` с фейковым движком; `.env` с `APP_KEY` и фиктивными `LIVEKIT_*` достаточно)
+- [ ] **Step 5: Проверка в браузере на ПК без агента** (бесплатно: без voice-agent и без Realtime)
 
-Run: `npm run dev`, открыть `http://127.0.0.1:5173` (браузерная панель агента-разработчика или обычный браузер).
+По D-0001 `POST /api/sessions` создаёт комнату на сервере LiveKit, поэтому `.env` должен содержать `APP_KEY` и рабочие `LIVEKIT_*` (сервер LiveKit на VPS); с фиктивными значениями сессия не создаётся (`internal`), и страница без сессии не играет. `npm run dev` здесь не подходит: он запускает и voice-agent `goko-dev`, который по первому касанию откроет платную сессию Realtime. Поэтому два процесса вручную, в двух терминалах Git Bash, без `cmd.exe`; `--env-file` не перекрывает переменные, заданные в команде, значения не печатаются:
+
+Run:
+```bash
+FAKE_ENGINE=1 AGENT_NAME=goko-dev node --env-file=.env apps/game-server/src/main.ts
+node node_modules/vite/bin/vite.js apps/web --host 127.0.0.1 --port 5173 --strictPort
+```
+
+Открыть `http://127.0.0.1:5173` (браузерная панель агента-разработчика или обычный браузер). Воркера `goko-dev` нет, поэтому комната остаётся без агента.
+
 Expected, по шагам:
-1. Статус «Партии нет: скажи «давай партию» или нажми «Новая партия»», пустая доска 13×13 с координатами A–N и 1–13, кнопки.
-2. «Новая партия» → статус «Ход 1, твой ход (чёрные)», подпись «Гоко 10k · Пленные: чёрные 0, белые 0».
-3. Тап на D4 → чёрный камень на D4 с меткой, через долю секунды белый ответ движка, статус «Ход 3, твой ход (чёрные)».
-4. Тап в занятый пункт → сообщение «точка занята» на 3 с; тап сразу после своего хода, пока думает движок, → «сейчас ход Гоко».
-5. «Отменить» → оба камня исчезают. «Пас», затем ещё «Пас» (движок фейковый пасует в ответ) → статус «Победа …: +N», на доске заливка территории.
-6. «Новая партия» → новая пустая доска с теми же настройками. «Сдаться» → «Точно?» → второе касание → «Победа Гоко: сдача».
-7. Перезагрузка страницы → та же сессия (sessionStorage), состояние партии пришло первым событием.
-8. «Микрофон» без настоящего LiveKit → статус «Микрофон: ещё раз» и сообщение об ошибке, страница живёт дальше.
+1. Статус «Партии нет: нажми «Новая партия» или попроси Гоко», пустая доска 13×13 с координатами A–N и 1–13, переключатель «Голос / Чат» с нажатым «Голос», кнопка «Микрофон», в ленте «Здесь будет диалог с Гоко. Коснись экрана и скажи «давай партию».».
+2. Первое касание страницы → браузер спрашивает микрофон (разрешить) → «Микрофон включён». В DevTools → Application → Local Storage ключ `goko.prefs` уже записан с умолчаниями.
+3. «Новая партия» → панель: «Ты играешь» с нажатыми «Чёрные», «Уровень Гоко» 10k. «+» → 9k, «−» → 10k, «+» → 9k. «Начать» → статус «Ход 1, твой ход (чёрные)», подпись «Гоко 9k · Пленные: чёрные 0, белые 0».
+4. Тап на D4 → чёрный камень на D4 с меткой, через долю секунды белый ответ фейкового движка, статус «Ход 3, твой ход (чёрные)». Тап в занятый пункт → «точка занята» на 3 с; тап сразу после своего хода, пока думает движок, → «сейчас ход Гоко».
+5. «Отменить» → оба камня исчезают. «Пас», затем ещё «Пас» (фейковый движок пасует в ответ) → статус «Победа …: +N», на доске заливка территории.
+6. «Новая партия» → «Белые» → «Начать» → движок ходит первым, статус «Ход 2, твой ход (белые)». «Сдаться» → «Точно?» → второе касание → «Победа Гоко: сдача».
+7. «Чат» → кнопка «Микрофон» исчезает, внизу поле «Гоко подключается…» и выключенная «Отправить» (агента нет, `lk.agent.state` никто не выставил); доска и кнопки работают тапами. В консоли нет `[!] web: не удалось выставить goko.mode` — токен несёт `canUpdateOwnMetadata` (задача 5, шаг 1).
+8. Перезагрузка страницы → та же сессия (sessionStorage), состояние партии пришло первым событием; режим «Чат», «Белые» и 9k сохранились (localStorage).
+9. DevTools → Application → Local Storage → запретить или очистить хранилище сайта и перезагрузить → страница открывается с умолчаниями («Голос», «Чёрные», 10k), без ошибок в консоли.
+10. Остановить game-server (Ctrl+C) → статус-подпись «нет связи, переподключаюсь»; запустить снова → через 1–5 с новая сессия: SSE ответил `not_found`, страница создала сессию заново.
 
-В консоли браузера — без ошибок, кроме отказа LiveKit на шаге 8. На телефоне у доски проверяет founder после деплоя (Task 10).
+«Повторить» здесь не проверяется: фейковый движок не исчерпывает повторы; механизм покрыт тестами `stream.test.ts`. В консоли браузера — без ошибок, кроме отказов на шаге 10. На телефоне у доски проверяет founder после деплоя (Task 10).
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 6: Проверка режимов с агентом** (платно: Realtime; только по явной просьбе founder'а в текущей сессии, правило 5 `CLAUDE.md`)
+
+Run: `npm run dev` (запускает voice-agent `goko-dev`), открыть `http://127.0.0.1:5173`.
+Expected:
+1. «Чат» → поле «Напиши Гоко» и активная «Отправить» после входа агента. «давай партию» → своя строка «Ты: давай партию» сразу, ответ «Гоко: …» текстом в ленте, звука нет; в логе воркера `[OK] voice-agent: режим chat`.
+2. Тап по доске → комментарий Гоко к ходу в ленте, без звука.
+3. «Голос» → лог `[OK] voice-agent: режим voice`, микрофон включён; фраза «дэ четыре» появляется в ленте один раз («Ты: …»), ответ Гоко звучит и пишется в ленту; тап → комментарий вслух и в ленте.
+
+- [ ] **Step 7: Commit**
 
 ```bash
 git add apps/web/src/components apps/web/src/App.tsx apps/web/src/main.tsx apps/web/src/styles.css
-git commit -m "web: доска SVG, лента, статус, кнопки, страница"
+git commit -m "web: доска SVG, лента, статус с «Повторить», кнопки, режим Голос/Чат, новая партия с выбором цвета и ранга, поле чата"
 ```
 
 ---
+
 ### Task 9: Контейнеры game-server, go-engine, voice-agent; сервисы compose; деплой статики
 
 **Files:**
 - Create: `apps/game-server/Dockerfile`, `apps/voice-agent/Dockerfile`, `.dockerignore`
-- Modify: `apps/go-engine/Dockerfile` (добавить стадию `engine`), `infra/docker-compose.yml` (три сервиса), `infra/.env.example` (`ENGINE_CPUS`, `KATAGO_ASSET`), `infra/scripts/deploy.sh` (`--build-web`, исключение `apps/go-engine/bin`)
+- Modify: `apps/go-engine/Dockerfile` (добавить стадию `engine`), `infra/docker-compose.yml` (три сервиса; `stop_grace_period` и `healthcheck` у `game-server` и `go-engine`), `infra/.env.example` (`ENGINE_CPUS`, `KATAGO_ASSET`), `infra/scripts/deploy.sh` (`--build-web`, исключение `apps/go-engine/bin`)
+- Без изменений: `infra/Caddyfile` (`flush_interval -1` на `/api/*` уже есть)
 
 **Interfaces:**
 - Consumes: `infra/docker-compose.yml`, `infra/Caddyfile` (`API_UPSTREAM`), `infra/scripts/deploy.sh [--host goko] [--web-dir DIR]` из плана стадии 0; переменные `main.ts` game-server (`APP_KEY`, `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`, `AGENT_NAME`, `ENGINE_URL`, `ENGINE_KEY`, `DATA_DIR`, `MAX_SESSIONS`, `SESSION_TTL_MS`, `PORT`, `HOST`) и go-engine (`KATAGO_BIN`, `KATAGO_MODEL`, `KATAGO_HUMAN_MODEL`, `KATAGO_CONFIG`, `ENGINE_KEY`, `ENGINE_PORT`, `ENGINE_HOST`) из плана ядра; voice-agent (`LIVEKIT_*`, `OPENAI_API_KEY`, `APP_KEY`, `API_BASE`, `AGENT_NAME`, `VOICE_MODE`) из Task 4; `apps/web/dist` из Task 8.
@@ -3538,6 +4863,14 @@ CMD ["node", "apps/go-engine/src/main.ts"]
       context: ..
       dockerfile: apps/game-server/Dockerfile
     restart: unless-stopped
+    # Остановка game-server укладывается в SHUTDOWN_MS 25 с (D-0010); docker stop по умолчанию ждёт 10 с и шлёт SIGKILL.
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/health').then((r) => r.json()).then((j) => process.exit(j.ok ? 0 : 1), () => process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     ports:
       - "127.0.0.1:8787:8787"
     environment:
@@ -3562,6 +4895,16 @@ CMD ["node", "apps/go-engine/src/main.ts"]
       args:
         KATAGO_ASSET: ${KATAGO_ASSET:-katago-v1.18.1-eigenavx2-linux-x64.zip}
     restart: unless-stopped
+    # Остановка KataGo: SIGTERM -> stop() движка; запас над 25 с, как у game-server (D-0010).
+    stop_grace_period: 30s
+    # Порт открывается только после прогрева KataGo (до 300 с, D-0010): start_period с запасом,
+    # неудачи в нём не считаются, первая удачная проверка сразу делает сервис healthy.
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8788/health').then((r) => r.json()).then((j) => process.exit(j.ok ? 0 : 1), () => process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 320s
     cpus: ${ENGINE_CPUS:-1.5}
     environment:
       ENGINE_KEY: ${ENGINE_KEY}
@@ -3584,6 +4927,23 @@ CMD ["node", "apps/go-engine/src/main.ts"]
 ```
 
 Почему так: `caddy` и `livekit` в `network_mode: host`, поэтому `API_UPSTREAM=127.0.0.1:8787` из плана стадии 0 попадает в опубликованный порт `game-server`; `go-engine` наружу не публикуется, `game-server` ходит к нему по имени сервиса; `voice-agent` ходит в LiveKit по публичному `LIVEKIT_URL` (`wss://<LK_HOST>`, тот же адрес, что у телефона) и в `game-server` по имени сервиса (`API_BASE` задан в образе). Секретов в файле нет — только подстановки из `/opt/goko/.env`.
+
+`game-server` зависит от `go-engine` без `condition: service_healthy` намеренно: иначе страница и сессии ждали бы прогрева KataGo до 5 минут, а до готовности движка ходы и так получают `engine_unavailable` с повторами сервера (D-0006). `/health` у обоих сервисов не требует ключа, поэтому секретов в проверке нет. `[!]` Закрыть `[TODO]` из `docs/NOW.md` про `stop_grace_period` game-server — в Task 10.
+
+SSE за Caddy: `infra/Caddyfile` уже содержит нужное, правка не нужна. Синтаксис Caddy 2 — субдиректива `flush_interval` внутри блока `reverse_proxy`, отрицательное значение отключает буфер и сбрасывает ответ после каждой записи (документация `reverse_proxy`, раздел Streaming):
+
+```caddyfile
+{$WEB_HOST} {
+  handle /api/* {
+    reverse_proxy {$API_UPSTREAM} {
+      flush_interval -1
+    }
+  }
+  # ...
+}
+```
+
+Живая проверка потока — Task 10, раздел runbook «Проверки после деплоя».
 
 - [ ] **Step 6: `infra/.env.example`** (в конец)
 
@@ -3629,7 +4989,7 @@ rsync -az --delete \
 - [ ] **Step 8: Проверка на ПК**
 
 Run: `cd infra && WEB_HOST=goko.example.org LK_HOST=goko-lk.example.org LIVEKIT_API_KEY=k LIVEKIT_API_SECRET=s APP_KEY=a ENGINE_KEY=e OPENAI_API_KEY=o LIVEKIT_URL=wss://goko-lk.example.org docker compose config >/dev/null && echo "[OK] compose"`
-Expected: `[OK] compose` (значения подстановок в вывод не печатать: `config` их раскрывает, поэтому `>/dev/null`).
+Expected: `[OK] compose` (значения подстановок в вывод не печатать: `config` их раскрывает, поэтому `>/dev/null`). Фиктивные значения в этой команде — только для проверки синтаксиса, не настоящие ключи. Проверить без раскрытия значений, что лимиты на месте: `cd infra && WEB_HOST=x LK_HOST=x LIVEKIT_API_KEY=x LIVEKIT_API_SECRET=x APP_KEY=x ENGINE_KEY=x OPENAI_API_KEY=x LIVEKIT_URL=wss://x docker compose config --format json | node -e "const c=JSON.parse(require('fs').readFileSync(0,'utf8')).services; for (const s of ['game-server','go-engine']) console.log(s, c[s].stop_grace_period, c[s].healthcheck.start_period)"` → `game-server 30s 20s` и `go-engine 30s 5m20s` (compose может нормализовать длительности).
 
 Run (если на ПК есть Docker; go-engine собирать не нужно — образ тянет KataGo и сети): `docker build -f apps/game-server/Dockerfile -t goko-game-server . && docker build -f apps/voice-agent/Dockerfile -t goko-voice-agent .`
 Expected: оба образа собираются; `docker run --rm goko-game-server` завершается с `[X] game-server: нужна переменная APP_KEY` и кодом 2 (переменные не заданы — это ожидаемо и подтверждает, что `.ts` запускается).
@@ -3651,10 +5011,11 @@ git commit -m "infra: контейнеры game-server, go-engine, voice-agent; 
 **Files:**
 - Create: `docs/runbooks/vps.md`
 - Modify: `docs/README.md` (строка `runbooks/`), `CLAUDE.md` (строка стадии, раздел команд), `README.md` (статус, раздел «Запуск»), `docs/NOW.md`
+- Modify только при проблеме на шаге 6: `scripts/dev.mjs` (web без `cmd.exe`), `scripts/dev.test.ts`
 
 **Interfaces:**
-- Consumes: команды из Task 5 (`npm run chat`), Task 8 (`npm run build:web`), Task 9 (`deploy.sh --build-web`, сервисы compose); `infra/README.md` из плана стадии 0 (первичная настройка).
-- Produces: `docs/runbooks/vps.md` — эксплуатация после деплоя; доки со статусом «стадия 1 готова».
+- Consumes: команды из Task 5 (`npm run chat`), Task 8 (`npm run build:web`, запуск web через `node node_modules/vite/bin/vite.js`), Task 9 (`deploy.sh --build-web`, сервисы compose, `stop_grace_period`, `healthcheck`); `infra/README.md` из плана стадии 0 (первичная настройка); `devPlan(parentEnv, exists, makeKey?)` из `scripts/dev.mjs` плана ядра.
+- Produces: `docs/runbooks/vps.md` — эксплуатация после деплоя с живыми проверками SSE за Caddy и `empty_timeout` (D-0001); доки со статусом «стадия 1 готова»; результат проверки Ctrl+C `npm run dev` на Windows.
 
 - [ ] **Step 1: `docs/runbooks/vps.md`**
 
@@ -3713,7 +5074,46 @@ dc exec go-engine node -e "fetch('http://127.0.0.1:8788/health').then(r=>r.text(
 curl -sI https://<WEB_HOST>/ | head -1               # HTTP/2 200
 curl -s https://<LK_HOST>/                          # OK
 dc logs --tail=20 voice-agent | grep -c "registered worker"   # 1 — воркер зарегистрирован
+dc ps --format '{{.Service}} {{.Status}}'           # game-server и go-engine: (healthy); go-engine до 5 мин после старта — (health: starting), идёт прогрев KataGo
 ```
+
+## Проверки после деплоя
+
+Бесплатные (Realtime не открывается: телефон в комнату не входит, агент ждёт
+участника), но это действия на VPS — только по явной просьбе founder'а.
+Каждая занимает один слот `MAX_SESSIONS` до истечения TTL сессии; если слот
+нужен сразу, а никто не играет, — `dc restart game-server`. Значения из
+`.env` читаются в подоболочке и не печатаются; ответ `POST /api/sessions`
+содержит токен LiveKit, поэтому из него вырезается только id сессии.
+
+```bash
+# 1. Сессия и поток SSE через Caddy: строки должны приходить сразу, со своими метками времени,
+#    а не пачкой при закрытии (flush_interval -1 на /api/*). Выход — Ctrl+C.
+( set -a; . /opt/goko/.env; set +a
+  SID=$(curl -s -X POST -H "X-App-Key: $APP_KEY" -H 'content-type: application/json' -d '{}' "https://$WEB_HOST/api/sessions" \
+    | grep -o '"id":"[0-9a-z]*"' | head -1 | cut -d'"' -f4)
+  [ -n "$SID" ] && echo "[OK] сессия $SID, комната goko-$SID" || { echo "[X] сессия не создана"; exit 1; }
+  curl -sN -H "X-App-Key: $APP_KEY" "https://$WEB_HOST/api/sessions/$SID/events" \
+    | while IFS= read -r line; do echo "$(date +%T) $line"; done )
+```
+
+Ожидание: сразу после запуска строка `event: session.game` или комментарий
+пульса с меткой текущей секунды, дальше пульс каждые 15 с (`DEFAULT_HEARTBEAT_MS`). Если строки
+приходят пачкой при закрытии — буферизует прокси: проверить `infra/Caddyfile`
+на VPS и `dc up -d caddy`.
+
+```bash
+# 2. D-0001: комната с одним агентом (телефон не вошёл) закрывается по empty_timeout 300 с.
+#    SID — из проверки 1; засечь время создания сессии.
+dc logs -f --since 10m livekit | grep --line-buffered "goko-$SID"
+dc logs -f --since 10m voice-agent | grep --line-buffered -i "job\|goko-$SID"
+```
+
+Ожидание: в логе LiveKit — создание комнаты `goko-<SID>` и вход агента, затем
+не позже чем через 5–6 минут после создания — закрытие комнаты; в логе
+воркера — завершение задания. Если комната живёт дольше 10 минут, агент
+удерживает её от `empty_timeout`: записать `[!]` в `docs/NOW.md` с временем и
+строками лога (без значений `.env`) и вынести в D-0001 на решение founder'а.
 
 ## Перезапуск и обновление одного сервиса
 
@@ -3725,6 +5125,10 @@ dc up -d --build go-engine              # то же для движка; пар�
 
 `game-server` при рестарте загружает снапшоты из `/opt/goko/data/games`;
 сессии и комнаты LiveKit при этом теряются — телефон создаст новую сессию сам.
+Остановка `game-server` и `go-engine` может занять до 30 с (`stop_grace_period`,
+D-0010): сервис дожидается запросов и гасит KataGo, ждать без `docker kill`.
+После рестарта `go-engine` до 5 минут в `(health: starting)` — прогрев KataGo;
+ходы в это время получают `engine_unavailable` и повторяются сервером.
 
 ## Режимы API: prod и dev
 
@@ -3827,26 +5231,80 @@ web, контейнеры, runbook. Открыта приёмка founder'ом �
 (место `external`, `mcp-server`).
 ```
 
-В `## Сделано` добавить строку: `- <дата>: стадия 1, голос и веб: voice-agent (девять инструментов, промпт, события, realtime/pipeline), chat из консоли, web (доска, лента, микрофон), контейнеры и compose, runbook VPS.`
+В `## Сделано` добавить строку: `- <дата>: стадия 1, голос и веб: voice-agent (девять инструментов, промпт, события, realtime/pipeline, режимы Голос/Чат по D-0011), chat из консоли, web (доска, лента-диалог, микрофон, чат, выбор цвета и ранга, «Повторить»), контейнеры и compose, runbook VPS.`
 
-В `## Открытые вопросы founder'у` добавить пункт: `7. **Проверка на телефоне** после деплоя: микрофон в Safari/Chrome, задержка ответа, разборчивость координат; realtime или pipeline по цене партии.`
+В `## Открытые вопросы founder'у` добавить пункт со следующим свободным номером: `**Проверка на телефоне** после деплоя: микрофон в Safari/Chrome, задержка ответа, разборчивость координат, режим «Чат» без звука; realtime или pipeline по цене партии (в «Чате» Realtime всё равно генерирует аудио — цена D-0011).`
 
-- [ ] **Step 6: Полная проверка**
+В `## Открыто`:
+
+- пункт `[TODO]` про `stop_grace_period` game-server — удалить: сделано в Task 9 (`30s` у `game-server` и `go-engine`);
+- пункт `[TODO]` про `flush_interval -1` — оставить до живой проверки 1 раздела runbook «Проверки после деплоя», после неё заменить результатом;
+- пункт `[TODO]` про `empty_timeout` — дописать «порядок — `docs/runbooks/vps.md`, проверка 2»; после прогона заменить результатом;
+- пункт `[TODO]` про Ctrl+C для `web` через `cmd.exe` — вернуться к нему после шага 6 и заменить результатом (`[OK]` или `[FIX]` с описанием правки `dev.mjs`);
+- добавить `[!]` Токен LiveKit живёт TTL сессии от её создания (D-0008): продлённая сессия может пережить токен, тогда вход в комнату не удастся; страница забывает сессию, и перезагрузка создаёт новую (Task 7). Если на приёмке это мешает — выпуск нового токена на живую сессию, отдельное решение.
+
+- [ ] **Step 6: Ctrl+C `npm run dev` на Windows** (на ПК, бесплатно: воркер `goko-dev` стартует, но пока в комнату не вошёл телефон, Realtime не открывается)
+
+Run: в Windows Terminal (PowerShell) `npm run dev`, дождаться `[OK] dev: запущено game-server, web, voice-agent`, **не открывая страницу**, нажать Ctrl+C один раз.
+Expected: вопроса «Завершить выполнение пакетного файла [Y(да)/N(нет)]?» нет; `dev` печатает остановку и выходит; порты свободны:
+
+```powershell
+Get-NetTCPConnection -LocalPort 8787,5173 -State Listen -ErrorAction SilentlyContinue   # пусто
+```
+
+Если вопрос появился или `vite` остался слушать `5173` — запустить web без оболочки. Тест в `scripts/dev.test.ts` (в `describe` с `devPlan`, рядом с тестом `web и voice-agent — только если есть их package.json`):
+
+```ts
+  it('web — vite через node без cmd.exe: Ctrl+C не спрашивает про пакетный файл', () => {
+    const plan = devPlan(secretEnv, (rel) => rel === 'apps/web/package.json');
+    const web = plan.procs.find((p) => p.name === 'web');
+    expect(web?.cmd).toBe(process.execPath);
+    expect(web?.args).toEqual(['node_modules/vite/bin/vite.js', 'apps/web', '--host', '127.0.0.1', '--port', '5173', '--strictPort']);
+    expect(web?.shell).toBeUndefined();
+  });
+```
+
+Run: `npx vitest run scripts/dev.test.ts` → FAIL (у web `cmd: 'npm'`). В `scripts/dev.mjs` строку запуска web заменить на:
+
+```js
+  // web — vite через node без оболочки: npm на Windows — это npm.cmd, cmd.exe на Ctrl+C спрашивает
+  // «Завершить выполнение пакетного файла?», и web не останавливается. vite.config.ts берётся из apps/web.
+  if (exists('apps/web/package.json')) procs.push({ name: 'web', cmd: node, args: ['node_modules/vite/bin/vite.js', 'apps/web', '--host', '127.0.0.1', '--port', '5173', '--strictPort'], env });
+```
+
+Run: `npx vitest run scripts/dev.test.ts` → PASS; повторить ручную проверку Ctrl+C → вопроса нет, порты свободны.
+
+- [ ] **Step 7: Полная проверка**
 
 Run: `npm run check && npm run smoke`
 Expected: typecheck (корень и `apps/web`), все unit-тесты (`go-core`, `protocol`, `go-engine`, `game-server`, `voice-agent`, `web`, `scripts`) и smoke — `[OK]`, код 0. `agent.eval.test.ts` — `skipped` без `RUN_AGENT_EVALS`.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
+
+Только если шаг 6 потребовал правки — сначала отдельный коммит:
+
+```bash
+git add scripts/dev.mjs scripts/dev.test.ts
+git commit -m "scripts: dev запускает web через node без cmd.exe"
+```
+
+Затем всегда:
 
 ```bash
 git add docs/runbooks/vps.md docs/README.md CLAUDE.md README.md docs/NOW.md
-git commit -m "docs: runbook VPS, команды и статус стадии 1, NOW"
+git commit -m "docs: runbook VPS с проверками после деплоя, команды и статус стадии 1, NOW"
 ```
+
+Живые проверки runbook («Проверки после деплоя») и деплой исполнитель не запускает: только по явной просьбе founder'а (правило 5 `CLAUDE.md`); их результаты вносит в `docs/NOW.md` тот, кто их выполнил.
 
 ---
 
 ## Самопроверка плана
 
-- **Покрытие спеки.** Раздел 3 (поток хода: голос → инструмент → game-server → событие → реплика; тап → `via: 'tap'` → событие → реплика) — Task 2 (инструменты), Task 3 (`handleEvent`: тап при `pendingEngineMove` копится в `lastTap` и озвучивается вместе с ответом движка), Task 7 (`useGame.play`). Раздел 5 (события `session.game`, `state.updated` с `cause/by/via`, `engine.thinking`, `game.finished`, `error`) — Task 3 и Task 7 читают все пять типов; `not_found` на SSE → новая сессия (Task 6 `streamEvents`, Task 7 `useSession.reset`). Раздел 9: таблица инструментов один в один — Task 2 (`createTools`); результаты для модели с `myMoveSpoken`, `note` при таймауте ответа, `finished/result` — Task 2; `get_assessment` без лучшего хода в тексте — правило в `INSTRUCTIONS` (Task 4) и eval; озвучивание событий — Task 3; промпт с произношением координат и правилами инструментов — Task 4; `realtime`/`pipeline` по `VOICE_MODE`, серверный VAD, транскрипция входа `ru` — Task 4 `voice.ts`; приветствие в `onEnter` — Task 4 `agent.ts`; `sessionId` из метаданных диспетчеризации — Task 4 `metadata.ts`. Раздел 10: одна страница, SVG-доска, тап = ближайший пункт, «сейчас ход Гоко» без запроса, лента из `lk.transcription`, микрофон по касанию со `startAudio`, кнопки ≥ 44 px, темы, статус, результат с территорией и мёртвыми камнями, работа без агента — Task 6–8; сессия в `sessionStorage` — Task 7. Раздел 11: контейнеры `game-server`, `go-engine` (`cpus`), `voice-agent`; порты только на `127.0.0.1`; `API_UPSTREAM` prod/dev и `docker compose up -d caddy`; `AGENT_NAME` `goko`/`goko-dev`; деплой статики — Task 9, runbook — Task 10. Раздел 12: замоканный клиент для `voice-agent` (Task 2, 3), evals по флагу (Task 4), unit для веб-геометрии/ленты/потока/текстов (Task 6), `chat.mjs` (Task 5), ручная приёмка у доски — `NOW.md` (Task 10). Раздел 18: все проверки — командами с кодом возврата; секреты — только через `.env`.
-- **Заглушек нет.** Все файлы приведены целиком; условные ветки — только на отсутствие VPS/ключей (`chat` и evals пропускаются с пометкой в `NOW.md`), на имя метода публикаций в `livekit-client` (Task 7, Step 4) и на флаг `npm ci` (Task 9, Step 2).
-- **Типы.** `ToolClient` (Task 2) — `Pick<GokoClient, ...>` по именам методов клиента из плана ядра (`newGame`, `play`, `correct`, `pass`, `resign`, `undo`, `getGame`, `ascii`, `analyze`, `setRank`, `events`); `seatColor` объявлена в Task 1 и используется в Task 2, 6, 7; `AgentState` (Task 1) — поля, которые читают Task 2 и Task 3 (`gameId`, `humanColor`, `rank`, `komi`, `toolGames`, `announcedFinish`, `awaitingReply`, `lastTap`, `lastErrorAt`); `handleEvent`/`watchSession` (Task 3) вызываются из `main.ts` (Task 4) с теми же сигнатурами; `GokoAgent(tools, { greet })` (Task 4) — в `main.ts` и eval; `describeEvent` (Task 5) — только в тесте и `chat.mjs`; `layout/x/y/pointAt/coordAt/hoshi/stones/indexOf` (Task 6) — в `Board.tsx` (Task 8); `upsertLine/whoOf/lineId` (Task 6) — в `useSession` (Task 7); `streamEvents(client, sessionId, signal, handlers, sleep?)` (Task 6) — в `useGame` (Task 7); `describeError/humanColorOf/resultText/statusText/capturesText/rankText` (Task 6) — в Task 7 и 8; `MicState` (Task 7) — в `Controls.tsx` (Task 8); `useSession().reset` передаётся в `useGame(sessionId, onLost)` (Task 8 `App.tsx`). Переменные окружения контейнеров (Task 9) — по спискам `main.ts` плана ядра и Task 4.
+Обновлена 14.09 после сверки с кодом ядра (`packages/protocol`, `apps/game-server`) и решениями D-0001…D-0011.
+
+- **Покрытие спеки.** Раздел 3 (поток хода: голос → инструмент → game-server → событие → реплика; тап → `via: 'tap'` → событие → реплика) — Task 2 (инструменты), Task 3 (`handleEvent`: тап при `pendingEngineMove` копится в `lastTap` и озвучивается вместе с ответом движка), Task 7 (`useGame.play`). Раздел 5 (события `session.game`, `state.updated` с `cause/by/via/humanFallback`, `engine.thinking`, `game.finished`, `error`) — Task 3 и Task 7 читают все пять типов; `not_found` на SSE → новая сессия (Task 6 `streamEvents`, Task 7 `useSession.reset`). Раздел 9: таблица инструментов один в один — Task 2 (`createTools`); результаты для модели с `myMoveSpoken`, `note` при таймауте ответа, `finished/result` — Task 2; `get_assessment` без лучшего хода в тексте — правило в `INSTRUCTIONS` (Task 4) и eval; озвучивание событий — Task 3; промпт с произношением координат, правилом D-0004 и режимом «Чат» — Task 4; `realtime`/`pipeline` по `VOICE_MODE`, серверный VAD, транскрипция входа `ru` — Task 4 `voice.ts`; приветствие — `generateReply` после `session.start` и применения режима, `onEnter` с `greet: false` — Task 4 `main.ts`, `agent.ts`; `sessionId` из метаданных диспетчеризации — Task 4 `metadata.ts`. Раздел 10: одна страница, SVG-доска, тап = ближайший пункт, «сейчас ход Гоко» без запроса, лента-диалог из `lk.transcription`, вход в комнату и микрофон по первому касанию со `startAudio`, кнопки ≥ 44 px, темы, статус, результат с территорией и мёртвыми камнями, работа без агента — Task 6–8; сессия в `sessionStorage` — Task 7. Раздел 11: контейнеры `game-server`, `go-engine` (`cpus`, `stop_grace_period`, `healthcheck`), `voice-agent`; порты только на `127.0.0.1`; `API_UPSTREAM` prod/dev и `docker compose up -d caddy`; `flush_interval -1` на `/api/*` (уже в `infra/Caddyfile`); `AGENT_NAME` `goko`/`goko-dev`; деплой статики — Task 9, runbook с живыми проверками — Task 10. Раздел 12: замоканный клиент и замоканный сеанс для `voice-agent` (Task 2, 3, 4), evals по флагу без новых (Task 4), unit для веб-геометрии, ленты, потока, текстов, настроек и чата (Task 6), `chat.mjs` (Task 5), ручная приёмка у доски — `NOW.md` (Task 10). Раздел 18: все проверки — командами с кодом возврата; секреты — только через `.env`.
+- **Решения.** D-0001: комнату создаёт game-server, веб и `chat.mjs` только входят по токену, без `roomConfig`; агент ждёт `waitForParticipant()` до Realtime (Task 4); живая проверка `empty_timeout` — runbook, Task 10. D-0004: ход за человека только по прямой просьбе и вслух — промпт Task 4. D-0005: партия двух людей разрешена — `hasEngine`/`humanColorOf` и тексты в Task 2, 3, 6; фейковый клиент не запрещает её (Task 2). D-0006: `retries_exhausted` → агент переоткрывает поток на первой реплике человека (`watchSession().humanSpoke`, Task 3, `main.ts` Task 4), веб — «Повторить» (`StreamHandle.reopen`, `needsRetry`, Task 6–8), обещания без механизма нет. D-0007: человеку и модели — только `humanText(code, details)`, `message` — в логи; `humanFallback` из `state.updated` хода движка → `fallbackMove` и строка в `get_position` (Task 2, 3). D-0008: токен живёт TTL сессии от создания — поведение веба при отказе входа (Task 7), `[!]` в `NOW.md` (Task 10). D-0009: id — непрозрачные строки, план их формат не разбирает (кроме `grep` id в runbook по алфавиту `[0-9a-z]`). D-0010: `FINISH_WAIT_MS` из бюджетов `score` и повторов (Task 2), `stop_grace_period: 30s` над `SHUTDOWN_MS` 25 с и `start_period` над прогревом 300 с (Task 9). D-0011: переключатель «Голос / Чат» (`prefs.ts`, `ModeSwitch`), атрибут `goko.mode` (веб `setAttributes`, `chat.mjs` `CHAT_ATTRIBUTES`), право `canUpdateOwnMetadata` в токене (Task 5, шаг 1), агент — `followMode` + `session.output/input.setAudioEnabled` (Task 4), запасной путь — отписка веба от аудио агента (Task 7), выбор цвета и ранга только полями `NewGameRequest` (Task 6, 8), тапы в любом режиме.
+- **Заглушек нет.** Все файлы приведены целиком; условные ветки — только на отсутствие VPS/ключей (`chat` и evals пропускаются с пометкой в `NOW.md`), на имена в установленной `livekit-client` (Task 7, примечание к шагу 2), на флаг `npm ci` (Task 9, Step 2) и на результат ручной проверки Ctrl+C (Task 10, Step 6, правка `dev.mjs` с тестом приведена целиком).
+- **Типы.** `ToolClient` (Task 2) — `Pick<GokoClient, 'newGame' | 'play' | 'correct' | 'pass' | 'resign' | 'undo' | 'getGame' | 'ascii' | 'analyze' | 'setRank'>` по именам `createClient` из `packages/protocol/src/client.ts`; поток событий — отдельный `Pick<GokoClient, 'events'>` в `watchSession` (Task 3) и `streamEvents` (Task 6) с `events(target: EventsTarget, signal?)`. `seatColor` объявлена в Task 1 и используется в Task 2, 3, 6. `AgentState` (Task 1) — поля, которые читают Task 2 и 3: `gameId`, `humanColor: Color | null`, `rank`, `komi`, `toolGames`, `announcedFinish`, `awaitingReply`, `lastTap`, `lastErrorAt`, `retriesExhausted`, `fallbackMove`, `startingGame`. `hasEngine`/`humanColorOf` (Task 2) — в `events.ts` (Task 3); одноимённые функции веба (Task 6) повторяют ту же семантику над `GameState` и живут в `text.ts`. `handleEvent(ev, state, now?)` и `watchSession(opts): WatchHandle` (Task 3) вызываются из `main.ts` (Task 4); `modeOf/applyMode/followMode` (Task 4 `mode.ts`) — в `main.ts` с `RoomEvent.ParticipantAttributesChanged` и `ParticipantConnected` из `@livekit/rtc-node`; `GokoAgent(tools, { greet })` (Task 4) — в `main.ts` и eval. `describeEvent`, `CHAT_ATTRIBUTES` (Task 5) — в тесте и `chat.mjs`. `layout/x/y/pointAt/coordAt/hoshi/stones/indexOf` (Task 6) — в `Board.tsx` (Task 8); `upsertLine/whoOf/lineId/acceptLine` (Task 6) — в `useSession` (Task 7); `streamEvents(...): StreamHandle` и `needsRetry` (Task 6) — в `useGame` (Task 7), `reopen` → `StatusBar.onRetry` (Task 8); `describeError/hasEngine/humanColorOf/resultText/statusText/capturesText/rankText` (Task 6) — в Task 7 и 8; `loadPrefs/savePrefs/modeAttributes/newGameRequest/stepRank`, `Mode`, `Prefs`, `ColorChoice` (Task 6) — в `useSession`, `useGame` (Task 7), `ModeSwitch`, `NewGame`, `Controls`, `Transcript` (Task 8); `sendChat/agentReady/CHAT_MAX_CHARS` (Task 6) — в `useSession` (Task 7) и `ChatInput` (Task 8); `MicState` (Task 7) — в `Controls.tsx`; `useSession().reset` передаётся в `useGame(sessionId, onLost)`, `useSession().prefs` — в `useGame().newGame(prefs)` (Task 8 `App.tsx`). Импорты протокола сверены с `packages/protocol/src/index.ts`: `ApiError`, `humanText`, `createClient`, `GokoClient`, `EventsTarget`, `GameEvent`, `GameState`, `CreateSessionResponse`, `NewGameRequest`, `Color`, `Rank`, `RANKS`, `Result`, `Seat`, `Controller` существуют; `seatColor` добавляет Task 1. Переменные окружения контейнеров (Task 9) — по спискам `main.ts` плана ядра и Task 4.
+- **Известные границы.** Форы в `NewGameRequest` нет — выбор только цвета и ранга. Отключить генерацию аудио в Realtime на лету нельзя (`modalities` только в конструкторе `RealtimeModel`): в «Чате» платим за аудио-токены, это цена D-0011. Изменения протокола после 13.09 (`gameId` в `engine.thinking` и `error`, таймауты клиента, коды лимитов, полуцелое коми) план ещё не отражает в литералах событий тестов — отдельный проход.
