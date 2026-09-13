@@ -497,6 +497,32 @@ describe('отмена вызова движка', () => {
     expect(f.calls).toHaveLength(1);
   });
 
+  it('genmove: abort в зазоре между отказом соединения и началом паузы — отказ сразу, таймер паузы не заводится', async () => {
+    // Отмена приходит через k микрозадач после отказа fetch. При каком-то k она попадает между проверкой
+    // прерывания в попытке и началом паузы; исход при любом k один: причина сигнала без движения часов.
+    for (let k = 0; k < 30; k++) {
+      const ac = new AbortController();
+      const f = fakeFetch([
+        () => {
+          let chain = Promise.resolve();
+          for (let i = 0; i < k; i++) chain = chain.then(() => undefined);
+          void chain.then(() => ac.abort('stop'));
+          throw connectionError('ECONNREFUSED');
+        },
+        () => Response.json(ok),
+      ]);
+      const engine = createEngineClient({ baseUrl: 'http://engine.test', engineKey: 'ek', fetch: f.fetch });
+      const p = engine.genmove(req, ac.signal);
+      const state = track(p);
+      p.catch(() => undefined);
+      for (let i = 0; i < 5 && !state.settled; i++) await new Promise((r) => setImmediate(r));
+      expect(state.settled, `k=${k}`).toBe(true);
+      await expect(p).rejects.toBe('stop');
+      expect(f.calls).toHaveLength(1);
+      expect(vi.getTimerCount(), `k=${k}`).toBe(0);
+    }
+  });
+
   it('ответ до отмены не портится поздним abort', async () => {
     const f = fakeFetch([() => Response.json(ok)]);
     const engine = createEngineClient({ baseUrl: 'http://engine.test', engineKey: 'ek', fetch: f.fetch });

@@ -1222,6 +1222,10 @@ describe('createApp: лимиты частоты (D-0012)', () => {
     const long = 'a'.repeat(64);
     expect((await app.request('/api/games', { headers: { ...H, 'x-forwarded-for': `${long}x` } }, from('127.0.0.1'))).status).toBe(200);
     expect((await app.request('/api/games', { headers: { ...H, 'x-forwarded-for': `${long}y` } }, from('127.0.0.1'))).status).toBe(429);
+    // Отличие в 64-м символе ещё различает адреса: ключ режется ровно по 64, а не короче.
+    const edge = 'b'.repeat(63);
+    expect((await app.request('/api/games', { headers: { ...H, 'x-forwarded-for': `${edge}x` } }, from('127.0.0.1'))).status).toBe(200);
+    expect((await app.request('/api/games', { headers: { ...H, 'x-forwarded-for': `${edge}y` } }, from('127.0.0.1'))).status).toBe(200);
   });
 
   it('на настоящем сокете счёт идёт по адресу соединения', async () => {

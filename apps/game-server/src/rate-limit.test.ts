@@ -53,6 +53,14 @@ describe('RateLimiter', () => {
     limiter.hit('fresh');
     // Все, кроме late (его окно ещё идёт) и fresh.
     expect(limiter.size).toBe(2);
+    // Окно late истекло, но с чистки прошло меньше окна: следующая чистка ещё не пришла, late на месте.
+    c.advance(999);
+    limiter.hit('next');
+    expect(limiter.size).toBe(3);
+    c.advance(1);
+    limiter.hit('after');
+    // Чистка: late и fresh истекли, остаются next и after.
+    expect(limiter.size).toBe(2);
   });
 
   it('потолок адресов: при заполнении вытесняется самое старое окно, число записей не растёт', () => {
@@ -76,18 +84,25 @@ describe('RateLimiter', () => {
 
   it('окно, истёкшее между чистками, начинается заново и уходит в конец очереди вытеснения', () => {
     const c = clock(0);
-    const limiter = new RateLimiter({ limit: 1, windowMs: 1000 }, { now: c.now, maxKeys: 2 });
-    c.set(900);
+    const limiter = new RateLimiter({ limit: 1, windowMs: 1000 }, { now: c.now, maxKeys: 3 });
+    c.set(100);
     limiter.hit('a');
-    c.set(1000);
-    // Чистка: окну a всего 100 мс, оно остаётся.
+    c.set(600);
     limiter.hit('b');
-    c.set(1950);
-    // До следующей чистки ещё 50 мс, а окно a уже истекло: оно начинается заново, самое старое теперь b.
+    c.set(1100);
+    // Чистка: окно a истекло и начинается заново в конце; окну b 500 мс, оно остаётся первым.
     expect(limiter.hit('a')).toEqual({ ok: true });
+    c.set(1700);
+    // До следующей чистки ещё 400 мс, а окно b уже истекло: оно начинается заново, самое старое теперь a.
+    expect(limiter.hit('b')).toEqual({ ok: true });
+    c.set(1800);
     limiter.hit('c');
-    expect(limiter.size).toBe(2);
-    expect(limiter.hit('a')).toEqual({ ok: false, retryAfterSeconds: 1 });
+    c.set(1900);
+    // Потолок: вытесняется a (окно с 1100), а не b (окно с 1700), хотя b попал в карту раньше.
+    limiter.hit('d');
+    expect(limiter.size).toBe(3);
+    expect(limiter.hit('b')).toEqual({ ok: false, retryAfterSeconds: 1 });
+    expect(limiter.hit('a')).toEqual({ ok: true });
   });
 
   it('часы ушли назад: окно из будущего начинается заново, а не блокирует адрес надолго', () => {
