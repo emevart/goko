@@ -29,6 +29,11 @@ describe('текст ошибки для человека', () => {
     expect(humanText('not_your_turn', { reason: 'ko' })).toBe(ERROR_TEXT.not_your_turn);
   });
 
+  it('исчерпанная серия повторов: нейтральный текст, не про движок и не про диск', () => {
+    expect(humanText('retries_exhausted')).toBe('Гоко не может продолжить партию; скажи что-нибудь, и он попробует снова');
+    expect(humanText('engine_gave_up')).toBe(ERROR_TEXT.internal);
+  });
+
   it('код события error — строка: незнакомый код даёт текст internal', () => {
     expect(humanText('something_new')).toBe(ERROR_TEXT.internal);
     expect(humanText('constructor')).toBe(ERROR_TEXT.internal);

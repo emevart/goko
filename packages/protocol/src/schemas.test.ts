@@ -412,7 +412,6 @@ describe('ошибки', () => {
       [
         'bad_request',
         'engine_busy',
-        'engine_gave_up',
         'engine_unavailable',
         'game_finished',
         'illegal_move',
@@ -422,6 +421,7 @@ describe('ошибки', () => {
         'not_found',
         'not_your_turn',
         'nothing_to_undo',
+        'retries_exhausted',
         'revision_conflict',
         'unauthorized',
         'unsupported_controller',
@@ -445,7 +445,7 @@ describe('ошибки', () => {
       internal: 500,
       engine_busy: 503,
       engine_unavailable: 503,
-      engine_gave_up: 503,
+      retries_exhausted: 503,
     });
     expect(Object.keys(ERROR_STATUS)).toHaveLength(15);
     for (const code of ERROR_CODES) expect(ERROR_STATUS[code], code).toBeGreaterThanOrEqual(400);
@@ -468,6 +468,13 @@ describe('ошибки', () => {
     expect(ErrorBody.parse(e.toBody())).toEqual({
       error: { code: 'illegal_move', message: 'illegal move E5: occupied', details: { reason: 'occupied' } },
     });
+  });
+
+  it('ApiError хранит cause, но в тело ответа её не кладёт', () => {
+    const cause = new Error('connect ECONNREFUSED 10.1.2.3:8788');
+    const e = new ApiError('engine_unavailable', 'engine is unreachable', undefined, { cause });
+    expect(e.cause).toBe(cause);
+    expect(e.toBody()).toEqual({ error: { code: 'engine_unavailable', message: 'engine is unreachable' } });
   });
 
   it('ApiError без details не кладёт details в тело', () => {

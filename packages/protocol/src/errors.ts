@@ -11,7 +11,7 @@ export const ERROR_CODES = [
   'engine_busy',
   'engine_unavailable',
   // Серия повторов фоновой задачи исчерпана (только событие error; партия остаётся playing).
-  'engine_gave_up',
+  'retries_exhausted',
   'unsupported_controller',
   'not_found',
   'bad_request',
@@ -36,7 +36,7 @@ export const ERROR_STATUS: Record<ErrorCode, number> = {
   internal: 500,
   engine_busy: 503,
   engine_unavailable: 503,
-  engine_gave_up: 503,
+  retries_exhausted: 503,
 };
 
 export const ErrorBody = z.object({
@@ -53,8 +53,9 @@ export class ApiError extends Error {
   readonly status: number;
   readonly details?: Record<string, unknown>;
 
-  constructor(code: ErrorCode, message: string, details?: Record<string, unknown>) {
-    super(message);
+  // options.cause — исходное исключение для лога; в тело ответа и в событие не попадает.
+  constructor(code: ErrorCode, message: string, details?: Record<string, unknown>, options?: ErrorOptions) {
+    super(message, options);
     this.name = 'ApiError';
     this.code = code;
     this.status = ERROR_STATUS[code];

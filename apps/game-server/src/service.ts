@@ -52,9 +52,9 @@ export const ENGINE_RESIGN_WINRATE = 0.03;
 export const ENGINE_RESIGN_LEAD = -25;
 export const GENMOVE_VISITS = 10;
 // Серия повторов фоновой задачи: пауза перед k-м повтором — k-е число. Отказ после последней
-// паузы даёт одно событие engine_gave_up, и партия ждёт действия человека (resume).
+// паузы даёт одно событие retries_exhausted, и партия ждёт действия человека (resume).
 export const ENGINE_RETRY_DELAYS_MS: readonly number[] = [5_000, 10_000, 20_000, 40_000, 60_000];
-export const ENGINE_GAVE_UP_MESSAGE = 'background task gave up after retries';
+export const RETRIES_EXHAUSTED_MESSAGE = 'background task retries are exhausted';
 // Бюджет ожидания вопросов «кто впереди» и «оцени позицию». Цели спеки (10 с и 4 с)
 // описывают норму, бюджет обязан покрыть замер на сервере (счёт на 400 просмотрах —
 // 5,3 с) с запасом. Без бюджета вызывающий ждал бы два таймаута клиента: 60,2 и 30,2 с.
@@ -534,7 +534,7 @@ export class GameService {
   }
 
   // Отказ в серии повторов: событие error, ожидающие получают null (клиент увидит replyTimedOut),
-  // пауза очередной длины. Отказ после последней паузы — одно событие engine_gave_up, партия
+  // пауза очередной длины. Отказ после последней паузы — одно событие retries_exhausted, партия
   // остаётся playing и ждёт resume. Возвращает true, если нужен повтор.
   private async onFailure(id: string, e: unknown, code: ErrorCode, message: string, logLine: (detail: string) => string): Promise<boolean> {
     const detail = e instanceof Error ? e.message : String(e);
@@ -545,7 +545,7 @@ export class GameService {
       this.failures.delete(id);
       this.gaveUp.add(id);
       this.deps.log?.(`${logLine(detail)}; gave up after ${delays.length} retries`);
-      this.emitGame(id, { type: 'error', code: 'engine_gave_up', message: ENGINE_GAVE_UP_MESSAGE });
+      this.emitGame(id, { type: 'error', code: 'retries_exhausted', message: RETRIES_EXHAUSTED_MESSAGE });
       this.releaseWaiters(id);
       return false;
     }

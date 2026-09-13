@@ -7,7 +7,7 @@ import type { Engine } from './engine-client.ts';
 import { EventBus } from './events.ts';
 import { type FakeEngine, createFakeEngine } from './fake-engine.ts';
 import { newGame } from './game.ts';
-import { ENGINE_GAVE_UP_MESSAGE, ENGINE_RETRY_DELAYS_MS, GameService } from './service.ts';
+import { ENGINE_RETRY_DELAYS_MS, GameService, RETRIES_EXHAUSTED_MESSAGE } from './service.ts';
 import { GameStore } from './store.ts';
 import { track } from './test-helpers.ts';
 
@@ -1634,7 +1634,7 @@ describe('GameService: серия повторов фоновой задачи',
   const errorsOf = (events: GameEvent[]) => events.filter((e) => e.type === 'error');
   const codes = (events: GameEvent[]) => events.flatMap((e) => (e.type === 'error' ? [e.code] : []));
 
-  it('паузы 5/10/20/40/60 с, затем одно engine_gave_up; партия остаётся playing, повторов больше нет', async () => {
+  it('паузы 5/10/20/40/60 с, затем одно retries_exhausted; партия остаётся playing, повторов больше нет', async () => {
     expect(ENGINE_RETRY_DELAYS_MS).toEqual([5_000, 10_000, 20_000, 40_000, 60_000]);
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     let calls = 0;
@@ -1659,8 +1659,8 @@ describe('GameService: серия повторов фоновой задачи',
     await untilTick(() => errorsOf(events).length === 6);
     const errors = errorsOf(events);
     expect(errors.slice(0, 5)).toEqual(new Array(5).fill({ type: 'error', code: 'engine_unavailable', message: 'engine is unreachable' }));
-    expect(errors[5]).toEqual({ type: 'error', code: 'engine_gave_up', message: ENGINE_GAVE_UP_MESSAGE });
-    expect(ENGINE_GAVE_UP_MESSAGE).toMatch(/^[\x20-\x7e]+$/);
+    expect(errors[5]).toEqual({ type: 'error', code: 'retries_exhausted', message: RETRIES_EXHAUSTED_MESSAGE });
+    expect(RETRIES_EXHAUSTED_MESSAGE).toMatch(/^[\x20-\x7e]+$/);
     expect(logs.filter((l) => l.includes('gave up'))).toHaveLength(1);
     // Пауз больше нет, и часы, сдвинутые на десять минут, не поднимают движок.
     expect(vi.getTimerCount()).toBe(0);
@@ -1672,7 +1672,7 @@ describe('GameService: серия повторов фоновой задачи',
     expect(service.get(id).pendingEngineMove).toBe(true);
   });
 
-  it('отказ записи снапшота считается в той же серии: после последней паузы одно engine_gave_up', async () => {
+  it('отказ записи снапшота считается в той же серии: после последней паузы одно retries_exhausted', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     const real = new GameStore(dir);
     const store = {
@@ -1693,7 +1693,7 @@ describe('GameService: серия повторов фоновой задачи',
     await untilTick(() => errorsOf(events).length === 2);
     await vi.advanceTimersByTimeAsync(20);
     await untilTick(() => errorsOf(events).length === 3);
-    expect(errorsOf(events).map((e) => (e.type === 'error' ? e.code : ''))).toEqual(['internal', 'internal', 'engine_gave_up']);
+    expect(errorsOf(events).map((e) => (e.type === 'error' ? e.code : ''))).toEqual(['internal', 'internal', 'retries_exhausted']);
     await vi.advanceTimersByTimeAsync(10_000);
     await tick(10);
     expect(engine.calls.genmove).toBe(3);
@@ -1743,7 +1743,7 @@ describe('GameService: серия повторов фоновой задачи',
     ['resume (открытие потока событий)', async (s, id) => s.resume(id)],
   ];
   for (const [name, act] of restarts) {
-    it(`после engine_gave_up серию запускает заново действие человека: ${name}`, async () => {
+    it(`после retries_exhausted серию запускает заново действие человека: ${name}`, async () => {
       vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
       let calls = 0;
       const { service, bus } = await make(
@@ -1756,23 +1756,23 @@ describe('GameService: серия повторов фоновой задачи',
       await untilTick(() => calls === 1);
       await vi.advanceTimersByTimeAsync(10);
       // Первая ошибка ушла ещё внутри create, до подписки: считаем от финальной.
-      await untilTick(() => codes(events).includes('engine_gave_up'));
+      await untilTick(() => codes(events).includes('retries_exhausted'));
       await tick(5);
       expect(calls).toBe(2);
-      expect(codes(events)).toEqual(['engine_gave_up']);
+      expect(codes(events)).toEqual(['retries_exhausted']);
       await act(service, id).catch(() => undefined);
       await untilTick(() => calls === 3);
       // Новая серия: снова пауза и повтор, а не сразу финальная ошибка.
       await untilTick(() => codes(events).length === 2);
-      expect(codes(events)).toEqual(['engine_gave_up', 'engine_unavailable']);
+      expect(codes(events)).toEqual(['retries_exhausted', 'engine_unavailable']);
       await vi.advanceTimersByTimeAsync(10);
       await untilTick(() => calls === 4);
       await untilTick(() => codes(events).length === 3);
-      expect(codes(events)).toEqual(['engine_gave_up', 'engine_unavailable', 'engine_gave_up']);
+      expect(codes(events)).toEqual(['retries_exhausted', 'engine_unavailable', 'retries_exhausted']);
     });
   }
 
-  it('отказы записи: после engine_gave_up и resume серия снова начинается с первой паузы', async () => {
+  it('отказы записи: после retries_exhausted и resume серия снова начинается с первой паузы', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     const real = memoryStore();
     const store = {
@@ -1792,18 +1792,18 @@ describe('GameService: серия повторов фоновой задачи',
     await vi.advanceTimersByTimeAsync(10);
     await untilTick(() => codes(events).length === 2);
     await vi.advanceTimersByTimeAsync(20);
-    await untilTick(() => codes(events).includes('engine_gave_up'));
+    await untilTick(() => codes(events).includes('retries_exhausted'));
     service.resume(id);
     await untilTick(() => codes(events).length === 4);
     await tick(5);
     // Новая серия: первая пауза 10 мс, а не сразу финал.
-    expect(codes(events)).toEqual(['internal', 'internal', 'engine_gave_up', 'internal']);
+    expect(codes(events)).toEqual(['internal', 'internal', 'retries_exhausted', 'internal']);
     await vi.advanceTimersByTimeAsync(10);
     await untilTick(() => codes(events).length === 5);
     expect(codes(events)[4]).toBe('internal');
   });
 
-  it('счёт после двух пасов: серия кончается engine_gave_up, счёт больше не зовётся до действия человека', async () => {
+  it('счёт после двух пасов: серия кончается retries_exhausted, счёт больше не зовётся до действия человека', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     let calls = 0;
     const flaky: Engine = {
@@ -1821,11 +1821,11 @@ describe('GameService: серия повторов фоновой задачи',
     await service.pass(id, { waitForReply: false, via: 'api' });
     await untilTick(() => codes(events).length === 1);
     await vi.advanceTimersByTimeAsync(10);
-    await untilTick(() => codes(events).includes('engine_gave_up'));
+    await untilTick(() => codes(events).includes('retries_exhausted'));
     await vi.advanceTimersByTimeAsync(10_000);
     await tick(10);
     expect(calls).toBe(2);
-    expect(codes(events)).toEqual(['engine_unavailable', 'engine_gave_up']);
+    expect(codes(events)).toEqual(['engine_unavailable', 'retries_exhausted']);
     expect(vi.getTimerCount()).toBe(0);
     expect(service.get(id).status).toBe('playing');
     service.resume(id);
@@ -1857,7 +1857,7 @@ describe('GameService: серия повторов фоновой задачи',
     expect(res).toMatchObject({ move: { coord: 'C3' }, replyTimedOut: true });
   });
 
-  it('сдача человека после engine_gave_up снимает отметку исчерпанной серии', async () => {
+  it('сдача человека после retries_exhausted снимает отметку исчерпанной серии', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     let calls = 0;
     const { service, bus } = await make(
@@ -1869,7 +1869,7 @@ describe('GameService: серия повторов фоновой задачи',
     const events = record(bus, `game:${id}`);
     await untilTick(() => calls === 1);
     await vi.advanceTimersByTimeAsync(10);
-    await untilTick(() => codes(events).includes('engine_gave_up'));
+    await untilTick(() => codes(events).includes('retries_exhausted'));
     expect(service.internalSizes().gaveUp).toBe(1);
     // Партия кончается, перезапускать нечего: отметка не должна пережить партию.
     // resign зовёт resume до мьютекса (как и прочие действия): при отказе записи сдачи партия
@@ -1920,7 +1920,7 @@ describe('GameService: серия повторов фоновой задачи',
     const events = record(bus, `game:${id}`);
     await untilTick(() => calls === 1);
     await vi.advanceTimersByTimeAsync(10);
-    await untilTick(() => codes(events).includes('engine_gave_up'));
+    await untilTick(() => codes(events).includes('retries_exhausted'));
     await service.close();
     service.resume(id);
     await service.setRank(id, { color: 'B', rank: '5k' });
