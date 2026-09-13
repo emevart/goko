@@ -495,4 +495,16 @@ describe('smoke: завершение по концу сценария и по �
     await done;
     expect(h.exits).toEqual([0]);
   });
+
+  it('синхронный бросок удаления dataDir тоже не мешает итогу и коду выхода', async () => {
+    const h = harness({
+      rmImpl: () => {
+        throw new Error('EBUSY');
+      },
+    });
+    const done = h.finish();
+    h.release();
+    await done;
+    expect(h.events.slice(-2)).toEqual(['[OK] smoke: все шаги прошли', 'exit 0']);
+  });
 });
