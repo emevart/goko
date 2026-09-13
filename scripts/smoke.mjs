@@ -171,6 +171,52 @@ export function startChild(name, args, root, env, start = startLogged) {
   return start(name, process.execPath, args, smokeStartOptions(root, env));
 }
 
+/**
+ * Завершение smoke ровно одно: по концу сценария или по SIGINT/SIGTERM, что случится первым. Дети
+ * останавливаются один раз, затем удаляется dataDir, затем итог и код выхода. Сигнал в любой фазе, в том
+ * числе во время финальной остановки, — ошибка прогона: [X] и код 1. Обработчик сигнала остаётся после
+ * первого (on, а не once): иначе повторный Ctrl+C ушёл бы в обработчик Node по умолчанию, и smoke вышел бы,
+ * не дождавшись детей. Повторный сигнал только печатает [!]: остановку ограничивает потолок stopWithCeiling.
+ * Возвращает finish — конец сценария ждёт ту же остановку, что запустил сигнал.
+ * @param {{
+ *   stopAll: () => Promise<void>,
+ *   dataDir: string,
+ *   fail: (msg: string) => void,
+ *   warn: (msg: string) => void,
+ *   failures: () => number,
+ *   log?: (line: string) => void,
+ *   exit?: (code: number) => void,
+ *   signals?: { on: (signal: 'SIGINT' | 'SIGTERM', handler: () => void) => unknown },
+ *   rmImpl?: (dir: string, opts: { recursive: boolean, force: boolean }) => Promise<unknown>,
+ * }} opts
+ * @returns {() => Promise<void>}
+ */
+export function smokeFinisher({ stopAll, dataDir, fail, warn, failures, log = (line) => console.log(line), exit = (code) => process.exit(code), signals = process, rmImpl = rm }) {
+  /** @type {Promise<void> | null} */
+  let finishing = null;
+  let signalled = false;
+  const finish = () =>
+    (finishing ??= (async () => {
+      await stopAll();
+      await rmImpl(dataDir, { recursive: true, force: true }).catch(() => {});
+      const failed = failures();
+      log(failed ? `[X] smoke: ошибок ${failed}` : '[OK] smoke: все шаги прошли');
+      exit(failed ? 1 : 0);
+    })());
+  for (const signal of /** @type {const} */ (['SIGINT', 'SIGTERM'])) {
+    signals.on(signal, () => {
+      if (signalled) {
+        warn(`smoke: повторный сигнал ${signal} — дети уже останавливаются, жду не дольше ${STOP_CEILING_MS} мс, затем силой`);
+        return;
+      }
+      signalled = true;
+      fail(`smoke: прерван сигналом ${signal}, останавливаю процессы`);
+      void finish();
+    });
+  }
+  return finish;
+}
+
 // Ошибка операции: проверяем code, status и details, а не текст — message английский и для разработчика.
 async function errorOf(promise) {
   try {
@@ -226,16 +272,10 @@ async function main() {
   }
 
   // Ctrl+C во время smoke: дети в своих группах (POSIX, detached) или в скрытых консолях (Windows) сигнала
-  // терминала не получают. Гасим их сами, а не оставляем сиротами на портах smoke. Повторный сигнал — выход сразу.
-  for (const signal of /** @type {const} */ (['SIGINT', 'SIGTERM'])) {
-    process.once(signal, () => {
-      if (stopping) return;
-      fail(`smoke: прерван сигналом ${signal}, останавливаю процессы`);
-      void stopAll().finally(() => process.exit(1));
-    });
-  }
-
+  // терминала не получают. Гасим их сами, а не оставляем сиротами на портах smoke (smokeFinisher).
+  // Каталог создаётся до обработчиков: детей до него нет, а путь сигнала должен знать, что удалять.
   const dataDir = await mkdtemp(path.join(tmpdir(), 'goko-smoke-'));
+  const finish = smokeFinisher({ stopAll, dataDir, fail, warn, failures: () => failed });
   try {
     if (real) {
       if (!process.env.KATAGO_BIN?.trim()) throw new Error('--real: нужна переменная KATAGO_BIN в .env');
@@ -353,11 +393,8 @@ async function main() {
   } catch (e) {
     fail(`сценарий прерван: ${e instanceof Error ? e.message : String(e)}`);
   } finally {
-    await stopAll();
-    await rm(dataDir, { recursive: true, force: true }).catch(() => {});
+    await finish();
   }
-  console.log(failed ? `[X] smoke: ошибок ${failed}` : '[OK] smoke: все шаги прошли');
-  process.exit(failed ? 1 : 0);
 }
 
 // Клиент открыл поток и не читает, сервер получает сигнал остановки: game-server обязан выйти штатно

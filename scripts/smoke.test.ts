@@ -1,6 +1,11 @@
+import { EventEmitter } from 'node:events';
+import { existsSync } from 'node:fs';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { STOP_CEILING_MS, withoutEmpty } from './processes.mjs';
-import { CLIENT_REQUEST_MS, HEALTH_REQUEST_MS, LIVEKIT_STUB, SMOKE_APP_KEY, gameServerEnv, goEngineEnv, smokeClient, smokeStartOptions, startChild, timedFetch, waitChildHealth, waitHealth } from './smoke.mjs';
+import { CLIENT_REQUEST_MS, HEALTH_REQUEST_MS, LIVEKIT_STUB, SMOKE_APP_KEY, gameServerEnv, goEngineEnv, smokeClient, smokeFinisher, smokeStartOptions, startChild, timedFetch, waitChildHealth, waitHealth } from './smoke.mjs';
 
 // Родительское окружение «как после .env»: настоящие ключи LiveKit и OpenAI и чужие настройки сервера.
 const parent = {
@@ -294,5 +299,122 @@ describe('smoke: клиент и запуск детей', () => {
     });
     expect(child).toEqual({ pid: 7 });
     expect(calls).toEqual([['game-server', process.execPath, ['apps/game-server/src/main.ts'], smokeStartOptions('/repo', { A: '1' })]]);
+  });
+});
+
+describe('smoke: завершение по концу сценария и по сигналу', () => {
+  // Остановка детей, которую тест отпускает сам; счётчик вызовов — чтобы видеть, что она одна.
+  function harness(opts: { rmImpl?: (dir: string, o: { recursive: boolean; force: boolean }) => Promise<unknown>; dataDir?: string } = {}) {
+    const events: string[] = [];
+    const fails: string[] = [];
+    const warns: string[] = [];
+    const signals = new EventEmitter();
+    let release = () => {};
+    let stops = 0;
+    let onExit: (code: number) => void = () => {};
+    const exited = new Promise<number>((resolve) => {
+      onExit = resolve;
+    });
+    const exits: number[] = [];
+    const finish = smokeFinisher({
+      stopAll: () => {
+        stops++;
+        events.push('stopAll');
+        return new Promise<void>((resolve) => {
+          release = () => {
+            events.push('stopped');
+            resolve();
+          };
+        });
+      },
+      dataDir: opts.dataDir ?? '/tmp/goko-smoke-test',
+      fail: (msg: string) => {
+        fails.push(msg);
+        events.push(`[X] ${msg}`);
+      },
+      warn: (msg: string) => {
+        warns.push(msg);
+        events.push(`[!] ${msg}`);
+      },
+      failures: () => fails.length,
+      log: (line: string) => events.push(line),
+      exit: (code: number) => {
+        exits.push(code);
+        events.push(`exit ${code}`);
+        onExit(code);
+      },
+      signals,
+      rmImpl:
+        opts.rmImpl ??
+        (async (dir, o) => {
+          events.push(`rm ${dir} ${JSON.stringify(o)}`);
+        }),
+    });
+    return { events, fails, warns, signals, exits, exited, finish, release: () => release(), stops: () => stops };
+  }
+
+  it('конец сценария без ошибок: дети остановлены, dataDir удалён, затем [OK] и код 0', async () => {
+    const h = harness();
+    const done = h.finish();
+    expect(h.events).toEqual(['stopAll']);
+    h.release();
+    await done;
+    expect(h.events).toEqual(['stopAll', 'stopped', 'rm /tmp/goko-smoke-test {"recursive":true,"force":true}', '[OK] smoke: все шаги прошли', 'exit 0']);
+  });
+
+  it('Ctrl+C во время финальной остановки — [X] и код 1; остановка по-прежнему одна', async () => {
+    const h = harness();
+    const done = h.finish();
+    h.signals.emit('SIGINT');
+    expect(h.fails).toEqual(['smoke: прерван сигналом SIGINT, останавливаю процессы']);
+    expect(h.exits).toEqual([]);
+    h.release();
+    await done;
+    await h.exited;
+    expect(h.stops()).toBe(1);
+    expect(h.exits).toEqual([1]);
+    expect(h.events.slice(-2)).toEqual(['[X] smoke: ошибок 1', 'exit 1']);
+  });
+
+  it('сигнал посреди сценария: остановка, удаление настоящего dataDir и выход 1 — без участия сценария', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'goko-smoke-finisher-'));
+    await writeFile(path.join(dir, 'game.json'), '{}');
+    const h = harness({ dataDir: dir, rmImpl: rm });
+    h.signals.emit('SIGTERM');
+    expect(h.events).toEqual(['[X] smoke: прерван сигналом SIGTERM, останавливаю процессы', 'stopAll']);
+    h.release();
+    expect(await h.exited).toBe(1);
+    expect(existsSync(dir)).toBe(false);
+    expect(h.events.slice(-2)).toEqual(['[X] smoke: ошибок 1', 'exit 1']);
+  });
+
+  it('повторный Ctrl+C не бросает детей: обработчик остаётся, выход только после остановки с потолком', async () => {
+    const h = harness();
+    h.signals.emit('SIGINT');
+    h.signals.emit('SIGINT');
+    h.signals.emit('SIGTERM');
+    expect(h.signals.listenerCount('SIGINT')).toBe(1);
+    expect(h.signals.listenerCount('SIGTERM')).toBe(1);
+    expect(h.stops()).toBe(1);
+    expect(h.fails).toHaveLength(1);
+    expect(h.warns).toEqual([
+      `smoke: повторный сигнал SIGINT — дети уже останавливаются, жду не дольше ${STOP_CEILING_MS} мс, затем силой`,
+      `smoke: повторный сигнал SIGTERM — дети уже останавливаются, жду не дольше ${STOP_CEILING_MS} мс, затем силой`,
+    ]);
+    expect(h.exits).toEqual([]);
+    h.release();
+    expect(await h.exited).toBe(1);
+    // Конец сценария после сигнала ждёт ту же остановку, а не запускает вторую.
+    await h.finish();
+    expect(h.stops()).toBe(1);
+    expect(h.exits).toEqual([1]);
+  });
+
+  it('отказ удаления dataDir не мешает итогу и коду выхода', async () => {
+    const h = harness({ rmImpl: async () => Promise.reject(new Error('EBUSY')) });
+    const done = h.finish();
+    h.release();
+    await done;
+    expect(h.exits).toEqual([0]);
   });
 });
