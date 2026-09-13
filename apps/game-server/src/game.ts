@@ -96,8 +96,8 @@ export function setRank(state: GameState, color: Color, rank: Rank): GameState {
 }
 
 // Переигрывает список ходов; статус всегда playing (вызывающий решает, что делать с result).
-// [!] Результат разделяет со входом объекты `moves`, `settings` и `seats` (ссылки, не копии).
-// Пока все переходы неизменяемы, это безопасно; править их на месте нельзя.
+// Результат не делит со входом ни список ходов, ни сами ходы, ни настройки, ни места: правка
+// одного состояния на месте не должна менять другое.
 export function rebuild(state: GameState, moves: Move[]): GameState {
   const size = state.settings.boardSize;
   const pos = replay(size, moves);
@@ -108,10 +108,12 @@ export function rebuild(state: GameState, moves: Move[]): GameState {
   delete rest.result;
   const next: GameState = {
     ...rest,
+    settings: { ...state.settings },
+    seats: { B: { ...state.seats.B }, W: { ...state.seats.W } },
     revision: state.revision + 1,
     status: 'playing',
     toPlay: last ? opposite(last.color) : 'B',
-    moves,
+    moves: moves.map((m) => ({ ...m })),
     board: pos.board,
     captures: { ...pos.captures },
     ko: pos.ko === null ? null : indexToCoord(pos.ko, size),

@@ -287,4 +287,34 @@ describe('rebuild', () => {
     const r = rebuild(fresh(), s.moves);
     expect(r.consecutivePasses).toBe(1);
   });
+
+  it('не делит с входом ни список ходов, ни ходы, ни настройки, ни места', () => {
+    const s = playAll(fresh(), ['D4', 'E5', 'C3']);
+    const kept = s.moves.slice(0, 2);
+    const before = structuredClone(s);
+    const keptBefore = structuredClone(kept);
+    const r = rebuild(s, kept);
+    expect(r.moves).not.toBe(kept);
+    expect(r.settings).not.toBe(s.settings);
+    expect(r.seats).not.toBe(s.seats);
+    expect(r.seats.B).not.toBe(s.seats.B);
+    expect(r.seats.W).not.toBe(s.seats.W);
+    // Правка результата на месте не трогает вход.
+    r.moves.push({ n: 3, color: 'B', coord: 'A1', captured: 0, at: T });
+    const first = r.moves[0];
+    if (!first) throw new Error('ход пропал');
+    first.coord = 'J9';
+    r.settings.komi = 0.5;
+    r.seats.B.label = 'mutated';
+    r.seats.W.rank = '1d';
+    expect(s).toEqual(before);
+    expect(kept).toEqual(keptBefore);
+    // И наоборот: правка входа после rebuild не трогает результат.
+    const again = rebuild(s, kept);
+    const snapshot = structuredClone(again);
+    kept.length = 0;
+    s.settings.komi = 0.5;
+    s.seats.W.rank = '1d';
+    expect(again).toEqual(snapshot);
+  });
 });
