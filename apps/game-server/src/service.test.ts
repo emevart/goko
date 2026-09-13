@@ -758,10 +758,42 @@ describe('GameService: фоновые задачи, дедлайны и мьют
     expect(saved).toBe(true);
   });
 
+  it('session.game уходит после записи снапшота: в момент события партия уже есть в сервисе', async () => {
+    const { service, bus } = await make(createFakeEngine());
+    const found: string[] = [];
+    bus.subscribe('session:s1', (e) => {
+      if (e.type === 'session.game') found.push(service.get(e.gameId).id);
+    });
+    const created = await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: true }, { sessionId: 's1' });
+    expect(found).toEqual([created.state.id]);
+    // Коммиты с другой причиной session.game не шлют: ход в партии сессии — только state.updated.
+    const seen = record(bus, 'session:s1');
+    await service.play(created.state.id, { coord: 'D4', waitForReply: true, via: 'api' });
+    expect(seen.map((e) => e.type)).toEqual(['state.updated']);
+  });
+
+  it('отказ записи снапшота новой партии: session.game нет, create отклоняется', async () => {
+    const real = new GameStore(dir);
+    let failed = false;
+    const store = gatedStore(real, async () => {
+      if (failed) return;
+      failed = true;
+      throw new Error('disk full');
+    });
+    const { service, bus } = await make(createFakeEngine(), { store });
+    const seen = record(bus, 'session:s1');
+    await expect(service.create({ ...HUMAN_ONLY, ...S9, waitForReply: true }, { sessionId: 's1' })).rejects.toThrow('disk full');
+    expect(seen).toEqual([]);
+    expect(service.list()).toEqual([]);
+    // Следующая партия той же сессии объявляется как обычно.
+    const created = await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: true }, { sessionId: 's1' });
+    expect(seen[0]).toEqual({ type: 'session.game', gameId: created.state.id });
+  });
+
   it('чужое изменение во время ожидания первого хода движка — не таймаут', async () => {
     const { service, bus } = await make(createFakeEngine({ script: ['C3'], delayMs: 300 }), { replyTimeoutMs: 3000 });
     let id = '';
-    // session.game публикуется до коммита, поэтому идентификатор известен раньше возврата create.
+    // session.game публикуется после записи снапшота, но до хода движка: идентификатор известен раньше возврата create.
     bus.subscribe('session:s1', (e) => {
       if (e.type === 'session.game') id = e.gameId;
     });

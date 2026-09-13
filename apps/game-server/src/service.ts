@@ -127,11 +127,8 @@ export class GameService {
       settings: GameSettings.parse(req.settings ?? {}),
       seats: { B: withRank(req.black), W: withRank(req.white) },
     });
-    if (opts.sessionId) {
-      // session.game идёт раньше событий партии (раздел 5 спеки).
-      this.sessionsByGame.set(id, opts.sessionId);
-      this.deps.bus.emit(`session:${opts.sessionId}`, { type: 'session.game', gameId: id });
-    }
+    // session.game шлёт commit: после записи снапшота, раньше событий партии (раздел 5 спеки).
+    if (opts.sessionId) this.sessionsByGame.set(id, opts.sessionId);
     const waiter = state.pendingEngineMove && req.waitForReply ? this.registerWaiter(id, state.revision) : null;
     await this.commit(state, 'new', 'system');
     if (!waiter) return { state };
@@ -328,6 +325,10 @@ export class GameService {
     // (или дождавшийся его опросом), уже не может опередить запись на диск.
     await this.deps.store.save(next);
     this.games.set(next.id, next);
+    // Новая партия сессии объявляется только когда она уже есть в сервисе: подписчик на session.game
+    // (currentGameId, поток сессии) сразу читает её состояние. При отказе записи события нет.
+    const sessionId = this.sessionsByGame.get(next.id);
+    if (cause === 'new' && sessionId) this.deps.bus.emit(`session:${sessionId}`, { type: 'session.game', gameId: next.id });
     this.emitGame(next.id, { type: 'state.updated', state: next, cause, by, ...(via ? { via } : {}) });
     if (next.status === 'finished' && prev?.status !== 'finished' && next.result) this.emitGame(next.id, { type: 'game.finished', result: next.result });
     this.settleWaiters(next, cause, prev);

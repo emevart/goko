@@ -61,7 +61,8 @@ type MakeOptions = {
 async function make(opts: MakeOptions = {}) {
   const bus = new EventBus();
   const engine = createFakeEngine({ script: opts.script, delayMs: opts.delayMs });
-  const service = new GameService({ store: new GameStore(dir), engine, bus, replyTimeoutMs: 500 });
+  const store = new GameStore(dir);
+  const service = new GameService({ store, engine, bus, replyTimeoutMs: 500 });
   opened.push(service);
   await service.init();
   const sessions = new SessionManager({ max: opts.maxSessions ?? 3, ttlMs: opts.ttlMs ?? 60_000, now: opts.now });
@@ -82,7 +83,7 @@ async function make(opts: MakeOptions = {}) {
   // Клиент протокола поверх app.request: без сети.
   const fetchFn = ((input: string | URL | Request, init?: RequestInit) => app.request(String(input).replace('http://app.test', ''), init)) as unknown as typeof fetch;
   const client = createClient({ baseUrl: 'http://app.test', appKey: KEY, fetch: fetchFn });
-  return { app, service, bus, client, sessions, rooms, logs, engine };
+  return { app, service, bus, client, sessions, rooms, logs, engine, store };
 }
 
 const decoder = new TextDecoder();
@@ -396,6 +397,53 @@ describe('createApp: сессии и LiveKit', () => {
     expect(sessions.get(session.id).currentGameId).toBe(created.state.id);
     const text = await readUntil(reader, (t) => t.includes('"cause":"new"'));
     expect(text.indexOf('event: session.game')).toBe(0);
+    await reader.cancel();
+  });
+
+  it('поток сессии, открытый пока пишется снапшот новой партии: 200 и старая партия, после записи — новая', async () => {
+    const { client, app, sessions, store } = await make();
+    const { session } = await client.createSession();
+    const old = await client.newGame(session.id, HUMAN_ONLY);
+    const save = store.save.bind(store);
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    let held = false;
+    vi.spyOn(store, 'save').mockImplementationOnce(async (state) => {
+      held = true;
+      await gate;
+      return save(state);
+    });
+    const pending = client.newGame(session.id, HUMAN_ONLY);
+    await untilTick(() => held);
+    expect(sessions.get(session.id).currentGameId).toBe(old.state.id);
+    const res = await app.request(`/api/sessions/${session.id}/events`, { headers: { 'x-app-key': KEY } });
+    expect(res.status).toBe(200);
+    const reader = streamOf(res);
+    const first = await readUntil(reader, (t) => t.includes('\n\n'));
+    expect(first).toContain('event: session.game');
+    expect(first).toContain(`"gameId":"${old.state.id}"`);
+    release();
+    const created = await pending;
+    const text = await readUntil(reader, (t) => t.includes(`"type":"session.game","gameId":"${created.state.id}"`));
+    expect(text).toContain(created.state.id);
+    expect(sessions.get(session.id).currentGameId).toBe(created.state.id);
+    await reader.cancel();
+  });
+
+  it('отказ записи снапшота новой партии: POST 500, currentGameId прежний, поток сессии 200 со старой партией', async () => {
+    const { client, app, sessions, store } = await make();
+    const { session } = await client.createSession();
+    const old = await client.newGame(session.id, HUMAN_ONLY);
+    vi.spyOn(store, 'save').mockRejectedValueOnce(new Error('disk full'));
+    const err = await errorOf(client.newGame(session.id, HUMAN_ONLY));
+    expect(err).toMatchObject({ code: 'internal', status: 500 });
+    expect(sessions.get(session.id).currentGameId).toBe(old.state.id);
+    const res = await app.request(`/api/sessions/${session.id}/events`, { headers: { 'x-app-key': KEY } });
+    expect(res.status).toBe(200);
+    const reader = streamOf(res);
+    const text = await readUntil(reader, (t) => t.includes('"cause":"sync"'));
+    expect(text.indexOf('event: session.game')).toBe(0);
+    expect(text).toContain(`"gameId":"${old.state.id}"`);
     await reader.cancel();
   });
 
