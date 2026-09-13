@@ -54,6 +54,22 @@ describe('прогрев движка при старте', () => {
     expect(line).toContain('katago exited with code 2');
   });
 
+  it('остановка по сигналу во время прогрева — не отказ: ни [X], ни кода выхода', async () => {
+    const f = fakeKatago(() => Promise.reject(new KataGoError('crashed', 'katago stopped')));
+    const logs: string[] = [];
+    const exits: number[] = [];
+    const ready = await warmupOrExit({
+      katago: f.katago,
+      log: (l) => logs.push(l),
+      exit: (c) => exits.push(c),
+      cancelled: () => true,
+    });
+    expect(ready).toBe(false); // порт не открывается
+    expect(exits).toEqual([]); // код 0 ставит обработчик сигнала, а не прогрев
+    expect(f.stops).toBe(0); // движок останавливает тот же обработчик
+    expect(logs.some((l) => l.startsWith('[X]'))).toBe(false);
+  });
+
   it('свой бюджет прогрева доходит до движка и попадает в сообщение об отказе', async () => {
     const f = fakeKatago(() => Promise.reject(new Error('boom')));
     const logs: string[] = [];

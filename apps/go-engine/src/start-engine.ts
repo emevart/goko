@@ -10,7 +10,7 @@ import { createEngineApp } from './app.ts';
 import { KataGo, type KataGoOptions } from './katago.ts';
 import { warmupOrExit } from './warmup.ts';
 
-// Ровно то, что от движка нужно точке входа: прогрев, HTTP-обёртка и остановка по сигналу.
+// Ровно то, что от движка нужно запуску: прогрев, HTTP-обёртка и остановка по сигналу.
 export type EngineLike = Pick<KataGo, 'start' | 'stop' | 'query' | 'queueLength' | 'restarts' | 'alive'>;
 
 export type Listen = (
@@ -57,9 +57,27 @@ export async function startEngine(deps: StartDeps = {}): Promise<void> {
 
   const katago = createEngine({ bin, model, humanModel, config, log });
   katago.start();
+
+  // Сигналы слушаются с первого мгновения жизни движка, а не после прогрева: прогрев длится
+  // до 300 с, а node в контейнере — PID 1, которому ядро без обработчика сигнал не доставит.
+  // Тогда docker stop ждёт SIGKILL, и KataGo не получает stop(). Сигнал во время прогрева —
+  // штатная остановка с кодом 0: прогрев отклоняется через stop(), но отказом не считается.
+  let server: { close: () => void } | null = null;
+  let stopping = false;
+  const on = deps.on ?? ((signal: 'SIGINT' | 'SIGTERM', handler: () => void) => void process.on(signal, handler));
+  for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+    on(signal, () => {
+      stopping = true;
+      server?.close();
+      void katago.stop().finally(() => exit(0));
+    });
+  }
+
   // Порт открывается только после ответа движка: готовность сервиса — это готовность KataGo.
   // Прогрев не вернётся, если движок не поднялся: там свой видимый отказ и выход с кодом.
-  if (!(await warmupOrExit({ katago, log, exit, timeoutMs: deps.warmupMs }))) return;
+  const ready = await warmupOrExit({ katago, log, exit, timeoutMs: deps.warmupMs, cancelled: () => stopping });
+  // Сигнал мог прийти, когда ответ прогрева уже был в пути: остановленному движку порт не нужен.
+  if (!ready || stopping) return;
 
   const app = createEngineApp({
     katago,
@@ -67,15 +85,7 @@ export async function startEngine(deps: StartDeps = {}): Promise<void> {
     models: { main: path.basename(model), human: path.basename(humanModel) },
     log,
   });
-  const server = listen(app, port, hostname, (actual) => {
+  server = listen(app, port, hostname, (actual) => {
     console.log(`[OK] go-engine на порту ${actual}; сети ${path.basename(model)} + ${path.basename(humanModel)}`);
   });
-
-  const on = deps.on ?? ((signal: 'SIGINT' | 'SIGTERM', handler: () => void) => void process.on(signal, handler));
-  for (const signal of ['SIGINT', 'SIGTERM'] as const) {
-    on(signal, () => {
-      server.close();
-      void katago.stop().finally(() => exit(0));
-    });
-  }
 }

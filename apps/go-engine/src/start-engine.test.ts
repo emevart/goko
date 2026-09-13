@@ -17,9 +17,12 @@ type Recorder = {
   closes: number;
   signals: Array<'SIGINT' | 'SIGTERM'>;
   handlers: Array<() => void>;
+  // Резолвится первым вызовом подделанного exit: тест ждёт событие, а не число микрозадач.
+  exited: Promise<number>;
 };
 
 function harness(answer: () => Promise<KataResponse>): { deps: StartDeps; rec: Recorder } {
+  let onExit: (code: number) => void = () => undefined;
   const rec: Recorder = {
     events: [],
     exits: [],
@@ -30,6 +33,9 @@ function harness(answer: () => Promise<KataResponse>): { deps: StartDeps; rec: R
     closes: 0,
     signals: [],
     handlers: [],
+    exited: new Promise<number>((resolve) => {
+      onExit = resolve;
+    }),
   };
   const engine: EngineLike = {
     start: () => rec.events.push('engine.start'),
@@ -68,7 +74,11 @@ function harness(answer: () => Promise<KataResponse>): { deps: StartDeps; rec: R
       rec.signals.push(signal);
       rec.handlers.push(handler);
     },
-    exit: (code) => rec.exits.push(code),
+    exit: (code) => {
+      rec.exits.push(code);
+      rec.events.push(`exit ${code}`);
+      onExit(code);
+    },
     log: (line) => rec.logs.push(line),
   };
   return { deps, rec };
@@ -96,7 +106,8 @@ describe('запуск go-engine', () => {
   it('без KATAGO_BIN и ENGINE_KEY движок не запускается вовсе', async () => {
     const { deps, rec } = harness(async () => ({ id: 'q1' }));
     await startEngine({ ...deps, env: { ENGINE_KEY: 'k' } });
-    expect(rec.events).toEqual([]);
+    expect(rec.events).toEqual(['exit 2']); // ни старта движка, ни прогрева
+    expect(rec.signals).toEqual([]);
     expect(rec.exits).toEqual([2]);
     await startEngine({ ...deps, env: { KATAGO_BIN: 'katago' } });
     expect(rec.exits).toEqual([2, 2]);
@@ -113,10 +124,55 @@ describe('запуск go-engine', () => {
     const handler = rec.handlers[0];
     expect(handler).toBeDefined();
     handler?.();
-    await Promise.resolve();
-    await Promise.resolve();
+    expect(await rec.exited).toBe(0);
     expect(rec.closes).toBe(1);
+    // Сначала движок, потом выход: настоящий process.exit раньше stop() оставил бы KataGo живым.
+    expect(rec.events).toEqual(['engine.start', 'engine.query', 'listen', 'engine.stop', 'exit 0']);
+    expect(rec.exits).toEqual([0]);
+  });
+
+  it('сигнал во время прогрева: движок останавливается, выход 0 без отказа прогрева', async () => {
+    // Прогрев не завершён: обработчик сигнала уже должен стоять, иначе docker stop ждёт SIGKILL.
+    let rejectWarmup: (err: Error) => void = () => undefined;
+    const { deps, rec } = harness(
+      () =>
+        new Promise<KataResponse>((_resolve, reject) => {
+          rejectWarmup = reject;
+        }),
+    );
+    const started = startEngine({
+      ...deps,
+      createEngine: (options) => {
+        const engine = deps.createEngine?.(options);
+        if (engine === undefined) throw new Error('harness has no engine');
+        // Настоящий KataGo.stop() отклоняет ждущий прогрев: подделка ведёт себя так же.
+        return {
+          ...engine,
+          stop: async () => {
+            await engine.stop();
+            rejectWarmup(new Error('katago stopped'));
+          },
+        };
+      },
+    });
+    expect(rec.signals).toEqual(['SIGINT', 'SIGTERM']);
+    rec.handlers[1]?.();
+    expect(await rec.exited).toBe(0);
+    await started;
+    expect(rec.exits).toEqual([0]);
+    expect(rec.events).not.toContain('listen');
     expect(rec.events).toContain('engine.stop');
+    expect(rec.logs.some((l) => l.startsWith('[X]'))).toBe(false);
+    expect(rec.closes).toBe(0);
+  });
+
+  it('сигнал пришёл, а прогрев всё же ответил: порт не открывается', async () => {
+    const { deps, rec } = harness(async () => ({ id: 'q1' }));
+    const started = startEngine(deps);
+    rec.handlers[0]?.(); // до того, как startEngine дождался прогрева
+    await started;
+    expect(await rec.exited).toBe(0);
+    expect(rec.events).not.toContain('listen');
     expect(rec.exits).toEqual([0]);
   });
 

@@ -26,6 +26,9 @@ export type WarmupDeps = {
   timeoutMs?: number;
   log?: (line: string) => void;
   exit?: (code: number) => void;
+  // Остановка по сигналу, пока идёт прогрев: отклонённый запрос тогда не отказ, а штатный
+  // выход, и печатать [X] или выходить с кодом 3 поверх кода 0 нельзя.
+  cancelled?: () => boolean;
 };
 
 // Ждёт первого ответа движка; возвращает true, если движок готов. Движок не поднялся — это
@@ -39,6 +42,7 @@ export async function warmupOrExit(deps: WarmupDeps): Promise<boolean> {
   try {
     await deps.katago.query(WARMUP_QUERY, timeoutMs);
   } catch (err) {
+    if (deps.cancelled?.() === true) return false;
     const reason = err instanceof Error ? err.message : String(err);
     deps.log?.(`[X] go-engine: движок не ответил на прогрев за ${timeoutMs} мс: ${reason}`);
     await deps.katago.stop();
