@@ -1141,33 +1141,72 @@ describe('GameService: фоновые задачи, дедлайны и мьют
     expect(scored).toBe(true);
   });
 
-  it('на партию идёт одна задача счёта', async () => {
-    let release: (() => void) | undefined;
-    let calls = 0;
+  // Счёт с воротами на каждом вызове: тест сам отпускает вызовы по одному.
+  function gatedScore() {
+    const releases: (() => void)[] = [];
+    const seenMoves: number[] = [];
     const inner = createFakeEngine();
-    const gated: Engine = {
+    const engine: Engine = {
       ...inner,
       score: async (req) => {
-        calls++;
+        seenMoves.push(req.moves.length);
         await new Promise<void>((r) => {
-          release = r;
+          releases.push(r);
         });
         return inner.score(req);
       },
     };
-    const { service } = await make(gated);
+    return { engine, releases, seenMoves };
+  }
+
+  it('коммит во время счёта: вторая задача не поднимается, счёт повторяется по новой ревизии', async () => {
+    const { engine, releases, seenMoves } = gatedScore();
+    const { service, bus } = await make(engine);
     const g = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: true });
     const id = g.state.id;
     await service.pass(id, { waitForReply: true, via: 'api' }); // пас человека и пас движка
-    await untilTick(() => release !== undefined);
-    // Коммит во время счёта не должен поднимать вторую задачу счёта.
+    await untilTick(() => releases.length === 1);
+    const events = record(bus, `game:${id}`);
     await service.setRank(id, { color: 'W', rank: '5k' });
     await tick(5);
-    expect(calls).toBe(1);
-    release?.();
-    await tick(5);
-    // Ревизия изменилась, пока счёт считался: результат к ней не применяется.
+    // Коммит во время счёта не поднимает вторую задачу счёта.
+    expect(releases).toHaveLength(1);
+    releases[0]?.();
+    // Ревизия сменилась: результат отброшен, та же задача считает заново.
+    await untilTick(() => releases.length === 2);
     expect(service.get(id).status).toBe('playing');
+    releases[1]?.();
+    await untilTick(() => service.get(id).status === 'finished');
+    const state = service.get(id);
+    expect(state.result?.reason).toBe('score');
+    expect(state.seats.W.rank).toBe('5k');
+    expect(seenMoves).toEqual([2, 2]);
+    expect(events.filter((e) => e.type === 'game.finished')).toHaveLength(1);
+  });
+
+  it('третий пас во время счёта: счёт повторяется и партия завершается по последней позиции', async () => {
+    const { engine, releases, seenMoves } = gatedScore();
+    const { service, bus } = await make(engine);
+    const g = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: true });
+    const id = g.state.id;
+    await service.pass(id, { waitForReply: true, via: 'api' });
+    await untilTick(() => releases.length === 1);
+    const events = record(bus, `game:${id}`);
+    // Человек у доски говорит «пас» ещё раз, пока сервер считает.
+    const third = await service.pass(id, { waitForReply: true, via: 'voice' });
+    expect(third.state.consecutivePasses).toBe(3);
+    expect(third.reply).toBeUndefined();
+    await tick(5);
+    expect(releases).toHaveLength(1);
+    releases[0]?.();
+    await untilTick(() => releases.length === 2);
+    expect(service.get(id).status).toBe('playing');
+    releases[1]?.();
+    await untilTick(() => service.get(id).status === 'finished');
+    expect(service.get(id).result?.reason).toBe('score');
+    expect(service.get(id).moves).toHaveLength(3);
+    expect(seenMoves).toEqual([2, 3]);
+    expect(events.filter((e) => e.type === 'game.finished')).toHaveLength(1);
   });
 
   it('close раньше отказа движка: пауза перед повтором не начинается', async () => {

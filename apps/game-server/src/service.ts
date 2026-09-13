@@ -501,13 +501,17 @@ export class GameService {
         await this.onEngineFailure(id, e);
         continue;
       }
-      await this.locked(id, async () => {
+      // Партия изменилась, пока движок считал (setRank, третий пас): результат отбрасывается,
+      // и счёт повторяется по новой ревизии. Выйти здесь нельзя: коммит, сменивший ревизию,
+      // новую задачу счёта не поставил — эта ещё числилась в карте, и партия осталась бы без итога.
+      const applied = await this.locked(id, async () => {
         const current = this.games.get(id);
-        if (this.closed || !current || current.revision !== state.revision) return;
+        if (this.closed || !current || current.revision !== state.revision) return false;
         // причина `pass`: спека не вводит отдельной причины для автосчёта
         await this.commit(finishByScore(current, result), 'pass', 'system');
+        return true;
       });
-      return;
+      if (applied) return;
     }
   }
 }
