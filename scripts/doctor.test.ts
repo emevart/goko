@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { REQUIRED_ENV, checkEnvNames, checkNodeVersion, readDotEnv, verdict } from './doctor.mjs';
+import { REQUIRED_ENV, checkEnvNames, checkNodeVersion, envValue, readDotEnv, verdict } from './doctor.mjs';
 
 describe('doctor', () => {
   it('finds missing env names without printing values', () => {
@@ -45,6 +45,16 @@ describe('doctor', () => {
     const res = checkEnvNames({ APP_KEY: '', ENGINE_KEY: 'x' }, ['APP_KEY', 'ENGINE_KEY']);
     expect(res.missing).toEqual(['APP_KEY']);
     expect(res.present).toEqual(['ENGINE_KEY']);
+  });
+
+  it('значение из пробелов тоже считается отсутствующим', () => {
+    const res = checkEnvNames({ APP_KEY: ' \t', ENGINE_KEY: ' x ' }, ['APP_KEY', 'ENGINE_KEY']);
+    expect(res.missing).toEqual(['APP_KEY']);
+    expect(res.present).toEqual(['ENGINE_KEY']);
+    expect(envValue({ A: '', B: '  ', C: 'x' }, 'A')).toBeUndefined();
+    expect(envValue({ A: '', B: '  ', C: 'x' }, 'B')).toBeUndefined();
+    expect(envValue({ A: '', B: '  ', C: 'x' }, 'C')).toBe('x');
+    expect(envValue({}, 'D')).toBeUndefined();
   });
 
   it('readDotEnv пропускает комментарии и пустые строки, снимает кавычки', () => {

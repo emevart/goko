@@ -143,6 +143,33 @@ describe('doctor: боевой запуск', () => {
   );
 
   it(
+    'пустые значения из infra/.env.example — «не задано»: сети по умолчанию, пустой KATAGO_BIN не [X]',
+    () => {
+      // Сети по умолчанию лежат на месте: пустая переменная должна привести к ним, а не к пути ''.
+      const models = path.join(dir, 'apps', 'go-engine', 'models');
+      mkdirSync(models, { recursive: true });
+      writeFileSync(path.join(models, 'kata1-b10c128-s1141046784-d204142634.txt.gz'), '');
+      writeFileSync(path.join(models, 'b18c384nbt-humanv0.bin.gz'), '');
+      const { lines, status } = runDoctor(
+        { ...SPIKE, KATAGO_MODEL: '', AGENT_NAME: '', KATAGO_BIN: '', ENGINE_KEY: '' },
+        // Из пробелов — через окружение процесса: readDotEnv сам обрезает значения.
+        { extraEnv: { KATAGO_HUMAN_MODEL: '  ', APP_KEY: '  ', WEB_HOST: '  ' } },
+      );
+      expect(lines).toContain('[OK] основная сеть на месте (KATAGO_MODEL)');
+      expect(lines).toContain('[OK] человеческая сеть на месте (KATAGO_HUMAN_MODEL)');
+      expect(lines).toContain('[!] KATAGO_BIN не задан: движок будет недоступен, тесты движка пропускаются');
+      expect(lines).toContain("[!] AGENT_NAME не задан: спайк возьмёт продовое имя 'goko', на ПК нужен 'goko-dev'");
+      expect(lines).toContain('[!] env отсутствуют: WEB_HOST — спайк не запустится (см. infra/.env.example)');
+      expect(lines).toContain('[!] env отсутствуют: ENGINE_KEY — go-engine не запустится (см. infra/.env.example)');
+      expect(lines).toContain('[!] env для стадии 1 отсутствуют: APP_KEY (сейчас не нужны)');
+      expect(lines).toContain('[!] doctor: инструменты на месте, но не запустится без WEB_HOST, ENGINE_KEY');
+      expect(lines.join('\n')).not.toContain(MARKER);
+      expect(status).toBe(0);
+    },
+    60_000,
+  );
+
+  it(
     'сломанный инструмент — это [X] и код возврата 1, а не «не запустится»',
     () => {
       // Без PATH не находятся ни npm, ни git, ни docker; KATAGO_BIN указывает в никуда.

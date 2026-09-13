@@ -14,8 +14,15 @@ export function checkNodeVersion(version) {
   return { ok, reason: ok ? '' : `need >= 22.18, got ${version}` };
 }
 
+// Пустая или из пробелов переменная — то же, что не заданная: так её читают game-server и go-engine,
+// а infra/.env.example перечисляет необязательные переменные с пустыми значениями.
+export function envValue(env, name) {
+  const value = env[name];
+  return value === undefined || value.trim() === '' ? undefined : value;
+}
+
 export function checkEnvNames(env, required) {
-  const present = required.filter((k) => env[k] !== undefined && env[k] !== '');
+  const present = required.filter((k) => envValue(env, k) !== undefined);
   const missing = required.filter((k) => !present.includes(k));
   return { present, missing };
 }
@@ -92,11 +99,11 @@ function main() {
   // AGENT_NAME молча подменяется дефолтом 'goko' в трёх файлах спайка. На ПК это
   // продовое имя: воркер зарегистрируется, но заданий не получит, и выглядит это
   // как «агент запустился, но молчит».
-  if (!env.AGENT_NAME) warn("AGENT_NAME не задан: спайк возьмёт продовое имя 'goko', на ПК нужен 'goko-dev'");
+  if (envValue(env, 'AGENT_NAME') === undefined) warn("AGENT_NAME не задан: спайк возьмёт продовое имя 'goko', на ПК нужен 'goko-dev'");
   else ok('AGENT_NAME задан');
 
-  const kb = env.KATAGO_BIN;
-  if (!kb) warn('KATAGO_BIN не задан: движок будет недоступен, тесты движка пропускаются');
+  const kb = envValue(env, 'KATAGO_BIN');
+  if (kb === undefined) warn('KATAGO_BIN не задан: движок будет недоступен, тесты движка пропускаются');
   else if (!existsSync(kb)) fail(`KATAGO_BIN указывает на несуществующий файл`);
   else ok('KATAGO_BIN найден');
 
@@ -104,8 +111,8 @@ function main() {
   // Печатаются только имена переменных и вердикт: значения env не выводятся.
   const models = path.join(root, 'apps/go-engine/models');
   const nets = [
-    { envName: 'KATAGO_MODEL', label: 'основная сеть', file: env.KATAGO_MODEL ?? path.join(models, 'kata1-b10c128-s1141046784-d204142634.txt.gz') },
-    { envName: 'KATAGO_HUMAN_MODEL', label: 'человеческая сеть', file: env.KATAGO_HUMAN_MODEL ?? path.join(models, 'b18c384nbt-humanv0.bin.gz') },
+    { envName: 'KATAGO_MODEL', label: 'основная сеть', file: envValue(env, 'KATAGO_MODEL') ?? path.join(models, 'kata1-b10c128-s1141046784-d204142634.txt.gz') },
+    { envName: 'KATAGO_HUMAN_MODEL', label: 'человеческая сеть', file: envValue(env, 'KATAGO_HUMAN_MODEL') ?? path.join(models, 'b18c384nbt-humanv0.bin.gz') },
   ];
   for (const net of nets) {
     if (existsSync(net.file)) ok(`${net.label} на месте (${net.envName})`);
