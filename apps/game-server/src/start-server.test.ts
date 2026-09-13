@@ -69,6 +69,8 @@ type HarnessOptions = {
   listenError?: Error;
   // Ошибка сокета уже после готовности (EMFILE на accept и т. п.).
   errorAfterReady?: Error;
+  // Как боевой сервер с застрявшим соединением: server.close завершается только после closeAllConnections.
+  stuckConnection?: boolean;
 };
 
 function harness(opts: HarnessOptions = {}): { deps: StartDeps; rec: Recorder } {
@@ -98,12 +100,18 @@ function harness(opts: HarnessOptions = {}): { deps: StartDeps; rec: Recorder } 
       if (opts.listenError) onError(opts.listenError);
       else onReady({ address: hostname, port });
       if (opts.errorAfterReady) onError(opts.errorAfterReady);
+      let stuckDone: (() => void) | null = null;
       return {
         close: (done) => {
           rec.events.push('server.close');
           opts.onServerClose?.(app);
           if (opts.holdServerClose) serverDone = done;
+          else if (opts.stuckConnection) stuckDone = done;
           else done();
+        },
+        closeAllConnections: () => {
+          rec.events.push('server.closeAllConnections');
+          stuckDone?.();
         },
       };
     },
@@ -469,6 +477,23 @@ describe('startServer: шов createListen', () => {
     expect(closed).toBe(1);
     expect(done).toBe(1);
   });
+
+  it('closeAllConnections уходит в сервер; у сервера без метода (http2) — без исключения', () => {
+    let dropped = 0;
+    const make = (withMethod: boolean) =>
+      ((_options: unknown, _cb: unknown) => ({
+        close: (done: () => void) => done(),
+        on: () => undefined,
+        ...(withMethod ? { closeAllConnections: () => void dropped++ } : {}),
+      })) as unknown as Parameters<typeof createListen>[0];
+    const app = { fetch: () => new Response('') } as unknown as Parameters<Listen>[0];
+    const handle = createListen(make(true))(app, 1, 'localhost', () => undefined, () => undefined);
+    expect(dropped).toBe(0);
+    handle.closeAllConnections();
+    expect(dropped).toBe(1);
+    const bare = createListen(make(false))(app, 1, 'localhost', () => undefined, () => undefined);
+    expect(() => bare.closeAllConnections()).not.toThrow();
+  });
 });
 
 describe('startServer: остановка', () => {
@@ -485,7 +510,63 @@ describe('startServer: остановка', () => {
     expect(rec.exits).toEqual([]); // сервер ещё закрывается
     rec.finishServerClose();
     expect(await rec.exited).toBe(0);
-    expect(rec.events).toEqual(['listen', 'server.close', 'service.close', 'exit 0']);
+    expect(rec.events).toEqual(['listen', 'server.close', 'service.close', 'server.closeAllConnections', 'exit 0']);
+  });
+
+  it('застрявшее соединение: после server.close и service.close — closeAllConnections, выход 0 до дедлайна', async () => {
+    say();
+    const { deps, rec } = harness({ stuckConnection: true, holdServiceClose: true });
+    expect(await startServer(deps)).not.toBeNull();
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    rec.handlers.get('SIGTERM')?.();
+    await untilTick(() => rec.events.includes('service.close'));
+    for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
+    // Пока сервис закрывается, соединения не рвутся: текущие запросы успевают получить ответ.
+    expect(rec.events).toEqual(['listen', 'server.close', 'service.close']);
+    rec.finishServiceClose();
+    // Время не продвигается: выход приходит от closeAllConnections, а не от дедлайна.
+    await untilTick(() => rec.exits.length > 0);
+    expect(rec.exits).toEqual([0]);
+    expect(rec.events).toEqual(['listen', 'server.close', 'service.close', 'server.closeAllConnections', 'exit 0']);
+    expect(vi.getTimerCount()).toBe(0);
+    expect(rec.logs.some((l) => l.includes('выход без ожидания'))).toBe(false);
+    await vi.advanceTimersByTimeAsync(SHUTDOWN_MS * 2);
+    expect(rec.exits).toEqual([0]);
+  });
+
+  it('застрявшее соединение при отказе service.close — closeAllConnections всё равно, выход 0', async () => {
+    say();
+    const { deps, rec } = harness({ stuckConnection: true, serviceCloseFails: true });
+    expect(await startServer(deps)).not.toBeNull();
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    rec.handlers.get('SIGINT')?.();
+    await untilTick(() => rec.exits.length > 0);
+    expect(rec.exits).toEqual([0]);
+    expect(rec.events).toEqual(['listen', 'server.close', 'service.close', 'server.closeAllConnections', 'exit 0']);
+  });
+
+  it('потоки SSE закрыты раньше closeAllConnections: остановка объявлена до обрыва соединений', async () => {
+    say();
+    const headers = { 'x-app-key': BASE_ENV.APP_KEY, 'content-type': 'application/json' };
+    const { deps, rec } = harness({ stuckConnection: true });
+    const started = await startServer(deps);
+    if (!started) throw new Error('сервер не запустился');
+    const created = await started.app.request('/api/games', { method: 'POST', headers, body: JSON.stringify({ black: { controller: 'human' }, white: { controller: 'human' } }) });
+    const gameId = ((await created.json()) as { state: { id: string } }).state.id;
+    const res = await started.app.request(`/api/games/${gameId}/events`, { headers });
+    const reader = res.body?.getReader();
+    if (!reader) throw new Error('нет тела');
+    await reader.read();
+    rec.handlers.get('SIGINT')?.();
+    const ended = reader.read().then((r) => {
+      rec.events.push(`sse.done ${r.done}`);
+    });
+    // Ожидание по оборотам очереди: без выхода тест падает на утверждении, а не по таймауту.
+    await untilTick(() => rec.exits.length > 0, 5000);
+    expect(rec.exits).toEqual([0]);
+    await ended;
+    expect(rec.events.indexOf('sse.done true')).toBeGreaterThan(-1);
+    expect(rec.events.indexOf('sse.done true')).toBeLessThan(rec.events.indexOf('server.closeAllConnections'));
   });
 
   it('сигнал закрывает открытые потоки SSE до server.close: иначе server.close ждал бы их до дедлайна', async () => {
@@ -540,7 +621,7 @@ describe('startServer: остановка', () => {
     // если выхода нет вовсе, тест падает на утверждении, а не по таймауту.
     await untilTick(() => rec.exits.length > 0);
     expect(rec.exits).toEqual([0]);
-    expect(rec.events).toEqual(['listen', 'server.close', 'service.close', 'exit 0']);
+    expect(rec.events).toEqual(['listen', 'server.close', 'service.close', 'server.closeAllConnections', 'exit 0']);
     expect(vi.getTimerCount()).toBe(0);
     await vi.advanceTimersByTimeAsync(SHUTDOWN_MS * 2);
     expect(rec.exits).toEqual([0]);

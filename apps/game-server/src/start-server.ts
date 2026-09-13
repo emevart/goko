@@ -21,12 +21,21 @@ export type Listen = (
   hostname: string,
   onReady: (info: { address: string; port: number }) => void,
   onError: (error: Error) => void,
-) => { close: (done: () => void) => void };
+) => ListenHandle;
+
+// closeAllConnections обрывает соединения, которых server.close сам не закрывает: запись в сокет
+// медленного клиента, застрявшую после stream.abort(). Без этого колбэк close ждал бы до дедлайна.
+export type ListenHandle = { close: (done: () => void) => void; closeAllConnections: () => void };
 
 type ServeFn = (
   options: { fetch: Hono['fetch']; port: number; hostname: string },
   onListen: (info: { address: string; port: number }) => void,
-) => { close: (done: () => void) => unknown; on: (event: 'error', listener: (error: Error) => void) => unknown };
+) => {
+  close: (done: () => void) => unknown;
+  on: (event: 'error', listener: (error: Error) => void) => unknown;
+  // У http2-сервера метода нет: serve возвращает объединение типов.
+  closeAllConnections?: () => void;
+};
 
 // Швы для тестов запуска: боевой путь берёт настоящие process.env, serve, process.on и process.exit.
 export type StartDeps = {
@@ -56,7 +65,7 @@ export const createListen =
   (app, port, hostname, onReady, onError) => {
     const server = serveFn({ fetch: app.fetch, port, hostname }, (info) => onReady({ address: info.address, port: info.port }));
     server.on('error', onError);
-    return { close: (done) => void server.close(() => done()) };
+    return { close: (done) => void server.close(() => done()), closeAllConnections: () => server.closeAllConnections?.() };
   };
 
 const defaultListen: Listen = createListen(serve);
@@ -190,9 +199,11 @@ export async function startServer(deps: StartDeps = {}): Promise<StartedServer |
   });
 
   // Остановка: потоки SSE закрываются (иначе server.close ждал бы их вечно), сервер перестаёт
-  // принимать соединения, сервис дожидается фоновых задач. Выход 0 — только когда закрылись оба;
+  // принимать соединения, сервис дожидается фоновых задач. Когда сервис закрыт, текущие запросы
+  // уже получили ответ, и оставшиеся соединения обрываются: stream.abort() не освобождает сокет
+  // с застрявшей записью медленного клиента. Выход 0 — только когда закрылись оба;
   // дольше SHUTDOWN_MS не ждём. Повторный сигнал — немедленный выход.
-  let server: { close: (done: () => void) => void } | null = null;
+  let server: ListenHandle | null = null;
   let stopping = false;
   for (const signal of ['SIGINT', 'SIGTERM'] as const) {
     on(signal, () => {
@@ -209,7 +220,10 @@ export async function startServer(deps: StartDeps = {}): Promise<StartedServer |
       }, SHUTDOWN_MS);
       const current = server;
       const serverClosed = new Promise<void>((resolve) => (current ? current.close(resolve) : resolve()));
-      void Promise.allSettled([serverClosed, service.close()]).then(([, serviceClosed]) => {
+      const serviceClosing = service.close();
+      // Отказ сервиса разбирается ниже, здесь только обрыв соединений.
+      void serviceClosing.finally(() => current?.closeAllConnections()).catch(() => undefined);
+      void Promise.allSettled([serverClosed, serviceClosing]).then(([, serviceClosed]) => {
         clearTimeout(deadline);
         // Выход всё равно 0: снапшоты пишутся до публикации состояния, но оператор должен видеть отказ.
         if (serviceClosed.status === 'rejected') log(`[!] game-server: service.close завершился ошибкой (${errorCode(serviceClosed.reason)})`);
