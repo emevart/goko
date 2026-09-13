@@ -1,5 +1,6 @@
-import { describe, expect, it } from 'vitest';
-import { GameState } from '@goko/protocol';
+import { describe, expect, expectTypeOf, it } from 'vitest';
+import type { IllegalReason } from '@goko/go-core';
+import { GameState, ILLEGAL_REASON_TEXT, type IllegalReasonCode, humanText } from '@goko/protocol';
 import { applyMove, finishByScore, newGame, positionOf, rebuild, resign, setRank, undo } from './game.ts';
 import { errorOf } from './test-helpers.ts';
 
@@ -118,6 +119,24 @@ describe('applyMove', () => {
     expect(errorOf(() => applyMove(s1, 'W', 'D4', T))).toMatchObject({ code: 'illegal_move', message: 'illegal move D4: occupied', details: { reason: 'occupied', coord: 'D4' } });
     const done = resign(s1, 'W');
     expect(errorOf(() => applyMove(done, 'B', 'E5', T))).toMatchObject({ code: 'game_finished', status: 409 });
+  });
+
+  it('причины нелегального хода go-core и протокола — один набор: у каждой причины свой русский текст', () => {
+    // Проверка типов (npm run check): новая причина в go-core без записи в протоколе не соберётся,
+    // иначе она молча получила бы общий текст illegal_move без пояснения.
+    expectTypeOf<IllegalReason>().toEqualTypeOf<IllegalReasonCode>();
+    const s = fresh();
+    const occupied = playAll(s, ['D4']);
+    const ko = playAll(s, ['D5', 'E5', 'D3', 'E3', 'C4', 'F4', 'E4', 'D4']);
+    const suicide = playAll(s, ['E5', 'A2', 'E6', 'B1']);
+    const reasons = [
+      errorOf(() => applyMove(occupied, 'W', 'D4', T)).details?.reason,
+      errorOf(() => applyMove(ko, 'B', 'E4', T)).details?.reason,
+      errorOf(() => applyMove(suicide, 'B', 'A1', T)).details?.reason,
+    ];
+    expect(reasons).toEqual(['occupied', 'ko', 'suicide']);
+    expect(Object.keys(ILLEGAL_REASON_TEXT).sort()).toEqual([...reasons].sort());
+    for (const reason of reasons) expect(humanText('illegal_move', { reason })).not.toBe(humanText('illegal_move'));
   });
 
   it('нумерация ходов идёт подряд от единицы, цвета чередуются', () => {
