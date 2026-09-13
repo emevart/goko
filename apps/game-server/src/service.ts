@@ -99,7 +99,7 @@ export class GameService {
   private readonly scoringTasks = new Map<string, Promise<void>>();
   // Досрочные пробуждения фоновых пауз: close не должен ждать паузу перед повтором.
   private readonly wakeups = new Set<() => void>();
-  // Число отказов подряд в текущей серии повторов партии; удачная задача обнуляет.
+  // Число отказов подряд в текущей серии повторов партии; обнуляют удачная задача и удачный коммит человека.
   private readonly failures = new Map<string, number>();
   // Партии, чья серия исчерпана: kick их не трогает до действия человека.
   private readonly gaveUp = new Set<string>();
@@ -399,6 +399,10 @@ export class GameService {
     // (или дождавшийся его опросом), уже не может опередить запись на диск.
     await this.deps.store.save(next);
     this.games.set(next.id, next);
+    // Удачный коммит человека обнуляет счёт серии повторов: новая позиция — новая серия, и после
+    // correct во время раздумья пауза снова первая, как после undo и play. Идущую паузу это не
+    // сокращает, отметку исчерпанной серии снимает humanAction, отклонённое действие сюда не доходит.
+    if (by === 'human') this.failures.delete(next.id);
     // Новая партия сессии объявляется только когда она уже есть в сервисе: подписчик на session.game
     // (currentGameId, поток сессии) сразу читает её состояние. При отказе записи события нет.
     const sessionId = this.sessionsByGame.get(next.id);

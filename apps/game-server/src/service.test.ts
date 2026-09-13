@@ -1922,7 +1922,9 @@ describe('GameService: серия повторов фоновой задачи',
     });
   }
 
-  it('отказ движка по устаревшей ревизии не обнуляет и не двигает счёт серии', async () => {
+  // Правило счёта серии: удачный коммит человека обнуляет счёт, отказ по устаревшей ревизии его не
+  // двигает. Поэтому после correct во время раздумья следующий отказ идёт с первой ступени.
+  it('correct во время раздумья обнуляет счёт серии, устаревший отказ его не двигает: следующая пауза снова первая', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     let calls = 0;
     let fail: ((e: unknown) => void) | undefined;
@@ -1952,12 +1954,49 @@ describe('GameService: серия повторов фоновой задачи',
     await untilTick(() => codes(events).length === 2);
     await tick(5);
     expect(calls).toBe(3);
-    // Второй отказ серии: пауза 1000 мс, а не снова первая (10 мс).
-    await vi.advanceTimersByTimeAsync(10);
+    // Счёт обнулён коммитом correct, устаревший отказ не посчитан: пауза снова 10 мс, а не 1000.
+    await vi.advanceTimersByTimeAsync(9);
     await tick(10);
     expect(calls).toBe(3);
-    await vi.advanceTimersByTimeAsync(990);
+    await vi.advanceTimersByTimeAsync(1);
     await untilTick(() => calls === 4);
+  });
+
+  it('отклонённое действие человека счёт серии не обнуляет: следующий отказ идёт со второй ступени', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    let calls = 0;
+    let fail: ((e: unknown) => void) | undefined;
+    const engine: Engine = {
+      ...createFakeEngine(),
+      genmove: () => {
+        calls++;
+        if (calls === 2) {
+          return new Promise((_, reject) => {
+            fail = reject;
+          });
+        }
+        return Promise.reject(new ApiError('engine_unavailable', 'engine is unreachable'));
+      },
+    };
+    const { service, bus } = await make(engine, { store: memoryStore(), retryDelaysMs: [10, 1000] });
+    const g = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: false });
+    const id = g.state.id;
+    const events = record(bus, `game:${id}`);
+    await service.play(id, { coord: 'D4', waitForReply: false, via: 'api' });
+    await untilTick(() => codes(events).length === 1);
+    await vi.advanceTimersByTimeAsync(10);
+    await untilTick(() => calls === 2);
+    await expect(service.play(id, { coord: 'E5', waitForReply: false, via: 'voice' })).rejects.toMatchObject({ code: 'not_your_turn' });
+    await expect(service.correct(id, { coord: 'Z99', waitForReply: false, via: 'voice' })).rejects.toMatchObject({ code: 'invalid_coord' });
+    expect(service.get(id).moves.map((m) => m.coord)).toEqual(['D4']);
+    fail?.(new ApiError('engine_unavailable', 'engine is unreachable'));
+    await untilTick(() => codes(events).length === 2);
+    // Второй отказ той же ревизии: пауза 1000 мс.
+    await vi.advanceTimersByTimeAsync(10);
+    await tick(10);
+    expect(calls).toBe(2);
+    await vi.advanceTimersByTimeAsync(990);
+    await untilTick(() => calls === 3);
   });
 
   it('устаревший отказ движка не снимает ожидающего новой ревизии: correct с ожиданием получает ответ второго genmove', async () => {
@@ -1996,7 +2035,7 @@ describe('GameService: серия повторов фоновой задачи',
     expect(service.internalSizes().waiters).toBe(0);
   });
 
-  it('отказ счёта по устаревшей ревизии не обнуляет и не двигает счёт серии', async () => {
+  it('setRank во время счёта обнуляет счёт серии, устаревший отказ его не двигает: следующая пауза снова первая', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     let calls = 0;
     let fail: ((e: unknown) => void) | undefined;
@@ -2027,10 +2066,10 @@ describe('GameService: серия повторов фоновой задачи',
     await untilTick(() => codes(events).length === 2);
     await tick(5);
     expect(calls).toBe(3);
-    await vi.advanceTimersByTimeAsync(10);
+    await vi.advanceTimersByTimeAsync(9);
     await tick(10);
     expect(calls).toBe(3);
-    await vi.advanceTimersByTimeAsync(990);
+    await vi.advanceTimersByTimeAsync(1);
     await untilTick(() => calls === 4);
   });
 
