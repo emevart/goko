@@ -1,5 +1,7 @@
 // HTTP-обёртка над KataGo (раздел 8 спеки). Всё с точки зрения чёрных, индексация — наша.
+import { createHash, timingSafeEqual } from 'node:crypto';
 import { type Context, Hono } from 'hono';
+import { bodyLimit } from 'hono/body-limit';
 import type { ContentfulStatusCode } from 'hono/utils/http-status';
 import { ZodError } from 'zod';
 import { areaScore, deadStones, replay, resultFromArea } from '@goko/go-core';
@@ -30,11 +32,16 @@ export type EngineDeps = {
 
 export const SCORE_VISITS = 400;
 export const DEFAULT_MAX_QUEUE = 8;
-// Внутренний бюджет движка обязан истекать раньше клиентского (game-server ждёт 10 / 15 / 30 с
-// по разделу 8 спеки): иначе клиент отваливается по своему таймауту первым и никогда не видит
-// осмысленного кода ошибки движка. timeoutMs у KataGo.query отсчитывается от вызова, поэтому
-// это же число и есть «сколько ждёт game-server от нас» (задача 7).
-export const DEFAULT_TIMEOUTS = { genmove: 8_000, analyze: 12_000, score: 25_000 };
+// Правило «движок < клиент < сервис» (D-0010, раздел 8 спеки): go-engine 8 / 6 / 15 с, клиент
+// game-server 10 / 8 / 18 с, сервис analyze 10 с и score 20 с. Иначе клиент отваливается по своему
+// таймауту первым и никогда не видит осмысленного кода ошибки движка. timeoutMs у KataGo.query
+// отсчитывается от вызова, поэтому это же число и есть «сколько ждёт game-server от нас».
+export const DEFAULT_TIMEOUTS = { genmove: 8_000, analyze: 6_000, score: 15_000 };
+// Самый большой законный запрос — позиция 19×19 с сотнями ходов, это единицы килобайт.
+export const MAX_BODY_BYTES = 64 * 1024;
+
+// Сравнение ключа за постоянное время: дайджесты одной длины, разная длина ключа не даёт раннего выхода.
+const digest = (value: string): Buffer => createHash('sha256').update(value, 'utf8').digest();
 
 type KataRoot = { winrate?: number; scoreLead?: number; visits?: number };
 type KataMoveInfo = { move: string; winrate: number; scoreLead: number; visits: number; order: number };
@@ -60,6 +67,7 @@ export function createEngineApp(deps: EngineDeps): Hono {
   const app = new Hono();
   const timeouts = deps.timeouts ?? DEFAULT_TIMEOUTS;
   const maxQueue = deps.maxQueue ?? DEFAULT_MAX_QUEUE;
+  const engineKeyDigest = digest(deps.engineKey);
   const fail = (c: Context, code: ErrorCode, message: string) =>
     c.json({ error: { code, message } }, ERROR_STATUS[code] as ContentfulStatusCode);
 
@@ -75,11 +83,14 @@ export function createEngineApp(deps: EngineDeps): Hono {
   );
 
   app.use('/v1/*', async (c, next) => {
-    if (c.req.header('x-engine-key') !== deps.engineKey) return fail(c, 'unauthorized', 'missing or wrong X-Engine-Key');
+    if (!timingSafeEqual(digest(c.req.header('x-engine-key') ?? ''), engineKeyDigest)) return fail(c, 'unauthorized', 'missing or wrong X-Engine-Key');
     if (!deps.katago.alive) return fail(c, 'engine_unavailable', 'katago process is not running');
     if (deps.katago.queueLength >= maxQueue) return fail(c, 'engine_busy', `queue is full (${deps.katago.queueLength})`);
     await next();
   });
+
+  // После проверки ключа: без ключа тело не читается вовсе.
+  app.use('/v1/*', bodyLimit({ maxSize: MAX_BODY_BYTES, onError: (c) => fail(c, 'bad_request', 'request body is too large') }));
 
   app.onError((err, c) => {
     if (err instanceof KataGoError) {

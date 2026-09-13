@@ -2,7 +2,8 @@ import net from 'node:net';
 import type { Hono } from 'hono';
 import { describe, expect, it, vi } from 'vitest';
 import type { KataGoOptions, KataQuery, KataResponse } from './katago.ts';
-import { type EngineLike, type Listen, type StartDeps, startEngine } from './start-engine.ts';
+import { EventEmitter } from 'node:events';
+import { type EngineLike, type Listen, type StartDeps, createListen, startEngine } from './start-engine.ts';
 import { WARMUP_EXIT_CODE } from './warmup.ts';
 
 // Порядок запуска: движок отвечает на прогрев раньше, чем сервис начинает слушать порт.
@@ -35,7 +36,9 @@ function freePort(): Promise<number> {
   });
 }
 
-function harness(answer: () => Promise<KataResponse>): { deps: StartDeps; rec: Recorder } {
+type ListenFaults = { listenError?: Error; errorAfterReady?: Error; secondError?: Error };
+
+function harness(answer: () => Promise<KataResponse>, faults: ListenFaults = {}): { deps: StartDeps; rec: Recorder } {
   let onExit: (code: number) => void = () => undefined;
   const rec: Recorder = {
     events: [],
@@ -64,9 +67,12 @@ function harness(answer: () => Promise<KataResponse>): { deps: StartDeps; rec: R
     restarts: 0,
     alive: true,
   };
-  const listen: Listen = (_app: Hono, port, _hostname, onReady) => {
+  const listen: Listen = (_app: Hono, port, _hostname, onReady, onError) => {
     rec.events.push('listen');
-    onReady(port);
+    if (faults.listenError) onError(faults.listenError);
+    else onReady(port);
+    if (faults.errorAfterReady) onError(faults.errorAfterReady);
+    if (faults.secondError) onError(faults.secondError);
     return {
       close: () => {
         rec.closes++;
@@ -79,10 +85,10 @@ function harness(answer: () => Promise<KataResponse>): { deps: StartDeps; rec: R
       rec.options.push(options);
       return engine;
     },
-    listen: (app, port, hostname, onReady) => {
+    listen: (app, port, hostname, onReady, onError) => {
       rec.ports.push(port);
       rec.hostnames.push(hostname);
-      return listen(app, port, hostname, onReady);
+      return listen(app, port, hostname, onReady, onError);
     },
     on: (signal, handler) => {
       rec.signals.push(signal);
@@ -286,6 +292,64 @@ describe('запуск go-engine', () => {
       say.mockRestore();
       rec.handlers[0]?.(); // закрываем сервер: иначе процесс теста останется слушать порт
     }
+  });
+
+  it('ошибка listen (порт занят) — [X] с кодом без адреса, движок остановлен, выход 1, без [OK]', async () => {
+    const cases: Array<[Error, string]> = [
+      [Object.assign(new Error('listen EADDRINUSE: address already in use listen-host-value:18788'), { code: 'EADDRINUSE' }), '[X] go-engine: не удалось слушать порт (EADDRINUSE)'],
+      [new Error('listen failed at listen-host-value'), '[X] go-engine: не удалось слушать порт (без кода)'],
+    ];
+    for (const [error, line] of cases) {
+      const say = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+      try {
+        const { deps, rec } = harness(async () => ({ id: 'q1' }), { listenError: error });
+        await startEngine({ ...deps, env: { ...deps.env, ENGINE_HOST: 'listen-host-value' } });
+        expect(await rec.exited).toBe(1);
+        // stop раньше exit: иначе KataGo пережил бы node.
+        expect(rec.events).toEqual(['engine.start', 'engine.query', 'listen', 'engine.stop', 'exit 1']);
+        expect(rec.logs.filter((l) => l.startsWith('[X]'))).toEqual([line]);
+        expect(rec.logs.join('\n')).not.toContain('listen-host-value');
+        expect(say.mock.calls).toEqual([]);
+      } finally {
+        say.mockRestore();
+      }
+    }
+  });
+
+  it('ошибка сокета после готовности — другой текст [X], движок остановлен, выход 1; повторная ошибка второго выхода не даёт', async () => {
+    const say = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    try {
+      const reset = Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' });
+      const { deps, rec } = harness(async () => ({ id: 'q1' }), { errorAfterReady: reset, secondError: new Error('again') });
+      await startEngine(deps);
+      expect(await rec.exited).toBe(1);
+      await new Promise((r) => setImmediate(r));
+      expect(rec.events).toEqual(['engine.start', 'engine.query', 'listen', 'engine.stop', 'exit 1']);
+      expect(rec.logs.filter((l) => l.startsWith('[X]'))).toEqual(['[X] go-engine: ошибка сокета сервера (ECONNRESET)']);
+    } finally {
+      say.mockRestore();
+    }
+  });
+
+  it('createListen: port и hostname уходят в serve, готовность — фактический порт, ошибка сервера — в onError', () => {
+    const calls: Array<{ port: number; hostname: string; fetch: unknown }> = [];
+    const server = new EventEmitter();
+    let ready: ((info: { port: number }) => void) | undefined;
+    const listen = createListen((options, onListen) => {
+      calls.push(options);
+      ready = onListen;
+      return Object.assign(server, { close: () => undefined });
+    });
+    const ports: number[] = [];
+    const errors: Error[] = [];
+    const app = { fetch: () => new Response('ok') } as unknown as Hono;
+    listen(app, 18788, '127.0.0.1', (port) => ports.push(port), (e) => errors.push(e));
+    expect(calls).toEqual([{ fetch: app.fetch, port: 18788, hostname: '127.0.0.1' }]);
+    ready?.({ port: 18789 });
+    expect(ports).toEqual([18789]);
+    const boom = new Error('EADDRINUSE');
+    server.emit('error', boom);
+    expect(errors).toEqual([boom]);
   });
 
   it('порт и хост берутся из env, пути к сетям — от корня репозитория', async () => {

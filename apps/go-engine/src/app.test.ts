@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { coordToIndex } from '@goko/go-core';
-import { DEFAULT_TIMEOUTS, SCORE_VISITS, createEngineApp } from './app.ts';
+import { serve } from '@hono/node-server';
+import { DEFAULT_TIMEOUTS, MAX_BODY_BYTES, SCORE_VISITS, createEngineApp } from './app.ts';
 import { KataGoError, type KataQuery, type KataResponse } from './katago.ts';
 import { walls } from './test-helpers.ts';
 
@@ -118,6 +119,73 @@ describe('createEngineApp', () => {
     const deadRes = await post(dead, '/v1/analyze', {});
     expect(deadRes.status).toBe(503);
     expect(await codeOf(deadRes)).toBe('engine_unavailable');
+  });
+
+  it('ключ другой длины, пустой и совпадающий префикс — 401; верный ключ проходит', async () => {
+    const katago = fakeKatago(() => ({ rootInfo: { winrate: 0.5, scoreLead: 0, visits: 1 }, ownership: kataOwnership(7) }));
+    const app = createEngineApp({ katago, engineKey: KEY, models: { main: 'm', human: 'h' } });
+    for (const key of ['', KEY.slice(0, -1), `${KEY}x`, KEY.toUpperCase()]) {
+      const res = await post(app, '/v1/score', { ...base, moves: [] }, { ...headers, 'x-engine-key': key });
+      expect(res.status, `ключ длины ${key.length}`).toBe(401);
+      expect(await codeOf(res)).toBe('unauthorized');
+    }
+    expect(katago.calls).toEqual([]);
+    expect((await post(app, '/v1/score', { ...base, moves: [] })).status).toBe(200);
+  });
+
+  it('тело больше 64 КБ — 400 bad_request, движок не дёргается; тело ровно на пределе проходит', async () => {
+    expect(MAX_BODY_BYTES).toBe(64 * 1024);
+    const katago = fakeKatago(() => ({ rootInfo: { winrate: 0.5, scoreLead: 0, visits: 1 }, ownership: kataOwnership(7) }));
+    const app = createEngineApp({ katago, engineKey: KEY, models: { main: 'm', human: 'h' } });
+    const json = JSON.stringify({ ...base, moves: [] });
+    const padded = (size: number) => json + ' '.repeat(size - Buffer.byteLength(json));
+    const big = await app.request('/v1/score', { method: 'POST', headers, body: padded(MAX_BODY_BYTES + 1) });
+    expect(big.status).toBe(400);
+    expect(await big.json()).toEqual({ error: { code: 'bad_request', message: 'request body is too large' } });
+    expect(katago.calls).toEqual([]);
+    // Без ключа тело не читается: отказ по ключу, а не по размеру.
+    const noKey = await app.request('/v1/score', { method: 'POST', headers: { 'content-type': 'application/json' }, body: padded(MAX_BODY_BYTES + 1) });
+    expect(noKey.status).toBe(401);
+    const edge = await app.request('/v1/score', { method: 'POST', headers, body: padded(MAX_BODY_BYTES) });
+    expect(edge.status).toBe(200);
+    expect(katago.calls).toHaveLength(1);
+  });
+
+  it('обрыв соединения клиентом на настоящем сокете отменяет запрос к движку', async () => {
+    // Сигнал запроса @hono/node-server обрывает по close сокета; KataGo по этому сигналу снимает
+    // запрос и из очереди, и из полёта (katago.test.ts: «abort в очереди», «abort в полёте»).
+    const signals: AbortSignal[] = [];
+    const katago = fakeKatago(() => ({}));
+    katago.query = (_q, _timeoutMs, signal) =>
+      new Promise((_, reject) => {
+        if (!signal) return reject(new Error('no signal'));
+        signals.push(signal);
+        signal.addEventListener('abort', () => reject(new KataGoError('aborted', 'katago query aborted by the caller')), { once: true });
+      });
+    const app = createEngineApp({ katago, engineKey: KEY, models: { main: 'm', human: 'h' } });
+    const server = serve({ fetch: app.fetch, port: 0, hostname: '127.0.0.1' });
+    // Настоящий ввод-вывод: ждём обороты цикла событий с потолком, без часов.
+    const until = async (cond: () => boolean) => {
+      for (let i = 0; i < 100_000; i++) {
+        if (cond()) return;
+        await new Promise((r) => setImmediate(r));
+      }
+      throw new Error('условие не выполнилось за отведённые обороты очереди');
+    };
+    try {
+      await until(() => server.listening);
+      const address = server.address();
+      const port = typeof address === 'object' && address !== null ? address.port : 0;
+      const ac = new AbortController();
+      const request = fetch(`http://127.0.0.1:${port}/v1/score`, { method: 'POST', headers, body: JSON.stringify({ ...base, moves: [] }), signal: ac.signal }).catch((e: unknown) => e);
+      await until(() => signals.length === 1);
+      expect(signals[0]?.aborted).toBe(false);
+      ac.abort();
+      await until(() => signals[0]?.aborted === true);
+      expect(await request).toBeInstanceOf(Error);
+    } finally {
+      server.close();
+    }
   });
 
   it('неверный ключ — 401, движок не дёргается', async () => {
@@ -448,10 +516,10 @@ describe('createEngineApp', () => {
     await post(app, '/v1/genmove', { ...base, moves: [], rank: '5k' });
     await post(app, '/v1/analyze', { ...base, moves: [] });
     await post(app, '/v1/score', { ...base, moves: [] });
-    expect(katago.timeouts).toEqual([8_000, 12_000, 25_000]);
-    // Внутренний бюджет обязан истекать раньше клиентского (game-server: 10 / 15 / 30 с),
-    // иначе клиент всегда отваливается первым и осмысленного кода ошибки движка не видит.
-    expect(DEFAULT_TIMEOUTS).toEqual({ genmove: 8_000, analyze: 12_000, score: 25_000 });
+    expect(katago.timeouts).toEqual([8_000, 6_000, 15_000]);
+    // Правило «движок < клиент < сервис» (D-0010): клиент game-server ждёт 10 / 8 / 18 с, иначе
+    // клиент всегда отваливается первым и осмысленного кода ошибки движка не видит.
+    expect(DEFAULT_TIMEOUTS).toEqual({ genmove: 8_000, analyze: 6_000, score: 15_000 });
 
     const own = fakeKatago(() => ({ rootInfo: { winrate: 0.5, scoreLead: 0, visits: 1 }, moveInfos: [] }));
     const custom = createEngineApp({

@@ -18,7 +18,13 @@ export type Listen = (
   port: number,
   hostname: string,
   onReady: (port: number) => void,
+  onError: (error: Error) => void,
 ) => { close: () => void };
+
+type ServeFn = (
+  options: { fetch: Hono['fetch']; port: number; hostname: string },
+  onListen: (info: { port: number }) => void,
+) => { on(event: 'error', listener: (error: Error) => void): unknown; close: () => unknown };
 
 // Швы для теста запуска: боевой путь берёт настоящие process.env, KataGo, serve и process.exit.
 export type StartDeps = {
@@ -31,8 +37,21 @@ export type StartDeps = {
   warmupMs?: number;
 };
 
-const defaultListen: Listen = (app, port, hostname, onReady) =>
-  serve({ fetch: app.fetch, port, hostname }, (info) => onReady(info.port));
+// Ошибка сервера (порт занят, нет прав) уходит в onError, а не падает процесс с сырым стеком.
+export const createListen =
+  (serveFn: ServeFn): Listen =>
+  (app, port, hostname, onReady, onError) => {
+    const server = serveFn({ fetch: app.fetch, port, hostname }, (info) => onReady(info.port));
+    server.on('error', onError);
+    return { close: () => void server.close() };
+  };
+
+const defaultListen: Listen = createListen(serve);
+
+function errorCode(e: unknown): string {
+  const code = e instanceof Error ? (e as NodeJS.ErrnoException).code : undefined;
+  return typeof code === 'string' && code !== '' ? code : 'без кода';
+}
 
 export async function startEngine(deps: StartDeps = {}): Promise<void> {
   const root = path.resolve(import.meta.dirname, '../../..');
@@ -97,7 +116,23 @@ export async function startEngine(deps: StartDeps = {}): Promise<void> {
     models: { main: path.basename(model), human: path.basename(humanModel) },
     log,
   });
-  server = listen(app, port, hostname, (actual) => {
-    console.log(`[OK] go-engine на порту ${actual}; сети ${path.basename(model)} + ${path.basename(humanModel)}`);
-  });
+  // Ошибка listen или сокета: [X] с кодом без адреса, KataGo останавливается раньше выхода
+  // (иначе процесс движка пережил бы node), выход 1 — один раз, сколько бы ошибок ни пришло.
+  let listening = false;
+  let failed = false;
+  server = listen(
+    app,
+    port,
+    hostname,
+    (actual) => {
+      listening = true;
+      console.log(`[OK] go-engine на порту ${actual}; сети ${path.basename(model)} + ${path.basename(humanModel)}`);
+    },
+    (error) => {
+      if (failed) return;
+      failed = true;
+      log(`[X] go-engine: ${listening ? 'ошибка сокета сервера' : 'не удалось слушать порт'} (${errorCode(error)})`);
+      void katago.stop().finally(() => exit(1));
+    },
+  );
 }
