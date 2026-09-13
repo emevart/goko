@@ -25,12 +25,30 @@ describe('createFakeEngine', () => {
     expect(engine.calls.genmove).toBe(3);
   });
 
-  it('первый ход на пустой доске — чёрные; ход второго цвета берётся из последнего хода', async () => {
+  it('первый ход на пустой доске — чёрные', async () => {
     const engine = createFakeEngine();
     // На пустой доске ходят чёрные: белого камня после этого хода на доске быть не должно.
     const first = await engine.genmove({ ...base, moves: [], rank: '10k' });
     expect(() => replay(9, [{ color: 'B', coord: first.move }])).not.toThrow();
     expect(first.move).not.toBe('pass');
+  });
+
+  it('цвет хода на непустой доске — противоположный последнему ходу: genmove и analyze', async () => {
+    // Доска 3x3, белые везде, кроме A1; последний ход белых, значит очередь чёрных.
+    // Для чёрных A1 легален (снимает всех белых), для белых — самоубийство и свой глаз.
+    // Движок, перепутавший цвет, остался бы без кандидатов и спасовал бы.
+    const moves: [Color, string][] = [
+      ['W', 'B1'], ['W', 'C1'], ['W', 'A2'], ['W', 'B2'],
+      ['W', 'C2'], ['W', 'A3'], ['W', 'B3'], ['W', 'C3'],
+    ];
+    const engine = createFakeEngine({ passAfterPass: false });
+    const res = await engine.genmove({ boardSize: 3, rules: 'chinese', komi: 7.5, moves, rank: '10k' });
+    expect(res.move).toBe('A1');
+    const a = await engine.analyze({ boardSize: 3, rules: 'chinese', komi: 7.5, moves });
+    expect(a.moveInfos.map((m) => m.coord)).toEqual(['A1']);
+    // Обратный случай: после хода чёрных очередь белых, и у белых на той же доске кандидатов нет.
+    const afterBlack: [Color, string][] = [...moves, ['B', 'pass']];
+    expect((await engine.genmove({ boardSize: 3, rules: 'chinese', komi: 7.5, moves: afterBlack, rank: '10k' })).move).toBe('pass');
   });
 
   it('после паса соперника пасует сам (passAfterPass)', async () => {
@@ -128,7 +146,7 @@ describe('createFakeEngine', () => {
     expect(a.ownership?.[3 * 9 + 3]).toBe(1);
     expect(a.ownership?.[5 * 9 + 5]).toBe(-1);
     expect(a.ownership?.[4 * 9 + 4]).toBe(0);
-    expect(a.moveInfos.length).toBeGreaterThan(0);
+    expect(a.moveInfos).toHaveLength(1);
     expect(a.visits).toBe(50);
     expect(engine.calls.analyze).toBe(1);
   });
@@ -137,11 +155,14 @@ describe('createFakeEngine', () => {
     // Ровные числа — договор фейка: на них опирается проверка сдачи в сервисе,
     // и партия против фейкового движка не должна кончаться сдачей сама собой.
     const engine = createFakeEngine({ script: ['E5'] });
+    // Часы подменены: время раздумья — разность двух отсчётов, округлённая до миллисекунды.
+    const now = vi.spyOn(performance, 'now').mockReturnValueOnce(1000).mockReturnValueOnce(1234.6);
     const r = await engine.genmove({ ...base, moves: [['B', 'D4']], rank: '10k' });
+    now.mockRestore();
     expect(r.winrateB).toBe(0.5);
     expect(r.scoreLeadB).toBe(0);
     expect(r.humanPolicyTop).toEqual([{ coord: 'E5', prob: 1 }]);
-    expect(r.ms).toBeGreaterThanOrEqual(0);
+    expect(r.ms).toBe(235);
   });
 
   it('лучший ход analyze берётся из легальных, а не выдумывается', async () => {
