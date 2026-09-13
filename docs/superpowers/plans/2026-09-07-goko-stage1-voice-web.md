@@ -18,7 +18,8 @@
 - `[!]` Известная граница разбора координат на 19x19: русские названия букв «эр» и «эс» транскрипт отдаёт кириллицей `Р` и `С`, а карта двойников `go-core` переводит их в `P` и `C`, а не в `R` и `S`. На 13x13 не проявляется — столбцы `O P Q R S T` отсекаются размером доски. Когда дойдёт до 19x19: агент диктует и принимает столбцы латиницей либо переспрашивает; карту двойников не трогать, она права для латиницы.
 - Речь: `VOICE_MODE=realtime` (по умолчанию) — `openai.realtime.RealtimeModel({ model: 'gpt-realtime', voice: 'marin' })`, серверный VAD с перебиванием, транскрипция входа `gpt-live-transcribe` с `language: 'ru'`; `VOICE_MODE=pipeline` — `silero.VAD` + `openai.STT` (`gpt-transcribe`, `ru`) + `openai.LLM` + `openai.TTS` (`gpt-4o-mini-tts` с инструкцией по тону). Приветствие — `generateReply` в `onEnter`.
 - Текстовые каналы LiveKit: вход `lk.chat` (стандартный `RoomIO`), выход `lk.transcription` (атрибуты `lk.segment_id`, `lk.transcription_final`, `lk.transcribed_track_id`). Признак финальности двусторонний (проверено на спайке 08.09, `@livekit/agents` 1.8.0): у транскрипта агента поток дельта-, атрибут `lk.transcription_final` навсегда `false`, финал — дочитанный поток; у транскрипта человека поток не дельта-, атрибут выставляется честно, но каждый промежуточный результат STT приходит отдельным уже закрытым потоком с тем же `lk.segment_id`. Отсюда общее правило обоих потребителей: единица реплики — `lk.segment_id`, а не поток; фильтровать по одному атрибуту нельзя. Консоль (`scripts/chat.mjs`) печатает сегмент один раз — сразу при `final="true"`, иначе по паузе без новых кусков; веб держит строку ленты по `lk.segment_id` и переписывает её новым куском того же сегмента.
-- Имена воркера: `AGENT_NAME=goko` на VPS, `goko-dev` на ПК; game-server кладёт то же имя в `roomConfig` токена (`AGENT_NAME` у него же). Метаданные диспетчеризации — `{ "sessionId": "<id>" }`, комната — `goko-<sessionId>`.
+- Имена воркера: `AGENT_NAME=goko` на VPS, `goko-dev` на ПК. По D-0001 комнату с диспетчеризацией агента создаёт game-server (`createRoom` с `agents: [{ agentName, metadata }]`, `AGENT_NAME` у него же), токен телефона — только `roomJoin`, без `roomConfig`. Метаданные диспетчеризации — `{ "sessionId": "<id>" }`, комната — `goko-<sessionId>`. Агент приходит в комнату раньше телефона и открывает Realtime только после `ctx.waitForParticipant()`: пустая комната живёт до `emptyTimeout` 300 с, и без ожидания платная сессия шла бы вхолостую.
+- Ошибки (D-0007): `message` ошибок и событий `error` — английский текст для разработчика, его не озвучивают и не показывают. Русский текст для человека и для модели — `humanText(code, details)` из `@goko/protocol`. `retries_exhausted` (D-0006) значит, что сервер больше не повторяет сам: нужна реплика или действие человека. Признак `humanFallback` есть только в событии `state.updated` хода движка, в ответе `play` его нет.
 - Веб: одна страница, портретный телефон, SVG-доска, тап = ближайший пункт → `play` с `via: 'tap'` и `waitForReply: false`; не ход человека — сообщение «сейчас ход Гоко» без запроса; цели касания ≥ 44 px; тёмная и светлая тема по `prefers-color-scheme`; без UI-библиотек; без агента в комнате страница играет тапами.
 - Протокол и заголовки как в ядре: `X-App-Key` на `/api/*`; ключ в веб попадает на этапе сборки (`APP_KEY` из `.env` → `import.meta.env.VITE_APP_KEY`), в git не попадает. Значения переменных не печатать в логи и не вставлять в доки.
 - Порты dev: game-server `8787`, go-engine `8788`, web `5173`; воркер портов не слушает. В compose сервисы публикуют порты только на `127.0.0.1`; `go-engine` с лимитом `cpus`.
@@ -350,7 +351,7 @@ git commit -m "voice-agent: пакет, фразы и разбор ранга; p
 | `get_position` | — | текст: ascii-доска, последние 6 ходов, пленные, чей ход |
 | `get_assessment` | — | `leader: 'you' \| 'me' \| 'even'`, `marginPoints`, `winrateYou` (проценты), `weakGroups: [{ color: 'yours' \| 'mine', where, status }]`, `bestMoves: string[]`, `toPlay: 'you' \| 'me'` |
 | `set_rank` | `true` | `rank`, `note?` |
-| любой | `false` | `reason` — русский текст (`illegalMessage` сервера, «партия не начата: предложи начать», «движок не отвечает, попробуй ещё раз через пару секунд») |
+| любой | `false` | `reason` — русский текст: `humanText(code, details)` из протокола по коду ошибки сервера (для `illegal_move` — причина: «точка занята», «ко: сразу забрать нельзя») или своя фраза агента («партия не начата: предложи начать») |
 
 - [ ] **Step 1: `apps/voice-agent/src/testing/fake-client.ts`**
 
@@ -576,7 +577,7 @@ export function createFakeClient(opts: FakeClientOptions = {}): FakeClient {
 
 ```ts
 import { describe, expect, it } from 'vitest';
-import { ApiError } from '@goko/protocol';
+import { ApiError, humanText } from '@goko/protocol';
 import { newAgentState } from './state.ts';
 import { createFakeClient, fakeGame } from './testing/fake-client.ts';
 import { ASSESSMENT_VISITS, createToolFns, createTools, humanColorOf } from './tools.ts';
@@ -653,20 +654,20 @@ describe('play_move / correct_last_move', () => {
     expect(res).toEqual({ ok: true, yourMove: 'D4', myMove: 'K10', myMoveSpoken: 'ка десять', captured: 0, myCaptured: 0, toPlay: 'B', moveNumber: 2 });
     expect(client.calls[0]).toMatchObject({ method: 'play', args: ['g1', { coord: 'D4', via: 'voice' }] });
   });
-  it('нелегальный ход — причина словами сервера', async () => {
+  it('нелегальный ход — причина из humanText по details.reason, не message', async () => {
     const { fns, client } = await withGame();
-    client.failNext(new ApiError('illegal_move', 'точка занята', { reason: 'occupied', coord: 'D4' }));
+    client.failNext(new ApiError('illegal_move', 'illegal move D4: occupied', { reason: 'occupied', coord: 'D4' }));
     expect(await fns.playMove({ coord: 'D4' })).toEqual({ ok: false, reason: 'точка занята' });
   });
   it('движок занят — просьба повторить, не исключение', async () => {
     const { fns, client } = await withGame();
-    client.failNext(new ApiError('engine_busy', 'движок занят'));
-    expect(await fns.playMove({ coord: 'D4' })).toEqual({ ok: false, reason: 'движок не отвечает, попробуй ещё раз через пару секунд' });
+    client.failNext(new ApiError('engine_busy', 'engine did not respond within 10000 ms'));
+    expect(await fns.playMove({ coord: 'D4' })).toEqual({ ok: false, reason: humanText('engine_busy') });
   });
-  it('не наш ход — reason сервера', async () => {
+  it('не наш ход — русский текст по коду, английский message не просачивается', async () => {
     const { fns, client } = await withGame();
-    client.failNext(new ApiError('not_your_turn', 'сейчас ходит Гоко'));
-    expect(await fns.playMove({ coord: 'D4' })).toEqual({ ok: false, reason: 'сейчас ходит Гоко' });
+    client.failNext(new ApiError('not_your_turn', 'it is Goko to play', { toPlay: 'W' }));
+    expect(await fns.playMove({ coord: 'D4' })).toEqual({ ok: false, reason: humanText('not_your_turn') });
   });
   it('таймаут ответа — note, myMove null, awaitingReply', async () => {
     const { fns, state, client } = await withGame();
@@ -806,6 +807,7 @@ import {
   type Color,
   type GameState,
   type GokoClient,
+  humanText,
   type PlayResponse,
   seatColor,
 } from '@goko/protocol';
@@ -842,20 +844,11 @@ export function engineColorOf(state: GameState): Color {
   return seatColor(state.seats, 'engine') ?? 'W';
 }
 
-// Ошибки протокола -> { ok: false, reason } с русским текстом. Всё остальное (сеть, баги) пробрасываем:
+// Ошибки протокола -> { ok: false, reason } с русским текстом из humanText по code и details (D-0007):
+// message сервера английский и модели не отдаётся. Всё остальное (сеть, баги) пробрасываем:
 // это попадёт в лог воркера, а модель получит ошибку инструмента.
 function reasonOf(e: unknown): Fail {
-  if (e instanceof ApiError) {
-    switch (e.code) {
-      case 'engine_busy':
-      case 'engine_unavailable':
-        return fail('движок не отвечает, попробуй ещё раз через пару секунд');
-      case 'revision_conflict':
-        return fail('позиция только что изменилась, повтори ход');
-      default:
-        return fail(e.message);
-    }
-  }
+  if (e instanceof ApiError) return fail(humanText(e.code, e.details));
   throw e;
 }
 
@@ -1178,7 +1171,7 @@ git commit -m "voice-agent: девять инструментов над кли�
 
 ```ts
 import { describe, expect, it } from 'vitest';
-import type { GameEvent, GameState, Move } from '@goko/protocol';
+import { type GameEvent, type GameState, humanText, type Move } from '@goko/protocol';
 import { ERROR_REPEAT_MS, handleEvent, watchSession } from './events.ts';
 import { newAgentState } from './state.ts';
 import { fakeGame } from './testing/fake-client.ts';
@@ -1331,16 +1324,26 @@ describe('handleEvent: конец партии и ошибки', () => {
     s.announcedFinish = 'g1';
     expect(handleEvent({ type: 'game.finished', result: { winner: 'W', reason: 'resign' } }, s)).toBeNull();
   });
-  it('engine.thinking молчит; error не чаще раза в 30 с', () => {
+  it('engine.thinking молчит; error не чаще раза в 30 с, текст по коду, без message', () => {
     const s = newAgentState('s1');
     let t = 1_000_000;
     const now = () => t;
     expect(handleEvent({ type: 'engine.thinking', color: 'W' }, s)).toBeNull();
-    expect(handleEvent({ type: 'error', code: 'engine_unavailable', message: 'движок недоступен' }, s, now)).toContain('ещё немного времени');
+    const first = handleEvent({ type: 'error', code: 'engine_unavailable', message: 'engine is unavailable' }, s, now);
+    expect(first).toContain(humanText('engine_unavailable'));
+    expect(first).not.toContain('engine is unavailable');
     t += ERROR_REPEAT_MS - 1;
-    expect(handleEvent({ type: 'error', code: 'engine_unavailable', message: 'движок недоступен' }, s, now)).toBeNull();
+    expect(handleEvent({ type: 'error', code: 'engine_unavailable', message: 'engine is unavailable' }, s, now)).toBeNull();
     t += 2;
-    expect(handleEvent({ type: 'error', code: 'engine_unavailable', message: 'движок недоступен' }, s, now)).not.toBeNull();
+    expect(handleEvent({ type: 'error', code: 'engine_unavailable', message: 'engine is unavailable' }, s, now)).not.toBeNull();
+  });
+  it('retries_exhausted озвучивается сразу и без «сервер повторит сам»', () => {
+    const s = newAgentState('s1');
+    const now = () => 1_000_000;
+    expect(handleEvent({ type: 'error', code: 'engine_busy', message: 'engine did not respond within 10000 ms' }, s, now)).not.toBeNull();
+    const text = handleEvent({ type: 'error', code: 'retries_exhausted', message: 'background task retries are exhausted' }, s, now);
+    expect(text).toContain(humanText('retries_exhausted'));
+    expect(text).not.toContain('повторит попытку сам');
   });
 });
 
@@ -1405,7 +1408,7 @@ Expected: FAIL — `Cannot find module './events.ts'`.
 ```ts
 // Озвучивание событий SSE (раздел 9 спеки). handleEvent — чистая функция: событие + память агента ->
 // инструкция для generateReply или null. watchSession — цикл чтения потока сессии с переподключением.
-import type { GameEvent, GameState, GokoClient } from '@goko/protocol';
+import { type GameEvent, type GameState, type GokoClient, humanText } from '@goko/protocol';
 import { colorNameInstrumental, describeResult, speakMove, speakRank } from './phrases.ts';
 import type { AgentState } from './state.ts';
 import { humanColorOf } from './tools.ts';
@@ -1506,10 +1509,16 @@ export function handleEvent(ev: GameEvent, state: AgentState, now: () => number 
       return `Партия окончена: ${describeResult(ev.result, state.humanColor)}. Объяви результат одной фразой.`;
     }
     case 'error': {
+      // Текст — по code (humanText), message английский и только для логов (D-0007).
+      // retries_exhausted: сервер больше не повторяет сам, серию перезапустит действие человека или
+      // открытие потока (D-0006), поэтому реплика звучит сразу, без паузы повтора.
+      if (ev.code === 'retries_exhausted') {
+        return `${humanText(ev.code)}. Скажи это одной фразой и попроси человека сказать что-нибудь или сделать ход, если ход его.`;
+      }
       const t = now();
       if (t - state.lastErrorAt < ERROR_REPEAT_MS) return null;
       state.lastErrorAt = t;
-      return `Движок не ответил вовремя (${ev.message}); сервер повторит попытку сам. Скажи одной фразой, что тебе нужно ещё немного времени на ход.`;
+      return `Сбой на сервере: ${humanText(ev.code)}; сервер повторит попытку сам. Скажи одной фразой, что тебе нужно ещё немного времени.`;
     }
     default:
       return null;
@@ -1645,7 +1654,7 @@ Expected: FAIL — модули не найдены.
 - [ ] **Step 4: `apps/voice-agent/src/metadata.ts`**
 
 ```ts
-// sessionId из метаданных диспетчеризации (game-server кладёт { sessionId } в roomConfig токена);
+// sessionId из метаданных диспетчеризации (game-server кладёт { sessionId } в agents комнаты при createRoom, D-0001);
 // запасной путь — имя комнаты goko-<sessionId>.
 export function sessionIdOf(metadata: string | undefined, roomName: string): string {
   if (metadata) {
@@ -1778,6 +1787,9 @@ export default defineAgent({
     const sessionId = sessionIdOf(ctx.job.metadata, ctx.room.name ?? '');
     log(`[OK] voice-agent: комната ${ctx.room.name}, сессия ${sessionId}, режим ${VOICE_MODE}`);
     await ctx.connect();
+    // Комнату создал game-server (D-0001), агент приходит раньше телефона: Realtime открываем только
+    // при живом участнике, иначе платная сессия шла бы в пустой комнате до emptyTimeout.
+    await ctx.waitForParticipant();
 
     const client = createClient({ baseUrl: API_BASE, appKey: APP_KEY });
     const state = newAgentState(sessionId);
@@ -1945,7 +1957,7 @@ describe('describeEvent', () => {
     expect(describeEvent({ type: 'engine.thinking', color: 'W' })).toBe('Гоко думает за W');
     expect(describeEvent({ type: 'game.finished', result: { winner: 'W', reason: 'resign' } })).toBe('конец: W+R');
     expect(describeEvent({ type: 'game.finished', result: { winner: 'B', margin: 5.5, reason: 'score' } })).toBe('конец: B+5.5');
-    expect(describeEvent({ type: 'error', code: 'engine_busy', message: 'занят' })).toBe('ошибка engine_busy: занят');
+    expect(describeEvent({ type: 'error', code: 'engine_busy', message: 'engine did not respond within 10000 ms' })).toBe('ошибка engine_busy: Гоко думает дольше обычного');
     expect(
       describeEvent({
         type: 'state.updated',
@@ -1985,7 +1997,7 @@ import readline from 'node:readline';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { Room, RoomEvent } from '@livekit/rtc-node';
-import { createClient } from '@goko/protocol';
+import { createClient, humanText } from '@goko/protocol';
 
 // Сколько ждать тишины после EOF на stdin: ответ на последнюю фразу приходит позже конца ввода,
 // и при скриптовом прогоне (echo 'дэ четыре' | npm run chat) он иначе теряется целиком.
@@ -2009,7 +2021,7 @@ export function describeEvent(ev) {
     case 'game.finished':
       return `конец: ${ev.result.winner}+${ev.result.reason === 'resign' ? 'R' : ev.result.margin}`;
     case 'error':
-      return `ошибка ${ev.code}: ${ev.message}`;
+      return `ошибка ${ev.code}: ${humanText(ev.code)}`;
     case 'state.updated': {
       const last = ev.state.moves.at(-1);
       const via = ev.via ? ` via ${ev.via}` : '';
@@ -2601,7 +2613,8 @@ function game(over: Partial<GameState> = {}): GameState {
 
 describe('text', () => {
   it('describeError', () => {
-    expect(describeError(new ApiError('not_your_turn', 'сейчас ходит Гоко'))).toBe('сейчас ходит Гоко');
+    expect(describeError(new ApiError('not_your_turn', 'it is Goko to play', { toPlay: 'W' }))).toBe('сейчас не твой ход');
+    expect(describeError(new ApiError('illegal_move', 'illegal move D4: ko', { reason: 'ko', coord: 'D4' }))).toBe('ко: сразу забрать нельзя');
     expect(describeError(new TypeError('Failed to fetch'))).toBe('нет связи с сервером');
   });
   it('statusText', () => {
@@ -2766,10 +2779,11 @@ export async function streamEvents(
 
 ```ts
 // Тексты статуса и ошибок на экране. Позицию не интерпретируем: только поля состояния.
-import { ApiError, type Color, type GameState, seatColor } from '@goko/protocol';
+import { ApiError, type Color, type GameState, humanText, seatColor } from '@goko/protocol';
 
 export function describeError(e: unknown): string {
-  if (e instanceof ApiError) return e.message;
+  // Текст для человека — по code и details, message сервера английский (D-0007).
+  if (e instanceof ApiError) return humanText(e.code, e.details);
   return 'нет связи с сервером';
 }
 
@@ -3015,7 +3029,7 @@ export function useGame(sessionId: string | null, onLost: () => void) {
             break;
           case 'error':
             setThinking(false);
-            flash(ev.message);
+            flash(humanText(ev.code));
             break;
         }
       },

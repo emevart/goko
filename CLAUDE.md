@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-> **Last Updated:** 2026-09-08
+> **Last Updated:** 2026-09-13
 
 Правила для агентов-разработчиков в проекте Гоко. Канонический файл: если
 `AGENTS.md` или доки расходятся с ним, прав этот файл, если founder не
@@ -17,7 +17,7 @@
 - Текущий фокус и следующий шаг: `docs/NOW.md`
 - Карта документации: `docs/README.md`
 - Решения после спеки: `docs/decisions/`
-- Стадия: 0 (спайк) не начата; кода ещё нет `[WIP]`
+- Стадия: 1, ядро готово (`go-core`, `protocol`, `go-engine`, `game-server`, `smoke`, `dev`); голос и веб — план `docs/superpowers/plans/2026-09-07-goko-stage1-voice-web.md` `[WIP]`
 
 ## Стек
 
@@ -37,22 +37,24 @@ apps/voice-agent     воркер LiveKit Agents: инструменты, про
 apps/web             одна страница: доска, лента, микрофон
 apps/mcp-server      стадия 2
 infra/               compose, Caddyfile, livekit.yaml, scripts/
-scripts/             doctor, smoke, chat — проверки из CLI
+scripts/             doctor, smoke, dev, chat — проверки и запуск из CLI
 docs/                спеки, планы, решения, runbook
 ```
 
-## Команды `[WIP]` (появятся на стадии 1, имена зафиксированы спекой)
+## Команды
 
 ```bash
 npm run doctor   # Node, KATAGO_BIN, сети, env без печати значений
-npm run check    # typecheck + lint + unit
-npm run smoke    # game-server + движок, сценарная партия по HTTP, ascii-доска
-npm run dev      # game-server :8787, go-engine :8788, web :5173, voice-agent goko-dev
-node scripts/chat.mjs   # текстовый диалог с Гоко в комнате LiveKit
+npm run check    # typecheck + unit (vitest по всем workspace'ам; линтера в v1 нет)
+npm run smoke    # game-server с фейковым движком, сценарная партия по HTTP, ascii-доска; -- --real: с KataGo
+npm run dev      # game-server :8787, go-engine :8788 (без KATAGO_BIN — FAKE_ENGINE=1), web :5173 и voice-agent goko-dev, если есть
+node scripts/chat.mjs   # текстовый диалог с Гоко в комнате LiveKit (появится вместе с voice-agent)
 ```
 
 Все проверки заканчиваются кодом возврата и печатают `[OK]`/`[X]`. Экран
 телефона агент не видит: доверять только этим командам и тестам.
+Контрактный тест движка (`apps/go-engine/src/katago.contract.test.ts`)
+выполняется только при `KATAGO_BIN` в окружении процесса, иначе `skipped`.
 
 ## Правила
 

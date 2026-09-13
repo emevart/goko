@@ -16,10 +16,10 @@
 | Папка | Что там | Статус |
 | --- | --- | --- |
 | `superpowers/specs/` | дизайн-спеки (brainstorming → спека) | спека v1 |
-| `superpowers/plans/` | планы реализации (writing-plans) | `[WIP]` |
+| `superpowers/plans/` | планы реализации (writing-plans) | стадия 0, стадия 1 ядро, стадия 1 голос и веб |
 | `research/` | результаты замеров и спайков, из которых следуют решения | [стадия 0](research/stage0-results.md) |
-| `journal/` | журналы исполнения по стадиям: задача, проверка, коммиты | стадия 0 |
-| `decisions/` | журнал решений после спеки, `D-NNNN` | [формат](decisions/README.md) |
+| `journal/` | журналы исполнения по стадиям: задача, проверка, коммиты | стадия 0, стадия 1 ядро |
+| `decisions/` | журнал решений после спеки, `D-NNNN` | [реестр](decisions/README.md), D-0001…D-0010 |
 | `process/` | как работают агенты и founder | [agent-development](process/agent-development.md) |
 | `runbooks/` | эксплуатация: VPS, LiveKit, KataGo, откат | `[TODO]` стадия 1 |
 | `reference/` | грабли и находки, на которые больно наступать дважды | `[TODO]` по мере появления |

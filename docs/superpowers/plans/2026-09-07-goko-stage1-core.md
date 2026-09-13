@@ -2,6 +2,8 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> `[OK]` План исполнен (2026-09-13, журнал `docs/journal/2026-09-08-stage1-core.md`). Код ушёл дальше плана по итогам ревью: тексты ошибок по-английски и `humanText` в протоколе, серия повторов и `retries_exhausted`, пределы тела и очереди SSE, бюджеты движка и прогрев. Источник правды — спека и `docs/decisions/` (D-0002…D-0010), а не код в этом плане.
+
 **Goal:** Ядро, через которое любой клиент (веб, голосовой агент, будущий MCP, агент-разработчик из CLI) играет полную партию человек против KataGo на ранге: правила го, протокол со схемами и клиентом, обёртка над KataGo, game-server с сессиями, событиями SSE и токенами LiveKit, плюс `npm run smoke` и `npm run dev`.
 
 **Architecture:** Четыре пакета поверх каркаса стадии 0. `packages/go-core` — чистые функции правил (позиция всегда переигрывается из списка ходов). `packages/protocol` — zod-схемы операций, ошибок, событий и движка плюс типизированный HTTP-клиент с разбором SSE; им пользуются все клиенты. `apps/go-engine` — Hono-сервис, держит один процесс `katago analysis`, очередь запросов, перезапуск с паузой, выбор хода по `humanPolicy`. `apps/game-server` — Hono-сервис: чистые переходы состояния партии (`game.ts`), сервис с мьютексом на партию, автоматикой мест `engine`, ожиданием ответа и автосчётом (`service.ts`), снапшоты в JSON, шина событий, сессии и токены LiveKit. Фейковый движок (`FAKE_ENGINE=1`) даёт полную партию без KataGo.
@@ -3132,7 +3134,7 @@ git commit -m "go-engine: HTTP-обёртка genmove/analyze/score, запус�
 
 **Interfaces:**
 - Consumes: `replay`, `play`, `IllegalMoveError`, `InvalidCoordError`, `parseCoord`, `formatCoord`, `indexToCoord`, `opposite`, `type Position` из `@goko/go-core`; `GameState`, `GameSettings`, `Move`, `Seat`, `Color`, `Rank`, `Result`, `ApiError`, `type GameEvent` из `@goko/protocol`.
-- Produces: `newId(): string`; `type NewGameParams = { id: string; createdAt: string; settings: GameSettings; seats: { B: Seat; W: Seat } }`; `newGame(input: NewGameParams): GameState`; `positionOf(state): Position`; `applyMove(state, color, coord, at: string): { state: GameState; move: Move }`; `illegalMessage(reason): string`; `resign(state, color): GameState`; `finishByScore(state, result: Result): GameState`; `setRank(state, color, rank): GameState`; `undo(state): { state: GameState; removed: Move[] }`; `rebuild(state, moves: Move[]): GameState`; `class GameStore { constructor(dir: string); init(): Promise<void>; load(): Promise<GameState[]>; save(state): Promise<void> }`; `class EventBus { subscribe(channel: string, listener: (e: GameEvent) => void): () => void; emit(channel, e): void; count(channel): number }`; каналы `game:<id>` и `session:<id>`; `test-helpers.ts`: `errorOf(fn: () => unknown): ApiError` — общий хелпер тестов всех задач game-server.
+- Produces: `newId(): string`; `type NewGameParams = { id: string; createdAt: string; settings: GameSettings; seats: { B: Seat; W: Seat } }`; `newGame(input: NewGameParams): GameState`; `positionOf(state): Position`; `applyMove(state, color, coord, at: string): { state: GameState; move: Move }`; `resign(state, color): GameState`; `finishByScore(state, result: Result): GameState`; `setRank(state, color, rank): GameState`; `undo(state): { state: GameState; removed: Move[] }`; `rebuild(state, moves: Move[]): GameState`; `class GameStore { constructor(dir: string); init(): Promise<void>; load(): Promise<GameState[]>; save(state): Promise<void> }`; `class EventBus { subscribe(channel: string, listener: (e: GameEvent) => void): () => void; emit(channel, e): void; count(channel): number }`; каналы `game:<id>` и `session:<id>`; `test-helpers.ts`: `errorOf(fn: () => unknown): ApiError` — общий хелпер тестов всех задач game-server.
 
 - [ ] **Step 1: `apps/game-server/package.json`**
 
@@ -3419,16 +3421,9 @@ export function positionOf(state: GameState): Position {
   return replay(state.settings.boardSize, state.moves);
 }
 
-export function illegalMessage(reason: IllegalReason): string {
-  switch (reason) {
-    case 'occupied':
-      return 'точка занята';
-    case 'ko':
-      return 'ко: сразу забрать нельзя';
-    case 'suicide':
-      return 'самоубийство: у камня не будет дыханий';
-  }
-}
+// [!] После пакета 12b русские тексты причин живут в протоколе (`humanText`, `ILLEGAL_REASON_TEXT`),
+// а `message` ошибок сервера — по-английски (D-0007). Здесь поправлена только причина нелегального хода;
+// русские тексты других ошибок ниже — исторические, в коде они английские.
 
 function normalizeCoord(coord: string, size: number): string {
   try {
@@ -3449,7 +3444,7 @@ export function applyMove(state: GameState, color: Color, coord: string, at: str
   try {
     played = play(positionOf(state), color, normalized);
   } catch (e) {
-    if (e instanceof IllegalMoveError) throw new ApiError('illegal_move', illegalMessage(e.reason), { reason: e.reason, coord: e.coord });
+    if (e instanceof IllegalMoveError) throw new ApiError('illegal_move', `illegal move ${e.coord}: ${e.reason}`, { reason: e.reason, coord: e.coord });
     throw e;
   }
   const move: Move = { n: state.moves.length + 1, color, coord: normalized, captured: played.captured, at };

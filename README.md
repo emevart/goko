@@ -12,7 +12,7 @@
 рангом, например 10 кю). Разговор — OpenAI Realtime через LiveKit Agents.
 Телефон общается только с нашим сервером, VPN на телефоне не нужен.
 
-Статус: `[WIP]` спека написана, код ещё не начат. Стадии и критерии — в спеке.
+Статус: `[WIP]` стадия 1 — ядро (правила, протокол, движок, game-server) готово, партия играется по HTTP; голос и веб в работе. Стадии и критерии — в спеке.
 
 ## Как это устроено
 
@@ -45,11 +45,22 @@
 Проект разрабатывается AI-first: код пишут агенты, правила для них — в
 [CLAUDE.md](CLAUDE.md) и [AGENTS.md](AGENTS.md).
 
-## Запуск `[WIP]`
+## Запуск
 
-Команды появятся на стадии 1: `npm run doctor`, `npm run dev`,
-`npm run check`, `npm run smoke`. Для голоса нужен VPS с LiveKit
-(`infra/`), ключ OpenAI и KataGo с сетями (`apps/go-engine/README.md`).
+Нужен Node 22.18+.
+
+```bash
+cp infra/.env.example .env   # заполнить; значения в git не попадают
+npm install
+npm run doctor               # Node, KataGo, сети, переменные окружения без печати значений
+npm run check                # типы и unit-тесты
+npm run smoke                # сценарная партия по HTTP с фейковым движком; -- --real: с KataGo
+npm run dev                  # game-server :8787 и go-engine :8788 (без KATAGO_BIN — фейковый движок)
+```
+
+Для голоса нужен VPS с LiveKit (`infra/README.md`), ключ OpenAI и
+voice-agent, он появится по плану голоса и веба. KataGo и сети —
+`apps/go-engine/models/README.md`.
 
 ## Лицензия
 
