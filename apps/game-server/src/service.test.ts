@@ -1624,6 +1624,33 @@ describe('GameService: фоновые задачи, дедлайны и мьют
     expect(service.get(id).moves.map((m) => m.coord)).toEqual(['D4', 'E5']);
   });
 
+  it('бросивший лог не отменяет финал серии: одно retries_exhausted, отметка исчерпанной серии, повторов больше нет', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    let calls = 0;
+    const log = () => {
+      throw new Error('log stream is closed');
+    };
+    const engine: Engine = {
+      ...createFakeEngine(),
+      genmove: async () => {
+        calls++;
+        throw new ApiError('engine_unavailable', 'engine is unreachable');
+      },
+    };
+    const { service, bus } = await make(engine, { log, retryDelaysMs: [10] });
+    const g = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: false });
+    const id = g.state.id;
+    const events = record(bus, `game:${id}`);
+    await service.play(id, { coord: 'D4', waitForReply: false, via: 'api' });
+    await untilTick(() => calls === 1);
+    await vi.advanceTimersByTimeAsync(10);
+    await untilTick(() => events.some((e) => e.type === 'error' && e.code === 'retries_exhausted'));
+    await tick(10);
+    expect(events.flatMap((e) => (e.type === 'error' ? [e.code] : []))).toEqual(['engine_unavailable', 'retries_exhausted']);
+    expect(service.internalSizes().gaveUp).toBe(1);
+    expect(calls).toBe(2);
+  });
+
   it('бросивший лог не мешает пасу вместо нелегального хода движка', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     const log = () => {
@@ -1817,6 +1844,94 @@ describe('GameService: серия повторов фоновой задачи',
     expect(errorsOf(events).every((e) => e.type === 'error' && e.code === 'engine_unavailable')).toBe(true);
   });
 
+  // Путь без коммита человека между отказами: пас движка после отказа запускает счёт, и отказ счёта
+  // считается уже новой серией — её начала не задаёт ни одно действие человека.
+  it('удачный ход движка после отказа обнуляет счёт: отказ счёта после паса движка идёт с первой ступени', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const inner = createFakeEngine();
+    let genmoves = 0;
+    let scores = 0;
+    let failScore: ((e: unknown) => void) | undefined;
+    const engine: Engine = {
+      ...inner,
+      genmove: (req) => {
+        genmoves++;
+        if (genmoves === 1) return Promise.reject(new ApiError('engine_unavailable', 'engine is unreachable'));
+        return inner.genmove(req);
+      },
+      score: () => {
+        scores++;
+        if (scores > 1) return Promise.reject(new Error('score failed'));
+        return new Promise((_, reject) => {
+          failScore = reject;
+        });
+      },
+    };
+    const { service, bus } = await make(engine, { store: memoryStore(), retryDelaysMs: [10, 1000] });
+    const g = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: false });
+    const id = g.state.id;
+    const events = record(bus, `game:${id}`);
+    await service.pass(id, { waitForReply: false, via: 'api' });
+    await untilTick(() => codes(events).length === 1);
+    await vi.advanceTimersByTimeAsync(10);
+    await untilTick(() => scores === 1);
+    expect(service.get(id).moves.map((m) => m.coord)).toEqual(['pass', 'pass']);
+    await tick(10);
+    failScore?.(new Error('score failed'));
+    await untilTick(() => codes(events).length === 2);
+    // Первая ступень (10 мс), а не вторая (1000 мс): серия отказа хода движка кончилась его удачным ходом.
+    await vi.advanceTimersByTimeAsync(9);
+    await tick(10);
+    expect(scores).toBe(1);
+    await vi.advanceTimersByTimeAsync(1);
+    await untilTick(() => scores === 2);
+  });
+
+  // Счёт, запущенный коммитом паса движка, может отказать раньше, чем задача движка дошла до конца.
+  // Отказ счёта не должен ни унаследовать счёт серии хода движка, ни потерять свой при её завершении.
+  it('отказ счёта сразу после паса движка: паузы первой и второй ступени по порядку, без наследства серии хода', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const inner = createFakeEngine();
+    let genmoves = 0;
+    let scores = 0;
+    const engine: Engine = {
+      ...inner,
+      genmove: (req) => {
+        genmoves++;
+        if (genmoves === 1) return Promise.reject(new ApiError('engine_unavailable', 'engine is unreachable'));
+        return inner.genmove(req);
+      },
+      score: () => {
+        scores++;
+        return Promise.reject(new Error('score failed'));
+      },
+    };
+    const { service, bus } = await make(engine, { store: memoryStore(), retryDelaysMs: [10, 1000, 1000] });
+    const g = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: false });
+    const id = g.state.id;
+    const events = record(bus, `game:${id}`);
+    await service.pass(id, { waitForReply: false, via: 'api' });
+    await untilTick(() => codes(events).length === 1);
+    await vi.advanceTimersByTimeAsync(10);
+    await untilTick(() => scores === 1);
+    await untilTick(() => codes(events).length === 2);
+    await tick(10);
+    // Первый отказ счёта — первая ступень (10 мс).
+    await vi.advanceTimersByTimeAsync(9);
+    await tick(10);
+    expect(scores).toBe(1);
+    await vi.advanceTimersByTimeAsync(1);
+    await untilTick(() => scores === 2);
+    await untilTick(() => codes(events).length === 3);
+    await tick(10);
+    // Второй отказ счёта — вторая ступень (1000 мс), а не снова первая.
+    await vi.advanceTimersByTimeAsync(10);
+    await tick(10);
+    expect(scores).toBe(2);
+    await vi.advanceTimersByTimeAsync(990);
+    await untilTick(() => scores === 3);
+  });
+
   // Движок ходит первым: любое действие человека приходится на ход движка.
   const restarts: [string, (service: GameService, id: string) => Promise<unknown>][] = [
     ['play (отклонён not_your_turn)', (s, id) => s.play(id, { coord: 'D4', waitForReply: false, via: 'voice' })],
@@ -1978,7 +2093,16 @@ describe('GameService: серия повторов фоновой задачи',
         return Promise.reject(new ApiError('engine_unavailable', 'engine is unreachable'));
       },
     };
-    const { service, bus } = await make(engine, { store: memoryStore(), retryDelaysMs: [10, 1000] });
+    const real = memoryStore();
+    let diskFull = false;
+    const store = {
+      load: () => real.load(),
+      save: async (state: GameState) => {
+        if (diskFull) throw new Error('disk is full');
+        return real.save(state);
+      },
+    } as unknown as GameStore;
+    const { service, bus } = await make(engine, { store, retryDelaysMs: [10, 1000] });
     const g = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: false });
     const id = g.state.id;
     const events = record(bus, `game:${id}`);
@@ -1988,7 +2112,12 @@ describe('GameService: серия повторов фоновой задачи',
     await untilTick(() => calls === 2);
     await expect(service.play(id, { coord: 'E5', waitForReply: false, via: 'voice' })).rejects.toMatchObject({ code: 'not_your_turn' });
     await expect(service.correct(id, { coord: 'Z99', waitForReply: false, via: 'voice' })).rejects.toMatchObject({ code: 'invalid_coord' });
+    // Отказ записи — тоже отклонённое действие: коммита не было, счёт прежний.
+    diskFull = true;
+    await expect(service.setRank(id, { color: 'W', rank: '5k' })).rejects.toThrow('disk is full');
+    diskFull = false;
     expect(service.get(id).moves.map((m) => m.coord)).toEqual(['D4']);
+    expect(service.get(id).seats.W.rank).toBe('10k');
     fail?.(new ApiError('engine_unavailable', 'engine is unreachable'));
     await untilTick(() => codes(events).length === 2);
     // Второй отказ той же ревизии: пауза 1000 мс.

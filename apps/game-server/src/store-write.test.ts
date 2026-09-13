@@ -71,7 +71,12 @@ describe('GameStore: запись под шпионом fs', () => {
     const store = new GameStore(path.join(dir, 'games'));
     await store.init();
     for (const id of ['../escaped', '', 'a/b', 'a\\b', '.', 'g1.json', 'con', 'nul', 'com1', 'lpt9', 'a'.repeat(65)]) {
-      await expect(store.save({ ...state(), id })).rejects.toMatchObject({ code: 'bad_request', status: 400 });
+      await expect(store.save({ ...state(), id })).rejects.toMatchObject({
+        code: 'bad_request',
+        status: 400,
+        message: 'game id must match /^[0-9a-z]+$/, be at most 64 characters and not be a reserved Windows name',
+        details: { id },
+      });
     }
     expect(await readdir(path.join(dir, 'games'))).toEqual([]);
     expect(await readdir(dir)).toEqual(['games']);
