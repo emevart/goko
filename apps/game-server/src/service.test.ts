@@ -1651,6 +1651,43 @@ describe('GameService: фоновые задачи, дедлайны и мьют
     expect(calls).toBe(2);
   });
 
+  // Сейчас обработчик отказа бросить почти не может (лог обёрнут, bus глотает исключения слушателей),
+  // поэтому бросок вызван нарочно: чтение паузы серии падает. Запись задачи обязана сниматься в finally,
+  // иначе для партии больше не поставится ни одна задача и ход движка будет ждаться вечно.
+  it('бросивший обработчик отказа не оставляет партию без задачи: следующий коммит ставит ход движка', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const inner = createFakeEngine({ script: ['E5'] });
+    let genmoves = 0;
+    const engine: Engine = {
+      ...inner,
+      genmove: (req) => {
+        genmoves++;
+        if (genmoves === 1) return Promise.reject(new ApiError('engine_unavailable', 'engine is unreachable'));
+        return inner.genmove(req);
+      },
+    };
+    // Первые два чтения паузы бросают: в onFailure из runEngine и в onFailure из startTask.
+    let brokenReads = 2;
+    const retryDelaysMs = new Proxy([10], {
+      get(target, key, receiver) {
+        if (key === '0' && brokenReads-- > 0) throw new Error('retry delays are broken');
+        return Reflect.get(target, key, receiver);
+      },
+    });
+    const { service } = await make(engine, { retryDelaysMs });
+    const g = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: false });
+    const id = g.state.id;
+    await service.play(id, { coord: 'D4', waitForReply: false, via: 'api' });
+    await untilTick(() => genmoves === 1 && brokenReads === 0);
+    await tick(10);
+    expect(service.get(id).moves).toHaveLength(1);
+    // Коммит человека зовёт kick: задача ставится, только если запись прежней снята.
+    await service.setRank(id, { color: 'W', rank: '5k' });
+    await untilTick(() => service.get(id).moves.length === 2);
+    expect(service.get(id).moves.map((m) => m.coord)).toEqual(['D4', 'E5']);
+    expect(genmoves).toBe(2);
+  });
+
   it('бросивший лог не мешает пасу вместо нелегального хода движка', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     const log = () => {
