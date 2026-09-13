@@ -1366,6 +1366,33 @@ describe('GameService: фоновые задачи, дедлайны и мьют
     expect((await real.load())[0]?.status).toBe('finished');
   });
 
+  it('бросивший лог в обработчике отказа не оставляет партию без задачи движка навсегда', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const real = new GameStore(dir);
+    let failures = 1;
+    const store = gatedStore(real, async (state) => {
+      if (state.moves.length === 2 && failures-- > 0) throw new Error('disk is full');
+    });
+    // Лог пишет в закрытый поток и бросает на строке об отказе фоновой задачи.
+    const log = (line: string) => {
+      if (line.startsWith('[X]')) throw new Error('log stream is closed');
+    };
+    const engine = createFakeEngine({ script: ['E5', 'F6'] });
+    const { service } = await make(engine, { store, log });
+    const g = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: false });
+    const id = g.state.id;
+    await service.play(id, { coord: 'D4', waitForReply: false, via: 'api' });
+    await untilTick(() => failures === 0);
+    await tick(5);
+    // Исправление хода ставит ход движка заново: запись прежней задачи не вправе его заблокировать.
+    const correcting = service.correct(id, { coord: 'C3', waitForReply: true, via: 'voice' });
+    const state = track(correcting);
+    await untilTick(() => state.settled);
+    const res = await correcting;
+    expect(res.reply).toMatchObject({ coord: 'F6' });
+    expect(service.get(id).moves.map((m) => m.coord)).toEqual(['C3', 'F6']);
+  });
+
   it('отказ записи хода человека: ошибка у вызывающего, состояние не меняется, ход можно повторить', async () => {
     const real = new GameStore(dir);
     let failures = 1;

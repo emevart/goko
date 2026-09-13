@@ -408,28 +408,32 @@ export class GameService {
   // ставится заново. Состояние в памяти при этом не расходится с диском: commit публикует
   // новое состояние только после удачной записи, так что повтор начинается с того, что лежит на диске.
   private startTask(tasks: Map<string, Promise<void>>, id: string, task: Promise<void>): void {
+    const run = async (): Promise<void> => {
+      let retry = false;
+      try {
+        await task;
+      } catch (e) {
+        const message = e instanceof Error ? e.message : String(e);
+        const code = e instanceof ApiError ? e.code : 'internal';
+        const retryMs = this.deps.engineRetryMs ?? ENGINE_RETRY_MS;
+        this.deps.log?.(`[X] background task for game ${id} failed: ${message}; retrying in ${retryMs} ms`);
+        this.emitGame(id, { type: 'error', code, message });
+        this.releaseWaiters(id);
+        await this.sleep(retryMs);
+        retry = true;
+      } finally {
+        // Запись снимается при любом исходе, даже если бросил сам обработчик отказа (лог
+        // в закрытый поток): иначе для партии больше не поставилась бы ни одна задача.
+        tasks.delete(id);
+      }
+      const state = this.games.get(id);
+      // kick сам не ставит задачу после close и в завершённой партии.
+      if (retry && state) this.kick(state);
+    };
+    // Бросок обработчика отказа сообщить уже некуда: лог сломан. Гасим, чтобы не уронить процесс.
     tasks.set(
       id,
-      task
-        .then(
-          () => false,
-          async (e: unknown) => {
-            const message = e instanceof Error ? e.message : String(e);
-            const code = e instanceof ApiError ? e.code : 'internal';
-            const retryMs = this.deps.engineRetryMs ?? ENGINE_RETRY_MS;
-            this.deps.log?.(`[X] background task for game ${id} failed: ${message}; retrying in ${retryMs} ms`);
-            this.emitGame(id, { type: 'error', code, message });
-            this.releaseWaiters(id);
-            await this.sleep(retryMs);
-            return true;
-          },
-        )
-        .then((retry) => {
-          tasks.delete(id);
-          const state = this.games.get(id);
-          // kick сам не ставит задачу после close и в завершённой партии.
-          if (retry && state) this.kick(state);
-        }),
+      run().catch(() => undefined),
     );
   }
 
