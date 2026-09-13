@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { newId } from './ids.ts';
+import { MAX_ID_LENGTH, isSafeId, newId } from './ids.ts';
 
 describe('newId', () => {
   it('уникален, из base36 времени и шести hex', () => {
@@ -20,5 +20,30 @@ describe('newId', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('newId проходит isSafeId', () => {
+    for (let i = 0; i < 100; i++) expect(isSafeId(newId())).toBe(true);
+  });
+});
+
+describe('isSafeId: идентификатор годится в имя файла снапшота', () => {
+  it('цифры и строчные латинские буквы, длина от 1 до MAX_ID_LENGTH', () => {
+    expect(MAX_ID_LENGTH).toBe(64);
+    expect(isSafeId('a')).toBe(true);
+    expect(isSafeId('0')).toBe(true);
+    expect(isSafeId('mf3k2x0a1b2c3')).toBe(true);
+    expect(isSafeId('z'.repeat(64))).toBe(true);
+    expect(isSafeId('z'.repeat(65))).toBe(false);
+    for (const id of ['', '../escaped', 'a/b', 'a\\b', '.', 'g1.json', 'ABC', 'a-b', 'a b', 'я']) expect(isSafeId(id), id).toBe(false);
+  });
+
+  it('зарезервированные имена Windows отвергаются без учёта регистра, соседние имена проходят', () => {
+    const reserved = ['con', 'prn', 'aux', 'nul', ...Array.from({ length: 10 }, (_, i) => `com${i}`), ...Array.from({ length: 10 }, (_, i) => `lpt${i}`)];
+    for (const id of reserved) {
+      expect(isSafeId(id), id).toBe(false);
+      expect(isSafeId(id.toUpperCase()), id.toUpperCase()).toBe(false);
+    }
+    for (const id of ['con1', 'xcon', 'nul0', 'com', 'lpt', 'com10', 'lpt10', 'coma', 'auxx', 'prnt']) expect(isSafeId(id), id).toBe(true);
   });
 });

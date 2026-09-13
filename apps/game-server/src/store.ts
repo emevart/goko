@@ -2,14 +2,7 @@
 import { mkdir, readFile, readdir, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { ApiError, GameState } from '@goko/protocol';
-
-// Форма идентификатора партии: только цифры и строчные латинские буквы, как у newId().
-// Проверяется до обращения к файловой системе, иначе id вида '../escaped' написал бы
-// файл за пределами каталога снапшотов.
-// [!] Образец не ограничивает длину и пропускает зарезервированные в Windows имена
-// ('con', 'nul', 'aux', 'prn'). Из newId() такие значения недостижимы; задаче 12,
-// где id приходит снаружи, оба пробела закрывать осознанно.
-const ID_PATTERN = /^[0-9a-z]+$/;
+import { MAX_ID_LENGTH, isSafeId } from './ids.ts';
 
 export class GameStore {
   readonly dir: string;
@@ -40,7 +33,8 @@ export class GameStore {
   }
 
   async save(state: GameState): Promise<void> {
-    if (!ID_PATTERN.test(state.id)) throw new ApiError('bad_request', 'game id must match /^[0-9a-z]+$/', { id: state.id });
+    // Форма id проверяется до файловой системы (isSafeId): ни выхода за каталог, ни имён устройств Windows.
+    if (!isSafeId(state.id)) throw new ApiError('bad_request', `game id must match /^[0-9a-z]+$/, be at most ${MAX_ID_LENGTH} characters and not be a reserved Windows name`, { id: state.id });
     const file = path.join(this.dir, `${state.id}.json`);
     const tmp = `${file}.${process.pid}.tmp`;
     await writeFile(tmp, JSON.stringify(state), 'utf8');

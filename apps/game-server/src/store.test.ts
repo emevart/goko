@@ -115,10 +115,10 @@ describe('GameStore', () => {
     expect(JSON.parse(await readFile(path.join(dir, 'g1.json'), 'utf8'))).toEqual(state());
   });
 
-  it('save отвергает идентификатор, который выходит за каталог снапшотов', async () => {
+  it('save отвергает идентификатор, который выходит за каталог снапшотов, зарезервирован в Windows или длиннее предела', async () => {
     const store = new GameStore(path.join(dir, 'games'));
     await store.init();
-    for (const id of ['../escaped', '', 'a/b', 'a\\b', '.', 'g1.json']) {
+    for (const id of ['../escaped', '', 'a/b', 'a\\b', '.', 'g1.json', 'con', 'nul', 'com1', 'lpt9', 'a'.repeat(65)]) {
       await expect(store.save({ ...state(), id })).rejects.toMatchObject({ code: 'bad_request', status: 400 });
     }
     expect(await readdir(path.join(dir, 'games'))).toEqual([]);
