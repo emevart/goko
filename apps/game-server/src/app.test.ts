@@ -4,8 +4,8 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { RoomAgentDispatch, TokenVerifier } from 'livekit-server-sdk';
-import { createClient, parseSseStream } from '@goko/protocol';
-import { type AppDeps, createApp } from './app.ts';
+import { GameSettings, createClient, parseSseStream } from '@goko/protocol';
+import { type AppDeps, SSE_QUEUE_LIMIT, createApp } from './app.ts';
 import { EventBus } from './events.ts';
 import { createFakeEngine } from './fake-engine.ts';
 import type { RoomCreator } from './livekit.ts';
@@ -687,5 +687,165 @@ describe('createApp: SSE, heartbeat и остановка', () => {
     ac.abort();
     await untilTick(() => bus.count(`game:${state.id}`) === 0);
     expect(bus.count(`game:${state.id}`)).toBe(0);
+  });
+});
+
+describe('createApp: пакет 12b — пределы, сессии, серия повторов', () => {
+  it('открытие потока партии и потока сессии перезапускает исчерпанную серию повторов (service.resume)', async () => {
+    const { app, client, service } = await make();
+    const resume = vi.spyOn(service, 'resume');
+    const { session } = await client.createSession();
+    const bare = await app.request(`/api/sessions/${session.id}/events`, { headers: { 'x-app-key': KEY } });
+    await bare.body?.cancel();
+    // Поток сессии без партии: перезапускать нечего.
+    expect(resume).not.toHaveBeenCalled();
+    const { state } = await client.newGame(session.id, HUMAN_ONLY);
+    const game = await app.request(`/api/games/${state.id}/events`, { headers: { 'x-app-key': KEY } });
+    await game.body?.cancel();
+    expect(resume.mock.calls).toEqual([[state.id]]);
+    const res = await app.request(`/api/sessions/${session.id}/events`, { headers: { 'x-app-key': KEY } });
+    await res.body?.cancel();
+    expect(resume.mock.calls).toEqual([[state.id], [state.id]]);
+    // Поток незнакомой партии — 404, и resume не зовётся.
+    expect((await app.request('/api/games/nope/events', { headers: { 'x-app-key': KEY } })).status).toBe(404);
+    expect(resume).toHaveBeenCalledTimes(2);
+  });
+
+  it('поток сессии закрывается на пинге, когда сессия уже истекла; подписка снимается', async () => {
+    let t = 0;
+    const { app, client, sessions, bus } = await make({ heartbeatMs: 20_000, ttlMs: 60_000, now: () => t });
+    const { session } = await client.createSession();
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const reader = streamOf(await app.request(`/api/sessions/${session.id}/events`, { headers: { 'x-app-key': KEY } }));
+    t = 20_000;
+    await vi.advanceTimersByTimeAsync(20_000);
+    await readUntil(reader, (text) => text.includes(': ping'));
+    // Сессию сносит sweep (например, лимит времени без пингов при заснувшем процессе).
+    t = 20_000 + 60_001;
+    expect(sessions.list()).toEqual([]);
+    await vi.advanceTimersByTimeAsync(20_000);
+    const { done, value } = await reader.read();
+    expect({ done, text: value ? decoder.decode(value) : '' }).toEqual({ done: true, text: '' });
+    // Остаётся наблюдатель срока: он снимается сам на первом событии канала.
+    await untilTick(() => bus.count(`session:${session.id}`) === 1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('поток сессии закрывается на событии, пришедшем после истечения сессии, и не пишет его', async () => {
+    let t = 0;
+    const { app, client, bus } = await make({ heartbeatMs: 20_000, ttlMs: 60_000, now: () => t });
+    const { session } = await client.createSession();
+    const reader = streamOf(await app.request(`/api/sessions/${session.id}/events`, { headers: { 'x-app-key': KEY } }));
+    await untilTick(() => bus.count(`session:${session.id}`) === 2);
+    t = 60_001;
+    bus.emit(`session:${session.id}`, { type: 'engine.thinking', color: 'B' });
+    const { done, value } = await reader.read();
+    expect({ done, text: value ? decoder.decode(value) : '' }).toEqual({ done: true, text: '' });
+    await untilTick(() => bus.count(`session:${session.id}`) === 0);
+  });
+
+  it('живая сессия: поток на пинге не закрывается', async () => {
+    let t = 0;
+    const { app, client } = await make({ heartbeatMs: 20_000, ttlMs: 60_000, now: () => t });
+    const { session } = await client.createSession();
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const reader = streamOf(await app.request(`/api/sessions/${session.id}/events`, { headers: { 'x-app-key': KEY } }));
+    // Ровно на границе срока сессия ещё жива (истекает строго позже ttl).
+    t = 59_999;
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(await readUntil(reader, (text) => text.includes(': ping'))).toBe(': ping\n\n');
+    await reader.cancel();
+  });
+
+  it('тело больше 64 КБ — bad_request с пределом в details, с content-length и без него; до разбора не доходит', async () => {
+    const { app, service } = await make();
+    const create = vi.spyOn(service, 'create');
+    const headers = { 'x-app-key': KEY, 'content-type': 'application/json' };
+    const big = JSON.stringify({ ...HUMAN_ONLY, pad: 'x'.repeat(64 * 1024) });
+    for (const extra of [{}, { 'content-length': String(Buffer.byteLength(big)) }] as Record<string, string>[]) {
+      const res = await app.request('/api/games', { method: 'POST', headers: { ...headers, ...extra }, body: big });
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({ error: { code: 'bad_request', message: 'request body is too large', details: { maxBytes: 65_536 } } });
+    }
+    expect(create).not.toHaveBeenCalled();
+    // Ровно 64 КБ проходит к разбору тела.
+    const exact = JSON.stringify(HUMAN_ONLY);
+    const padded = exact + ' '.repeat(65_536 - Buffer.byteLength(exact));
+    expect(Buffer.byteLength(padded)).toBe(65_536);
+    const ok = await app.request('/api/games', { method: 'POST', headers, body: padded });
+    expect(ok.status).toBe(200);
+    expect(create).toHaveBeenCalledTimes(1);
+  });
+
+  it('ZodError не из разбора тела — 500 internal, а не bad_request', async () => {
+    const { app, service, logs } = await make();
+    // Настоящий отказ schema.parse (ZodError, наследник Error) внутри сервиса, а не в разборе тела.
+    vi.spyOn(service, 'list').mockImplementation(() => {
+      GameSettings.parse({ boardSize: 7 });
+      return [];
+    });
+    const res = await app.request('/api/games', { headers: { 'x-app-key': KEY } });
+    expect(res.status).toBe(500);
+    expect(await res.json()).toEqual({ error: { code: 'internal', message: 'internal server error' } });
+    expect(logs.some((l) => l.startsWith('[X] game-server:'))).toBe(true);
+  });
+
+  it('стек непредвиденной ошибки проходит через redact: секретов нет ни в одной строке лога', async () => {
+    const { app, service, logs } = await make();
+    vi.spyOn(service, 'list').mockImplementation(() => {
+      const e = new Error('boom');
+      e.stack = `Error: boom\n    at key ${KEY} secret ${LK.apiSecret} api ${LK.apiKey}`;
+      throw e;
+    });
+    expect((await app.request('/api/games', { headers: { 'x-app-key': KEY } })).status).toBe(500);
+    const line = logs.find((l) => l.startsWith('[X] game-server:')) ?? '';
+    expect(line).toContain('at key [скрыто] secret [скрыто] api [скрыто]');
+    for (const secret of [KEY, LK.apiSecret, LK.apiKey]) expect(line).not.toContain(secret);
+  });
+
+  it('медленный клиент: очередь потока больше SSE_QUEUE_LIMIT — поток закрывается, подписка снимается', async () => {
+    const { app, client, bus } = await make();
+    const { state } = await client.createGame(HUMAN_ONLY);
+    const reader = streamOf(await app.request(`/api/games/${state.id}/events`, { headers: { 'x-app-key': KEY } }));
+    await readUntil(reader, (t) => t.includes('"cause":"sync"'));
+    const channel = `game:${state.id}`;
+    // Без чтения: очередь растёт синхронно, цикл потока между emit не успевает её разобрать.
+    for (let i = 0; i < SSE_QUEUE_LIMIT; i++) bus.emit(channel, { type: 'engine.thinking', color: 'B' });
+    expect(bus.count(channel)).toBe(1);
+    bus.emit(channel, { type: 'engine.thinking', color: 'W' });
+    expect(bus.count(channel)).toBe(0);
+    // Поток доходит до конца, не написав всей очереди.
+    let text = '';
+    for (let i = 0; i < SSE_QUEUE_LIMIT + 10; i++) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      text += decoder.decode(value);
+    }
+    expect((await reader.read()).done).toBe(true);
+    expect(text.split('event: engine.thinking').length - 1).toBeLessThan(SSE_QUEUE_LIMIT);
+  });
+
+  it('SSE_QUEUE_LIMIT — 1000', () => {
+    expect(SSE_QUEUE_LIMIT).toBe(1000);
+  });
+
+  it('сессия, созданная в обход POST /api/sessions, получает наблюдателя на маршрутах сессии, ровно одного', async () => {
+    const { app, client, sessions, bus } = await make();
+    const session = sessions.create();
+    expect(bus.count(`session:${session.id}`)).toBe(0);
+    const created = await client.newGame(session.id, HUMAN_ONLY);
+    expect(sessions.get(session.id).currentGameId).toBe(created.state.id);
+    expect(bus.count(`session:${session.id}`)).toBe(1);
+    await client.newGame(session.id, HUMAN_ONLY);
+    expect(bus.count(`session:${session.id}`)).toBe(1);
+    const other = sessions.create();
+    const res = await app.request(`/api/sessions/${other.id}/events`, { headers: { 'x-app-key': KEY } });
+    const reader = streamOf(res);
+    // Наблюдатель и сам поток.
+    await untilTick(() => bus.count(`session:${other.id}`) === 2);
+    const next = await client.newGame(other.id, HUMAN_ONLY);
+    expect(sessions.get(other.id).currentGameId).toBe(next.state.id);
+    await reader.cancel();
+    await untilTick(() => bus.count(`session:${other.id}`) === 1);
   });
 });
