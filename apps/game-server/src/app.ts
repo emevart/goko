@@ -19,6 +19,7 @@ import {
   SetRankRequest,
   UndoRequest,
 } from '@goko/protocol';
+import { errorDetail } from './error-detail.ts';
 import type { EventBus } from './events.ts';
 import { type RoomCreator, createSessionRoom, mintToken } from './livekit.ts';
 import type { GameService } from './service.ts';
@@ -91,7 +92,11 @@ export function createApp(deps: AppDeps): Hono {
   app.use('/api/*', bodyLimit({ maxSize: MAX_BODY_BYTES, onError: (c) => fail(c, 'bad_request', 'request body is too large', { maxBytes: MAX_BODY_BYTES }) }));
 
   app.onError((err, c) => {
-    if (err instanceof ApiError) return c.json(err.toBody(), err.status as ContentfulStatusCode);
+    if (err instanceof ApiError) {
+      // Исходное исключение (текст go-engine, адрес) — только в лог: в ответ идёт фиксированный message.
+      if (err.cause !== undefined) deps.log?.(`[!] game-server: ${c.req.method} ${c.req.path}: ${redact(errorDetail(err))}`);
+      return c.json(err.toBody(), err.status as ContentfulStatusCode);
+    }
     // Стек несёт текст исключения, а в нём может оказаться секрет: через redact, как и прочие логи.
     deps.log?.(`[X] game-server: ${redact(err.stack ?? err.message)}`);
     return fail(c, 'internal', 'internal server error');

@@ -2,8 +2,8 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { ApiError, type Color, type GameEvent, GameSettings, type GameState } from '@goko/protocol';
-import type { Engine } from './engine-client.ts';
+import { ApiError, type Color, type GameEvent, GameSettings, type GameState, fakeFetch } from '@goko/protocol';
+import { type Engine, createEngineClient } from './engine-client.ts';
 import { EventBus } from './events.ts';
 import { type FakeEngine, createFakeEngine } from './fake-engine.ts';
 import { newGame } from './game.ts';
@@ -1771,6 +1771,27 @@ describe('GameService: серия повторов фоновой задачи',
       expect(codes(events)).toEqual(['retries_exhausted', 'engine_unavailable', 'retries_exhausted']);
     });
   }
+
+  it('недоступный go-engine: событие error без текста исключения fetch, исходный текст — в логе', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const leak = 'connect ECONNREFUSED 10.1.2.3:8788 /opt/katago/secret';
+    const f = fakeFetch([
+      () => {
+        throw new TypeError(leak);
+      },
+    ]);
+    const engine = createEngineClient({ baseUrl: 'http://engine.test', engineKey: 'ek', fetch: f.fetch, retryDelayMs: 1 });
+    const logs: string[] = [];
+    const { service, bus } = await make(engine, { store: memoryStore(), retryDelaysMs: [1000], log: (l) => logs.push(l) });
+    const g = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: false });
+    const events = record(bus, `game:${g.state.id}`);
+    await service.play(g.state.id, { coord: 'D4', waitForReply: false, via: 'api' });
+    await untilTick(() => f.calls.length === 1);
+    await vi.advanceTimersByTimeAsync(1);
+    await untilTick(() => errorsOf(events).length === 1);
+    expect(errorsOf(events)).toEqual([{ type: 'error', code: 'engine_unavailable', message: 'engine is unreachable' }]);
+    expect(logs.filter((l) => l.startsWith('[!] engine:') && l.includes(leak))).toHaveLength(1);
+  });
 
   it('отказы записи: после retries_exhausted и resume серия снова начинается с первой паузы', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });

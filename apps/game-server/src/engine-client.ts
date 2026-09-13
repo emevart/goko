@@ -74,7 +74,8 @@ export function createEngineClient(opts: EngineClientOptions): Engine {
         // прерывание свою ошибку вместо причины сигнала. Всё остальное — движок недоступен.
         // Обе причины стоят повтора.
         if (controller.signal.aborted) throw timedOut();
-        throw new AttemptError(true, new ApiError('engine_unavailable', `engine is unreachable: ${e instanceof Error ? e.message : String(e)}`));
+        // Текст исключения fetch несёт адрес движка: наружу фиксированный текст, исходное — в cause для лога.
+        throw new AttemptError(true, new ApiError('engine_unavailable', 'engine is unreachable', undefined, { cause: e }));
       }
       if (res.ok) {
         try {
@@ -83,14 +84,16 @@ export function createEngineClient(opts: EngineClientOptions): Engine {
           if (controller.signal.aborted) throw timedOut();
           // Мусор в успешном ответе уходит наружу как ApiError, а не сырым ZodError:
           // сырой попал бы в событие error целиком и в HTTP-слое стал бы 500 вместо 503.
-          // Повтор не ставится: тело разобралось бы так же и со второй попытки.
-          const detail = e instanceof Error ? e.message : String(e);
-          throw new AttemptError(false, new ApiError('engine_unavailable', `engine response does not match the protocol: ${detail.slice(0, 200)}`));
+          // Текст ZodError — только в cause. Повтор не ставится: тело разобралось бы так же.
+          throw new AttemptError(false, new ApiError('engine_unavailable', 'engine response does not match the protocol', undefined, { cause: e }));
         }
       }
       const text = await res.text().catch(() => '');
       if (controller.signal.aborted) throw timedOut();
-      const api = apiErrorFromBody(text, res.status) ?? new ApiError('engine_unavailable', `engine responded with ${res.status}`);
+      // Ошибка go-engine по протоколу: код сохраняется, а message и details go-engine берёт из
+      // чужого исключения (путь к модели, текст KataGo), поэтому наружу только код, исходное — в cause.
+      const parsed = apiErrorFromBody(text, res.status);
+      const api = parsed ? new ApiError(parsed.code, `engine error: ${parsed.code}`, undefined, { cause: parsed }) : new ApiError('engine_unavailable', `engine responded with ${res.status}`);
       // Повторяем только 5xx: 4xx повторять бессмысленно, запрос не изменится.
       throw new AttemptError(res.status >= 500, api);
     } finally {

@@ -150,11 +150,10 @@ describe('createEngineClient', () => {
     await failing;
     // Тело детерминировано: вторая попытка разобрала бы его так же.
     expect(f.calls).toHaveLength(1);
-    // Сообщение обрезано: полный текст ZodError ушёл бы в событие error, в SSE и в голос.
+    // Текст ZodError ушёл бы в событие error, в SSE и в голос: наружу фиксированный текст, сам ZodError — в cause.
     const err: unknown = await engine.genmove(req).catch((e: unknown) => e);
-    const message = err instanceof Error ? err.message : String(err);
-    expect(message.startsWith('engine response does not match the protocol: ')).toBe(true);
-    expect(message.length).toBeLessThan(300);
+    expect(err).toMatchObject({ message: 'engine response does not match the protocol' });
+    expect(String((err as Error).cause)).toContain('humanFallback');
   });
 
   it('нечитаемое тело успешного ответа тоже даёт ApiError, а не SyntaxError', async () => {
@@ -293,6 +292,50 @@ describe('createEngineClient', () => {
     await engine.genmove(req);
     // Незакрытый таймаут держал бы событийный цикл до 30 с после ответа.
     expect(vi.getTimerCount()).toBe(0);
+  });
+
+  describe('текст чужого исключения не уходит в message (п.5 брифа)', () => {
+    const LEAK = 'connect ECONNREFUSED 10.1.2.3:8788 /opt/katago/secret';
+    const leaks = (err: unknown) => {
+      const e = err as Error & { details?: unknown };
+      expect(e.message).toMatch(/^[ -~]+$/);
+      expect(e.message).not.toContain('10.1.2.3');
+      expect(e.message).not.toContain('/opt');
+      expect(JSON.stringify(e.details ?? null)).not.toContain('/opt');
+    };
+
+    it('fetch бросил: engine is unreachable, исходное исключение в cause', async () => {
+      const cause = new TypeError(LEAK);
+      const f = fakeFetch([
+        () => {
+          throw cause;
+        },
+      ]);
+      const engine = createEngineClient({ baseUrl: 'http://engine.test', engineKey: 'ek', fetch: f.fetch, retryDelayMs: 1 });
+      const p = engine.genmove(req).catch((e: unknown) => e);
+      await drain();
+      const err = await p;
+      expect(err).toMatchObject({ name: 'ApiError', code: 'engine_unavailable', message: 'engine is unreachable' });
+      expect((err as Error).cause).toBe(cause);
+      leaks(err);
+    });
+
+    it('go-engine ответил ошибкой по протоколу: код сохраняется, message и details чужие не проходят', async () => {
+      const body = { error: { code: 'engine_busy', message: `KataGo failed: ${LEAK}`, details: { model: '/opt/katago/model.bin.gz' } } };
+      const f = fakeFetch([() => Response.json(body, { status: 503 })]);
+      const engine = createEngineClient({ baseUrl: 'http://engine.test', engineKey: 'ek', fetch: f.fetch, retryDelayMs: 1 });
+      const p = engine.score(scoreReq).catch((e: unknown) => e);
+      await drain();
+      const err = await p;
+      expect(err).toMatchObject({ name: 'ApiError', code: 'engine_busy', status: 503, message: 'engine error: engine_busy' });
+      expect((err as Error & { details?: unknown }).details).toBeUndefined();
+      expect(String((err as Error).cause)).toContain('KataGo failed');
+      leaks(err);
+      const refused = createEngineClient({ baseUrl: 'http://engine.test', engineKey: 'ek', fetch: fakeFetch([() => Response.json({ error: { code: 'bad_request', message: LEAK } }, { status: 400 })]).fetch });
+      const err400 = await refused.analyze({ ...req }).catch((e: unknown) => e);
+      expect(err400).toMatchObject({ code: 'bad_request', message: 'engine error: bad_request' });
+      leaks(err400);
+    });
   });
 
   it('константы по умолчанию: таймауты 10/15/30 с, пауза перед повтором 200 мс', () => {

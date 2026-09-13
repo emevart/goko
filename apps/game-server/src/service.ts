@@ -30,6 +30,7 @@ import {
   type Via,
 } from '@goko/protocol';
 import type { Engine } from './engine-client.ts';
+import { errorDetail } from './error-detail.ts';
 import type { EventBus } from './events.ts';
 import { applyMove, finishByScore, newGame, positionOf, resign as resignGame, setRank as setRankGame, undo as undoGame } from './game.ts';
 import { newId } from './ids.ts';
@@ -81,7 +82,8 @@ export type GameServiceDeps = {
 // Ожидающий ответа движка на состояние с ревизией revision.
 type Waiter = { revision: number; resolve: (move: Move | null) => void };
 
-// ApiError уходит как есть: его message пишется в коде сервера по-английски и без путей.
+// ApiError уходит как есть: его message пишется в коде сервера по-английски и без путей, а
+// текст чужого исключения (клиент движка) лежит в cause и попадает только в лог.
 // Сырое исключение (fs, fetch) несёт путь или адрес, поэтому наружу — код и общий текст.
 function publicError(e: unknown, code: ErrorCode, message: string): GameEvent {
   return e instanceof ApiError ? { type: 'error', code: e.code, message: e.message } : { type: 'error', code, message };
@@ -537,7 +539,7 @@ export class GameService {
   // пауза очередной длины. Отказ после последней паузы — одно событие retries_exhausted, партия
   // остаётся playing и ждёт resume. Возвращает true, если нужен повтор.
   private async onFailure(id: string, e: unknown, code: ErrorCode, message: string, logLine: (detail: string) => string): Promise<boolean> {
-    const detail = e instanceof Error ? e.message : String(e);
+    const detail = errorDetail(e);
     const delays = this.deps.retryDelaysMs ?? ENGINE_RETRY_DELAYS_MS;
     const count = (this.failures.get(id) ?? 0) + 1;
     const retryMs = delays[count - 1];

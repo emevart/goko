@@ -4,8 +4,9 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { RoomAgentDispatch, TokenVerifier } from 'livekit-server-sdk';
-import { GameSettings, createClient, parseSseStream } from '@goko/protocol';
+import { GameSettings, createClient, fakeFetch, parseSseStream } from '@goko/protocol';
 import { type AppDeps, SSE_QUEUE_LIMIT, createApp } from './app.ts';
+import { type Engine, createEngineClient } from './engine-client.ts';
 import { EventBus } from './events.ts';
 import { createFakeEngine } from './fake-engine.ts';
 import type { RoomCreator } from './livekit.ts';
@@ -56,13 +57,14 @@ type MakeOptions = {
   livekit?: Partial<AppDeps['livekit']>;
   closing?: AbortSignal;
   delayMs?: number;
+  engine?: Engine;
 };
 
 async function make(opts: MakeOptions = {}) {
   const bus = new EventBus();
   const engine = createFakeEngine({ script: opts.script, delayMs: opts.delayMs });
   const store = new GameStore(dir);
-  const service = new GameService({ store, engine, bus, replyTimeoutMs: 500 });
+  const service = new GameService({ store, engine: opts.engine ?? engine, bus, replyTimeoutMs: 500 });
   opened.push(service);
   await service.init();
   const sessions = new SessionManager({ max: opts.maxSessions ?? 3, ttlMs: opts.ttlMs ?? 60_000, now: opts.now });
@@ -847,5 +849,34 @@ describe('createApp: пакет 12b — пределы, сессии, серия
     expect(sessions.get(other.id).currentGameId).toBe(next.state.id);
     await reader.cancel();
     await untilTick(() => bus.count(`session:${other.id}`) === 1);
+  });
+});
+
+describe('createApp: круг правок 1 пакета 12b', () => {
+  it('тело больше предела без ключа — 401: ключ проверяется раньше предела тела', async () => {
+    const { app } = await make();
+    const big = JSON.stringify({ ...HUMAN_ONLY, pad: 'x'.repeat(64 * 1024) });
+    const headers = { 'content-type': 'application/json', 'content-length': String(Buffer.byteLength(big)) };
+    const res = await app.request('/api/games', { method: 'POST', headers, body: big });
+    expect(res.status).toBe(401);
+    expect(((await res.json()) as { error: { code: string } }).error.code).toBe('unauthorized');
+  });
+
+  it('analyze и score: текст ошибки go-engine не уходит в HTTP-ответ, исходный текст — только в лог', async () => {
+    const leak = 'KataGo failed: /opt/katago/model.bin.gz at 10.1.2.3';
+    const fetch = fakeFetch([() => Response.json({ error: { code: 'bad_request', message: leak, details: { path: '/opt/katago' } } }, { status: 400 })]).fetch;
+    const engine = createEngineClient({ baseUrl: 'http://engine.test', engineKey: 'ek', fetch });
+    const { app, client, logs } = await make({ engine });
+    const { state } = await client.createGame(HUMAN_ONLY);
+    for (const route of ['analyze', 'score']) {
+      const res = await app.request(`/api/games/${state.id}/${route}`, { method: 'POST', headers: { 'x-app-key': KEY, 'content-type': 'application/json' }, body: '{}' });
+      expect(res.status, route).toBe(400);
+      const text = await res.text();
+      expect(JSON.parse(text), route).toEqual({ error: { code: 'bad_request', message: 'engine error: bad_request' } });
+      expect(text).not.toContain('/opt');
+    }
+    const lines = logs.filter((l) => l.includes(leak));
+    expect(lines).toHaveLength(2);
+    expect(lines.every((l) => l.startsWith('[!] game-server:'))).toBe(true);
   });
 });
