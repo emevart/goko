@@ -49,7 +49,7 @@ export type AnalyzeInput = z.output<typeof AnalyzeRequest>;
 export const REPLY_TIMEOUT_MS = 8000;
 export const ENGINE_RESIGN_AFTER_MOVE = 60;
 export const ENGINE_RESIGN_WINRATE = 0.03;
-// ENGINE_RESIGN_LEAD: число не из спеки, решение реализации; фиксируется в `docs/decisions/` после стадии 1.
+// Порог сдачи движка — раздел 5 спеки: после 60-го хода winrate ниже 3 % и отставание больше 25 очков.
 export const ENGINE_RESIGN_LEAD = -25;
 export const GENMOVE_VISITS = 10;
 // Серия повторов фоновой задачи: пауза перед k-м повтором — k-е число. Отказ после последней
