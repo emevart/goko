@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { type Call, fakeFetch } from '@goko/protocol';
 import { ENGINE_RETRY_DELAY_MS, ENGINE_TIMEOUTS, createEngineClient } from './engine-client.ts';
+import { track } from './test-helpers.ts';
 
 const req = { boardSize: 13, rules: 'chinese' as const, komi: 7.5, moves: [], rank: '10k' as const };
 const scoreReq = { boardSize: 13, rules: 'chinese' as const, komi: 7.5, moves: [] };
@@ -21,20 +22,6 @@ const hang = () => (call: Call) =>
   new Promise<Response>((_, reject) => {
     call.init.signal?.addEventListener('abort', () => reject(call.init.signal?.reason ?? new Error('aborted')));
   });
-
-// Наблюдение за промисом без ожидания: «уже осел или ещё нет».
-function track<T>(p: Promise<T>): { settled: boolean } {
-  const state = { settled: false };
-  p.then(
-    () => {
-      state.settled = true;
-    },
-    () => {
-      state.settled = true;
-    },
-  );
-  return state;
-}
 
 // Прокрутка времени с запасом: для тестов, которым важен исход, а не шаги.
 async function drain(): Promise<void> {

@@ -8,6 +8,7 @@ import { EventBus } from './events.ts';
 import { type FakeEngine, createFakeEngine } from './fake-engine.ts';
 import { GameService } from './service.ts';
 import { GameStore } from './store.ts';
+import { track } from './test-helpers.ts';
 
 let dir = '';
 // Сервисы теста закрываются до удаления каталога: иначе фоновая задача движка
@@ -49,20 +50,6 @@ function record(bus: EventBus, channel: string): GameEvent[] {
 const tick = async (times = 3): Promise<void> => {
   for (let i = 0; i < times; i++) await new Promise((r) => setImmediate(r));
 };
-
-// Наблюдение за промисом без ожидания: «уже осел или ещё нет».
-function track<T>(p: Promise<T>): { settled: boolean } {
-  const state = { settled: false };
-  p.then(
-    () => {
-      state.settled = true;
-    },
-    () => {
-      state.settled = true;
-    },
-  );
-  return state;
-}
 
 // Ожидание условия без часов: крутится только очередь событий, поэтому годится
 // и на фейковых таймерах, где обычное опросное ожидание не сдвинулось бы с места.

@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { type Color, replay } from '@goko/go-core';
 import { createFakeEngine } from './fake-engine.ts';
+import { track } from './test-helpers.ts';
 
 const base = { boardSize: 9, rules: 'chinese' as const, komi: 7.5 };
 
@@ -12,20 +13,6 @@ beforeEach(() => {
 afterEach(() => {
   vi.useRealTimers();
 });
-
-// Наблюдение за промисом без ожидания: «уже осел или ещё нет».
-function track<T>(p: Promise<T>): { settled: boolean } {
-  const state = { settled: false };
-  p.then(
-    () => {
-      state.settled = true;
-    },
-    () => {
-      state.settled = true;
-    },
-  );
-  return state;
-}
 
 describe('createFakeEngine', () => {
   it('сценарий отдаёт ходы по порядку, потом случайные легальные', async () => {

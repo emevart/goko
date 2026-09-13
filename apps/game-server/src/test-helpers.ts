@@ -9,3 +9,17 @@ export function errorOf(fn: () => unknown): ApiError {
   }
   throw new Error('expected an error to be thrown');
 }
+
+// Наблюдение за промисом без ожидания: «уже осел или ещё нет».
+export function track<T>(p: Promise<T>): { settled: boolean } {
+  const state = { settled: false };
+  p.then(
+    () => {
+      state.settled = true;
+    },
+    () => {
+      state.settled = true;
+    },
+  );
+  return state;
+}
