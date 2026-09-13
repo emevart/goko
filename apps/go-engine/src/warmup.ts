@@ -44,7 +44,10 @@ export async function warmupOrExit(deps: WarmupDeps): Promise<boolean> {
   } catch (err) {
     if (deps.cancelled?.() === true) return false;
     const reason = err instanceof Error ? err.message : String(err);
-    deps.log?.(`[X] go-engine: движок не ответил на прогрев за ${timeoutMs} мс: ${reason}`);
+    // Прошедшее время и бюджет — разные числа: мёртвый бинарник отказывает за миллисекунды,
+    // и строка «за 300000 мс» заставила бы думать, что ждали пять минут.
+    const elapsed = Math.round(performance.now() - started);
+    deps.log?.(`[X] go-engine: прогрев не удался через ${elapsed} мс (бюджет ${timeoutMs} мс): ${reason}`);
     await deps.katago.stop();
     exit(WARMUP_EXIT_CODE);
     return false;
