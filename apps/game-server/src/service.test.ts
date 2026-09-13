@@ -11,6 +11,7 @@ import { applyMove, newGame, resign as resignGame } from './game.ts';
 import {
   ANALYZE_BUDGET_MS,
   ENGINE_RETRY_DELAYS_MS,
+  ENGINE_UNAVAILABLE_MESSAGE,
   FINISHED_RETENTION_MS,
   GameService,
   MAX_ACTIVE_GAMES,
@@ -2697,6 +2698,7 @@ describe('GameService: поток сессии только текущей па�
     const playState = track(playing);
     await untilTick(() => signals.length === 1);
     expect(session.map((e) => e.type)).toEqual(['state.updated', 'engine.thinking']);
+    expect(session[1]).toEqual({ type: 'engine.thinking', gameId: aId, color: 'W' });
 
     const b = await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, { sessionId: 's1' });
     const bId = b.state.id;
@@ -2891,6 +2893,208 @@ describe('GameService: поток сессии только текущей па�
     expect(errorEvents(gameA)).toEqual([]);
     expect(service.get(aId).status).toBe('playing');
     await untilTick(() => service.internalSizes().taskAborts === 0);
+  });
+});
+
+describe('GameService: отмена фоновой задачи в паузе серии и в очереди мьютекса (B2)', () => {
+  it('отмена во время паузы после отказа движка: пауза обрывается сразу, resume ставит ход, не дожидаясь паузы', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const inner = createFakeEngine({ script: ['E5'] });
+    let calls = 0;
+    const engine: Engine = {
+      ...inner,
+      genmove: (req, signal) => {
+        calls++;
+        if (calls === 1) return Promise.reject(new Error('engine down'));
+        return inner.genmove(req, signal);
+      },
+    };
+    const { service, bus } = await make(engine, { retryDelaysMs: delays(60_000) });
+    const a = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: false }, { sessionId: 's1' });
+    const aId = a.state.id;
+    const gameA = record(bus, `game:${aId}`);
+    await service.play(aId, { coord: 'D4', waitForReply: false, via: 'api' });
+    await untilTick(() => errorEvents(gameA).length === 1);
+    expect(vi.getTimerCount()).toBe(1);
+    await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, { sessionId: 's1' });
+    await tick(5);
+    expect(vi.getTimerCount()).toBe(0);
+    service.resume(aId);
+    await untilTick(() => service.get(aId).moves.length === 2);
+    expect(calls).toBe(2);
+    expect(errorEvents(gameA)).toHaveLength(1);
+  });
+
+  it('отмена во время паузы после отказа записи хода движка: пауза обрывается сразу, resume доигрывает ход', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const real = memoryStore();
+    let failEngineMove = 1;
+    const store = {
+      load: () => real.load(),
+      remove: (id: string) => real.remove(id),
+      save: async (state: GameState) => {
+        if (state.moves.length === 2 && failEngineMove-- > 0) throw new Error('disk full');
+        return real.save(state);
+      },
+    } as unknown as GameStore;
+    const inner = createFakeEngine({ script: ['E5', 'E5'] });
+    const { service, bus } = await make(inner, { store, retryDelaysMs: delays(60_000) });
+    const a = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: false }, { sessionId: 's1' });
+    const aId = a.state.id;
+    const gameA = record(bus, `game:${aId}`);
+    await service.play(aId, { coord: 'D4', waitForReply: false, via: 'api' });
+    await untilTick(() => errorEvents(gameA).length === 1);
+    expect(errorEvents(gameA)[0]).toMatchObject({ code: 'internal' });
+    expect(vi.getTimerCount()).toBe(1);
+    await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, { sessionId: 's1' });
+    await tick(5);
+    expect(vi.getTimerCount()).toBe(0);
+    service.resume(aId);
+    await untilTick(() => service.get(aId).moves.length === 2);
+    expect(inner.calls.genmove).toBe(2);
+  });
+
+  it('отмена раньше отказа записи хода движка: пауза после отказа не начинается, resume доигрывает ход', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const real = memoryStore();
+    let rejectSave: ((e: Error) => void) | undefined;
+    let gated = 1;
+    const store = {
+      load: () => real.load(),
+      remove: (id: string) => real.remove(id),
+      save: async (state: GameState) => {
+        if (state.moves.length === 2 && gated-- > 0) await new Promise<void>((_, reject) => (rejectSave = reject));
+        return real.save(state);
+      },
+    } as unknown as GameStore;
+    const inner = createFakeEngine({ script: ['E5', 'E5'] });
+    const { service } = await make(inner, { store, retryDelaysMs: delays(60_000) });
+    const a = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: false }, { sessionId: 's1' });
+    const aId = a.state.id;
+    await service.play(aId, { coord: 'D4', waitForReply: false, via: 'api' });
+    await untilTick(() => rejectSave !== undefined);
+    await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, { sessionId: 's1' });
+    rejectSave?.(new Error('disk full'));
+    await tick(10);
+    expect(vi.getTimerCount()).toBe(0);
+    service.resume(aId);
+    await untilTick(() => service.get(aId).moves.length === 2);
+    expect(inner.calls.genmove).toBe(2);
+  });
+
+  it('итог счёта, дождавшийся мьютекса уже после отмены, не применяется, и второй счёт не начинается', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const inner = createFakeEngine();
+    const releases: (() => void)[] = [];
+    const engine: Engine = {
+      ...inner,
+      score: (req, signal) =>
+        new Promise((resolve, reject) => {
+          releases.push(() => resolve(inner.score(req)));
+          signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
+        }),
+    };
+    const real = memoryStore();
+    let rejectSave: ((e: Error) => void) | undefined;
+    const store = {
+      load: () => real.load(),
+      remove: (id: string) => real.remove(id),
+      save: async (state: GameState) => {
+        if (state.moves.length === 3) await new Promise<void>((_, reject) => (rejectSave = reject));
+        return real.save(state);
+      },
+    } as unknown as GameStore;
+    const { service, bus } = await make(engine, { store, scoreBudgetMs: 60_000 });
+    const a = await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, { sessionId: 's1' });
+    const aId = a.state.id;
+    const gameA = record(bus, `game:${aId}`);
+    await service.pass(aId, { waitForReply: false, via: 'api' });
+    await service.pass(aId, { waitForReply: false, via: 'api' });
+    await untilTick(() => releases.length === 1);
+    // Ход человека держит мьютекс партии: его запись висит, а потом откажет.
+    const playFails = expect(service.play(aId, { coord: 'D4', waitForReply: false, via: 'api' })).rejects.toThrow('disk full');
+    await untilTick(() => rejectSave !== undefined);
+    // Счёт готов, но применяется только под мьютексом — после хода.
+    releases[0]?.();
+    await tick(5);
+    // В сессии создаётся B: задача счёта A отменена, пока её итог ждёт мьютекса.
+    await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, { sessionId: 's1' });
+    rejectSave?.(new Error('disk full'));
+    await playFails;
+    await tick(10);
+    // Ревизия после отказа хода та же, что у счёта, но задача отменена: итог отброшен, нового счёта нет.
+    expect(service.get(aId)).toMatchObject({ status: 'playing', revision: a.state.revision + 2 });
+    expect(releases).toHaveLength(1);
+    expect(gameA.filter((e) => e.type === 'game.finished')).toEqual([]);
+    await untilTick(() => service.internalSizes().taskAborts === 0);
+  });
+
+  it('движок, бросивший синхронно, — отказ движка в серии: engine_unavailable, а не internal', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const engine: Engine = {
+      ...createFakeEngine(),
+      score: () => {
+        throw new Error('sync failure at /secret/path');
+      },
+    };
+    const lines: string[] = [];
+    const { service, bus } = await make(engine, { retryDelaysMs: delays(60_000), log: (l) => lines.push(l) });
+    const g = await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false });
+    const id = g.state.id;
+    const events = record(bus, `game:${id}`);
+    await expect(service.score(id)).rejects.toThrow('sync failure');
+    await service.pass(id, { waitForReply: false, via: 'api' });
+    await service.pass(id, { waitForReply: false, via: 'api' });
+    await untilTick(() => errorEvents(events).length === 1);
+    expect(errorEvents(events)).toEqual([{ type: 'error', gameId: id, code: 'engine_unavailable', message: ENGINE_UNAVAILABLE_MESSAGE }]);
+    expect(lines.filter((l) => l.startsWith('[!] engine:'))).toHaveLength(1);
+  });
+
+  it('отменённый сигнал не достаётся следующей задаче: счёт, поставленный пока отменённый ход движка ещё висит, идёт', async () => {
+    const inner = createFakeEngine();
+    const releases: (() => void)[] = [];
+    // Ход движка не слушает отмену: отменённая задача остаётся в карте, пока тест её не отпустит.
+    const engine: Engine = {
+      ...inner,
+      genmove: async (req) => {
+        await new Promise<void>((r) => releases.push(r));
+        return inner.genmove(req);
+      },
+    };
+    const { service } = await make(engine);
+    const a = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: false }, { sessionId: 's1' });
+    const aId = a.state.id;
+    await service.pass(aId, { waitForReply: false, via: 'api' });
+    await untilTick(() => releases.length === 1);
+    await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, { sessionId: 's1' });
+    service.resume(aId);
+    // Пас за движок даёт второй пас подряд: задача счёта ставится, пока отменённый ход движка ещё в карте.
+    await service.pass(aId, { color: 'W', waitForReply: false, via: 'api' }, 'engine');
+    await untilTick(() => service.get(aId).status === 'finished');
+    expect(service.get(aId).result).toMatchObject({ reason: 'score' });
+    releases[0]?.();
+    await untilTick(() => service.internalSizes().taskAborts === 0);
+  });
+
+  it('переключение с партии без фоновой задачи не метит её исчерпанной серией', async () => {
+    const { service } = await make(createFakeEngine());
+    await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, { sessionId: 's1' });
+    await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, { sessionId: 's1' });
+    expect(service.internalSizes()).toMatchObject({ gaveUp: 0, taskAborts: 0 });
+  });
+
+  it('партия, уже опубликованная, но ещё не вышедшая из create, в лимите считается один раз', async () => {
+    const ids = ['aaa1', 'bbb2'];
+    const { service, bus } = await make(createFakeEngine(), { maxActiveGames: 2, newId: () => ids.shift() ?? 'zzz9' });
+    let nested: Promise<unknown> | undefined;
+    // Подписчик получает событие новой партии синхронно, до выхода create: второй create — в этот момент.
+    bus.subscribe('game:aaa1', (e) => {
+      if (e.type === 'state.updated' && e.cause === 'new') nested ??= service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false });
+    });
+    await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false });
+    expect(nested).toBeDefined();
+    await expect(nested).resolves.toMatchObject({ state: { id: 'bbb2' } });
+    expect(service.list()).toHaveLength(2);
   });
 });
 
