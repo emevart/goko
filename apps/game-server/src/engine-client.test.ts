@@ -249,6 +249,21 @@ describe('createEngineClient', () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it('таймаут до заголовков узнаётся по сигналу, а не по имени ошибки fetch', async () => {
+    // Подставной fetch отдаёт на прерывание свой AbortError, а не причину сигнала.
+    const f = fakeFetch([
+      (call: Call) =>
+        new Promise<Response>((_, reject) => {
+          call.init.signal?.addEventListener('abort', () => reject(new DOMException('This operation was aborted', 'AbortError')));
+        }),
+    ]);
+    const engine = createEngineClient({ baseUrl: 'http://engine.test', engineKey: 'ek', fetch: f.fetch, retryDelayMs: 10, timeouts: { genmove: 300, analyze: 300, score: 300 } });
+    const failing = expect(engine.genmove(req)).rejects.toMatchObject({ code: 'engine_busy', message: 'engine did not respond within 300 ms' });
+    await vi.advanceTimersByTimeAsync(300 + 10 + 300);
+    await failing;
+    expect(f.calls).toHaveLength(2);
+  });
+
   it('код ошибки пришёл, тело застряло: тоже таймаут, а не «ответил 503»', async () => {
     const f = fakeFetch([stalledBody(503)]);
     const engine = createEngineClient({ baseUrl: 'http://engine.test', engineKey: 'ek', fetch: f.fetch, retryDelayMs: 10, timeouts: { genmove: 300, analyze: 300, score: 300 } });

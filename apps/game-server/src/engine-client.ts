@@ -70,9 +70,10 @@ export function createEngineClient(opts: EngineClientOptions): Engine {
           signal: controller.signal,
         });
       } catch (e) {
-        // Прерывание по таймауту даёт DOMException с name 'TimeoutError'; всё остальное —
-        // движок недоступен. Обе причины стоят повтора.
-        if (e instanceof Error && e.name === 'TimeoutError') throw timedOut();
+        // Таймаут узнаётся по своему сигналу, как и при чтении тела: fetch вправе отдать на
+        // прерывание свою ошибку вместо причины сигнала. Всё остальное — движок недоступен.
+        // Обе причины стоят повтора.
+        if (controller.signal.aborted) throw timedOut();
         throw new AttemptError(true, new ApiError('engine_unavailable', `engine is unreachable: ${e instanceof Error ? e.message : String(e)}`));
       }
       if (res.ok) {
