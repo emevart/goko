@@ -1877,24 +1877,50 @@ describe('GameService: серия повторов фоновой задачи',
     expect(logs.filter((l) => l.startsWith('[!] engine:') && l.includes(leak))).toHaveLength(1);
   });
 
-  it('действие не человека (by engine) после retries_exhausted серию не перезапускает', async () => {
-    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
-    let calls = 0;
-    const { service, bus } = await make(
-      unreachable(() => calls++),
-      { store: memoryStore(), retryDelaysMs: [10] },
-    );
-    const g = await service.create({ ...ENGINE_BLACK, ...S9, waitForReply: false });
-    const id = g.state.id;
-    const events = record(bus, `game:${id}`);
-    await untilTick(() => calls === 1);
-    await vi.advanceTimersByTimeAsync(10);
-    await untilTick(() => codes(events).includes('retries_exhausted'));
-    await expect(service.undo(id, { via: 'api' }, 'engine')).rejects.toMatchObject({ code: 'nothing_to_undo' });
-    await tick(10);
-    expect(calls).toBe(2);
-    expect(service.internalSizes().gaveUp).toBe(1);
-  });
+  // Действие движка отклоняется или падает на записи: партия остаётся playing, и перезапуск серии
+  // был бы виден лишним genmove. Удачная сдача движка задачу не ставит по самому состоянию, поэтому
+  // resign проверяется через отказ записи.
+  const byEngine: [string, string, (service: GameService, id: string) => Promise<unknown>][] = [
+    ['undo', 'nothing_to_undo', (s, id) => s.undo(id, { via: 'api' }, 'engine')],
+    ['play', 'invalid_coord', (s, id) => s.play(id, { coord: 'Z99', waitForReply: false, via: 'api' }, 'engine')],
+    ['correct', 'nothing_to_undo', (s, id) => s.correct(id, { coord: 'D4', waitForReply: false, via: 'api' }, 'engine')],
+    ['resign (отказ записи)', 'disk is full', (s, id) => s.resign(id, { color: 'B', via: 'api' }, 'engine')],
+  ];
+  for (const [name, reason, act] of byEngine) {
+    it(`действие не человека (by engine) после retries_exhausted серию не перезапускает: ${name}`, async () => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      let calls = 0;
+      const real = memoryStore();
+      const store = {
+        load: () => real.load(),
+        save: async (state: GameState) => {
+          if (state.status === 'finished') throw new Error('disk is full');
+          return real.save(state);
+        },
+      } as unknown as GameStore;
+      const { service, bus } = await make(
+        unreachable(() => calls++),
+        { store, retryDelaysMs: [10] },
+      );
+      const g = await service.create({ ...ENGINE_BLACK, ...S9, waitForReply: false });
+      const id = g.state.id;
+      const events = record(bus, `game:${id}`);
+      await untilTick(() => calls === 1);
+      await vi.advanceTimersByTimeAsync(10);
+      await untilTick(() => codes(events).includes('retries_exhausted'));
+      const err = await act(service, id).then(
+        () => undefined,
+        (e: unknown) => e,
+      );
+      expect(err).toBeInstanceOf(Error);
+      const code = err instanceof ApiError ? err.code : err instanceof Error ? err.message : undefined;
+      expect(code).toBe(reason);
+      expect(service.get(id).status).toBe('playing');
+      await tick(10);
+      expect(calls).toBe(2);
+      expect(service.internalSizes().gaveUp).toBe(1);
+    });
+  }
 
   it('отказ движка по устаревшей ревизии не обнуляет и не двигает счёт серии', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
@@ -1932,6 +1958,42 @@ describe('GameService: серия повторов фоновой задачи',
     expect(calls).toBe(3);
     await vi.advanceTimersByTimeAsync(990);
     await untilTick(() => calls === 4);
+  });
+
+  it('устаревший отказ движка не снимает ожидающего новой ревизии: correct с ожиданием получает ответ второго genmove', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const inner = createFakeEngine({ script: ['E5'] });
+    let calls = 0;
+    let fail: ((e: unknown) => void) | undefined;
+    const engine: Engine = {
+      ...inner,
+      genmove: (req) => {
+        calls++;
+        if (calls === 1) {
+          return new Promise((_, reject) => {
+            fail = reject;
+          });
+        }
+        return inner.genmove(req);
+      },
+    };
+    const { service, bus } = await make(engine, { store: memoryStore(), retryDelaysMs: [1000] });
+    const g = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: false });
+    const id = g.state.id;
+    const events = record(bus, `game:${id}`);
+    await service.play(id, { coord: 'D4', waitForReply: false, via: 'api' });
+    await untilTick(() => calls === 1);
+    const corrected = service.correct(id, { coord: 'C3', waitForReply: true, via: 'voice' });
+    await untilTick(() => service.get(id).moves.at(-1)?.coord === 'C3');
+    expect(service.internalSizes().waiters).toBe(1);
+    fail?.(new ApiError('engine_unavailable', 'engine is unreachable'));
+    const res = await corrected;
+    expect(res.move).toMatchObject({ color: 'B', coord: 'C3' });
+    expect(res.reply).toMatchObject({ color: 'W', coord: 'E5' });
+    expect(res.replyTimedOut).toBeUndefined();
+    expect(calls).toBe(2);
+    expect(errorsOf(events)).toEqual([]);
+    expect(service.internalSizes().waiters).toBe(0);
   });
 
   it('отказ счёта по устаревшей ревизии не обнуляет и не двигает счёт серии', async () => {
