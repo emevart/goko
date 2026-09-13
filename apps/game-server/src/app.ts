@@ -23,6 +23,7 @@ import {
 import { errorDetail } from './error-detail.ts';
 import type { EventBus } from './events.ts';
 import { type RoomCreator, createSessionRoom, mintToken } from './livekit.ts';
+import { API_RATE, CREATE_RATE, type RateRule, RateLimiter } from './rate-limit.ts';
 import type { GameService } from './service.ts';
 import type { SessionManager } from './sessions.ts';
 
@@ -41,6 +42,10 @@ export type AppDeps = {
   inFlight?: InFlight;
   // Ключ go-engine: в лог не попадает, как и прочие секреты. Пустой при FAKE_ENGINE.
   engineKey?: string;
+  // Лимиты частоты на адрес (D-0012); по умолчанию API_RATE и CREATE_RATE.
+  rateLimits?: { api: RateRule; create: RateRule };
+  // TRUST_PROXY=1: адрес клиента — последний в X-Forwarded-For (его дописывает Caddy), иначе адрес сокета.
+  trustProxy?: boolean;
   log?: (line: string) => void;
 };
 
@@ -79,6 +84,22 @@ export const MAX_BODY_BYTES = 64 * 1024;
 export const SSE_QUEUE_LIMIT = 1000;
 
 const digest = (value: string): Buffer => createHash('sha256').update(value, 'utf8').digest();
+
+// Адрес IPv6 — до 45 символов; длиннее ключ лимитера не бывает, чем бы ни был заголовок.
+const MAX_CLIENT_KEY_LENGTH = 64;
+const CREATE_PATH = /^\/api\/(sessions|games|sessions\/[^/]+\/games)$/;
+
+// Ключ лимитера: адрес сокета от @hono/node-server (c.env.incoming). За прокси все соединения
+// приходят с его адреса, поэтому при trustProxy берётся последний адрес X-Forwarded-For: его дописал
+// сам прокси, а первые клиент мог подставить любые. Без сокета (app.request в тестах) — общий ключ.
+function clientKey(c: Context, trustProxy: boolean): string {
+  if (trustProxy) {
+    const forwarded = c.req.header('x-forwarded-for')?.split(',').at(-1)?.trim();
+    if (forwarded) return forwarded.slice(0, MAX_CLIENT_KEY_LENGTH);
+  }
+  const address = (c.env as { incoming?: { socket?: { remoteAddress?: unknown } } } | undefined)?.incoming?.socket?.remoteAddress;
+  return typeof address === 'string' && address !== '' ? address : 'unknown';
+}
 
 // Пустое тело (POST без JSON) — это {}: схемы подставят defaults. Непустое, но не JSON — bad_request.
 async function body(c: Context): Promise<unknown> {
@@ -146,6 +167,23 @@ export function createApp(deps: AppDeps): Hono {
   }
 
   app.get('/health', (c) => c.json({ ok: true, games: service.list().length, sessions: sessions.list().length }));
+
+  // Лимиты частоты (D-0012) — раньше ключа: подбор ключа и запросы без него тоже в счёте. Поток SSE
+  // считается один раз, при открытии. Отказ общего лимита не расходует лимит создания.
+  const trustProxy = deps.trustProxy === true;
+  const apiLimiter = new RateLimiter(deps.rateLimits?.api ?? API_RATE);
+  const createLimiter = new RateLimiter(deps.rateLimits?.create ?? CREATE_RATE);
+  app.use('/api/*', async (c, next) => {
+    const key = clientKey(c, trustProxy);
+    let verdict = apiLimiter.hit(key);
+    if (verdict.ok && c.req.method === 'POST' && CREATE_PATH.test(c.req.path)) verdict = createLimiter.hit(key);
+    if (!verdict.ok) {
+      const seconds = verdict.retryAfterSeconds;
+      c.header('Retry-After', String(seconds));
+      return fail(c, 'rate_limited', `too many requests, retry in ${seconds} s`, { retryAfterSeconds: seconds });
+    }
+    await next();
+  });
 
   app.use('/api/*', async (c, next) => {
     if (!timingSafeEqual(digest(c.req.header('x-app-key') ?? ''), appKeyDigest)) return fail(c, 'unauthorized', 'missing or invalid X-App-Key');

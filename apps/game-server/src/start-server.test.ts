@@ -382,6 +382,20 @@ describe('startServer: конфигурация из env', () => {
     expect(rec.serviceDeps).toHaveLength(1);
   });
 
+  it('TRUST_PROXY=1: лимит частоты по последнему адресу X-Forwarded-For; без него, пустой или другой — по адресу сокета', async () => {
+    say();
+    const send = (app: { request: (path: string, init: RequestInit, env: unknown) => Response | Promise<Response> }, xff: string) =>
+      app.request('/api/games', { headers: { 'x-app-key': BASE_ENV.APP_KEY, 'x-forwarded-for': xff } }, { incoming: { socket: { remoteAddress: '127.0.0.1' } } });
+    for (const [value, trusted] of [['1', true], [undefined, false], ['', false], ['true', false]] as const) {
+      const { deps } = harness();
+      const started = await startServer({ ...deps, env: { ...deps.env, TRUST_PROXY: value } });
+      if (!started) throw new Error('сервер не запустился');
+      for (let i = 0; i < 60; i++) expect((await send(started.app, `10.0.0.9, 203.0.113.1`)).status).toBe(200);
+      expect((await send(started.app, '203.0.113.1')).status, `TRUST_PROXY=${value}`).toBe(429);
+      expect((await send(started.app, '203.0.113.2')).status, `TRUST_PROXY=${value}`).toBe(trusted ? 200 : 429);
+    }
+  });
+
   it('FAKE_ENGINE=1: фейковый движок, ENGINE_KEY не нужен, строка [!]; иначе клиент go-engine с ENGINE_URL и ENGINE_KEY', async () => {
     say();
     const fake = harness();

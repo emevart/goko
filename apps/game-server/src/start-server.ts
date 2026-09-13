@@ -53,8 +53,9 @@ export type StartedServer = { app: Hono; service: GameService; sessions: Session
 export const CONFIG_EXIT_CODE = 2;
 // Партии не загрузились (нет прав на DATA_DIR, диск): не конфигурация env, а отказ данных.
 export const INIT_EXIT_CODE = 1;
-// service.close ждёт текущий запрос к движку (genmove 10 с и один повтор, около 20 с).
-// Дольше остановка не ждёт: снапшоты уже на диске, выход без ожидания данных не теряет.
+// Фоновые задачи движка service.close обрывает сигналом; дольше всех живёт обработчик score
+// (бюджет сервиса 20 с, D-0010), и server.close ждёт его ответа. Дольше остановка не ждёт:
+// снапшоты уже на диске, выход без ожидания данных не теряет.
 export const SHUTDOWN_MS = 25_000;
 export const DEFAULT_ENGINE_URL = 'http://127.0.0.1:8788';
 
@@ -81,6 +82,7 @@ type Config = {
   sessionTtlMs: number;
   port: number;
   hostname: string;
+  trustProxy: boolean;
 };
 
 // Пустая или из пробелов переменная — то же, что не заданная: так читается infra/.env.example,
@@ -135,6 +137,8 @@ function readConfig(env: Record<string, string | undefined>, root: string): { co
       sessionTtlMs,
       port,
       hostname: optional('HOST') ?? '127.0.0.1',
+      // Только за своим прокси (Caddy): иначе X-Forwarded-For подставляет сам клиент (D-0012).
+      trustProxy: env.TRUST_PROXY === '1',
     },
     errors: [],
   };
@@ -199,11 +203,12 @@ export async function startServer(deps: StartDeps = {}): Promise<StartedServer |
     closing: closing.signal,
     inFlight,
     engineKey: config.engineKey,
+    trustProxy: config.trustProxy,
     log,
   });
 
   // Остановка: потоки SSE закрываются (иначе server.close ждал бы их вечно), сервер перестаёт
-  // принимать соединения, сервис дожидается фоновых задач движка. Обработчики запросов сервис не
+  // принимать соединения, сервис обрывает фоновые задачи движка сигналом и дожидается их выхода. Обработчики запросов сервис не
   // ждёт, поэтому оставшиеся соединения обрываются, только когда сервис закрыт И счётчик текущих
   // запросов дошёл до нуля (ответ записан в сокет): обрыв нужен сокету с застрявшей записью
   // медленного клиента, который stream.abort() не освобождает. Выход 0 — только когда закрылись

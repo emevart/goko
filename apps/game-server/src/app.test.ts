@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { RoomAgentDispatch, TokenVerifier } from 'livekit-server-sdk';
 import { GameSettings, createClient, fakeFetch, parseSseStream } from '@goko/protocol';
 import { EventEmitter, getEventListeners } from 'node:events';
+import { serve } from '@hono/node-server';
 import { type AppDeps, InFlight, SSE_QUEUE_LIMIT, createApp } from './app.ts';
 import { type Engine, createEngineClient } from './engine-client.ts';
 import { EventBus } from './events.ts';
@@ -57,6 +58,8 @@ type MakeOptions = {
   engine?: Engine;
   inFlight?: InFlight;
   engineKey?: string;
+  rateLimits?: AppDeps['rateLimits'];
+  trustProxy?: boolean;
 };
 
 async function make(opts: MakeOptions = {}) {
@@ -83,6 +86,8 @@ async function make(opts: MakeOptions = {}) {
     closing: opts.closing,
     inFlight: opts.inFlight,
     engineKey: opts.engineKey,
+    rateLimits: opts.rateLimits,
+    trustProxy: opts.trustProxy,
     log: (line) => logs.push(line),
   });
   // Клиент протокола поверх app.request: без сети.
@@ -1091,5 +1096,156 @@ describe('createApp: счётчик текущих запросов (остан�
     // Поток живёт долго: служебный слушатель close на ответе не остаётся.
     expect(getEventListeners(outgoing, 'close')).toHaveLength(0);
     await res.body?.cancel();
+  });
+});
+
+describe('createApp: лимиты частоты (D-0012)', () => {
+  const H = { 'x-app-key': KEY, 'content-type': 'application/json' };
+  // Адрес сокета приходит в c.env.incoming от @hono/node-server; app.request принимает env третьим аргументом.
+  const from = (remoteAddress: string) => ({ incoming: { socket: { remoteAddress } } });
+  const loose = { limit: 10, windowMs: 10 * MIN };
+  type Limited = { status: number; retryAfter: string | null; body: unknown };
+  const limited = async (res: Response): Promise<Limited> => ({ status: res.status, retryAfter: res.headers.get('retry-after'), body: await res.json() });
+
+  it('по умолчанию 60 запросов в минуту на адрес: 61-й — 429 rate_limited с Retry-After; /health не в счёт; через минуту снова можно', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const { app } = await make();
+    for (let i = 0; i < 60; i++) expect((await app.request('/api/games', { headers: H }, from('203.0.113.7'))).status, `запрос ${i + 1}`).toBe(200);
+    expect((await app.request('/health', {}, from('203.0.113.7'))).status).toBe(200);
+    vi.setSystemTime(Date.now() + 20_000);
+    expect(await limited(await app.request('/api/games', { headers: H }, from('203.0.113.7')))).toEqual({
+      status: 429,
+      retryAfter: '40',
+      body: { error: { code: 'rate_limited', message: 'too many requests, retry in 40 s', details: { retryAfterSeconds: 40 } } },
+    });
+    // Другой адрес — свой счёт.
+    expect((await app.request('/api/games', { headers: H }, from('203.0.113.8'))).status).toBe(200);
+    vi.setSystemTime(Date.now() + 40_000);
+    expect((await app.request('/api/games', { headers: H }, from('203.0.113.7'))).status).toBe(200);
+  });
+
+  it('запрос без ключа тоже в счёте, и отказ по частоте раньше отказа по ключу', async () => {
+    const { app, service } = await make({ rateLimits: { api: { limit: 2, windowMs: MIN }, create: loose } });
+    const list = vi.spyOn(service, 'list');
+    expect((await app.request('/api/games', {}, from('198.51.100.1'))).status).toBe(401);
+    expect((await app.request('/api/nope', {}, from('198.51.100.1'))).status).toBe(401);
+    expect((await app.request('/api/games', { headers: H }, from('198.51.100.1'))).status).toBe(429);
+    expect((await app.request('/api/games', {}, from('198.51.100.1'))).status).toBe(429);
+    expect(list).not.toHaveBeenCalled();
+  });
+
+  it('создание: POST /api/sessions, /api/games и /api/sessions/:sid/games — общие 10 за 10 минут на адрес, сверх общего предела', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const { app, service } = await make({ ttlMs: 60 * MIN });
+    const create = vi.spyOn(service, 'create');
+    const post = (path: string, body?: unknown) => app.request(path, { method: 'POST', headers: H, ...(body ? { body: JSON.stringify(body) } : {}) }, from('192.0.2.5'));
+    const sids: string[] = [];
+    for (let i = 0; i < 3; i++) {
+      const res = await post('/api/sessions');
+      expect(res.status).toBe(200);
+      sids.push(((await res.json()) as { session: { id: string } }).session.id);
+    }
+    for (const sid of sids) expect((await post(`/api/sessions/${sid}/games`, HUMAN_ONLY)).status).toBe(200);
+    for (let i = 0; i < 4; i++) expect((await post('/api/games', HUMAN_ONLY)).status).toBe(200);
+    expect(create).toHaveBeenCalledTimes(7);
+    vi.setSystemTime(Date.now() + 5 * MIN);
+    for (const path of ['/api/games', `/api/sessions/${sids[0]}/games`, '/api/sessions']) {
+      expect(await limited(await post(path, HUMAN_ONLY))).toMatchObject({ status: 429, retryAfter: '300', body: { error: { code: 'rate_limited', details: { retryAfterSeconds: 300 } } } });
+    }
+    expect(create).toHaveBeenCalledTimes(7);
+    // Прочие маршруты, в том числе POST хода, предел создания не трогает.
+    expect((await app.request('/api/games', { headers: H }, from('192.0.2.5'))).status).toBe(200);
+    const first = service.list()[0];
+    if (!first) throw new Error('нет партий');
+    expect((await app.request(`/api/games/${first.id}/play`, { method: 'POST', headers: H, body: JSON.stringify({ coord: 'D4' }) }, from('192.0.2.5'))).status).toBe(200);
+    // Другой адрес создаёт.
+    expect((await app.request('/api/games', { method: 'POST', headers: H, body: JSON.stringify(HUMAN_ONLY) }, from('192.0.2.6'))).status).toBe(200);
+    vi.setSystemTime(Date.now() + 5 * MIN);
+    expect((await post('/api/games', HUMAN_ONLY)).status).toBe(200);
+  });
+
+  it('отказ общего предела не расходует предел создания', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const { app } = await make({ rateLimits: { api: { limit: 1, windowMs: MIN }, create: { limit: 2, windowMs: 10 * MIN } } });
+    const post = () => app.request('/api/games', { method: 'POST', headers: H, body: JSON.stringify(HUMAN_ONLY) }, from('192.0.2.9'));
+    expect((await post()).status).toBe(200);
+    for (let i = 0; i < 5; i++) expect((await post()).status).toBe(429);
+    vi.setSystemTime(Date.now() + MIN);
+    expect((await post()).status).toBe(200);
+    vi.setSystemTime(Date.now() + MIN);
+    expect(await limited(await post())).toMatchObject({ status: 429, retryAfter: '480' });
+  });
+
+  it('поток SSE считается один раз, при открытии; события потока в счёт не идут', async () => {
+    // Клиент протокола ходит через app.request без адреса сокета: его пять запросов — в своём счёте.
+    const { app, client } = await make({ rateLimits: { api: { limit: 5, windowMs: MIN }, create: loose } });
+    const { state } = await client.createGame(HUMAN_ONLY);
+    const res = await app.request(`/api/games/${state.id}/events`, { headers: H }, from('192.0.2.20'));
+    expect(res.status).toBe(200);
+    const reader = streamOf(res);
+    await readUntil(reader, (t) => t.includes('"cause":"sync"'));
+    for (const coord of ['D4', 'E5', 'F6']) await client.play(state.id, { coord });
+    await readUntil(reader, (t) => t.includes('F6'));
+    for (let i = 0; i < 4; i++) expect((await app.request('/api/games', { headers: H }, from('192.0.2.20'))).status).toBe(200);
+    expect((await app.request(`/api/games/${state.id}/events`, { headers: H }, from('192.0.2.20'))).status).toBe(429);
+    await reader.cancel();
+  });
+
+  it('X-Forwarded-For без TRUST_PROXY не влияет: счёт по адресу сокета', async () => {
+    const { app } = await make({ rateLimits: { api: { limit: 1, windowMs: MIN }, create: loose } });
+    expect((await app.request('/api/games', { headers: { ...H, 'x-forwarded-for': '1.1.1.1' } }, from('10.0.0.1'))).status).toBe(200);
+    expect((await app.request('/api/games', { headers: { ...H, 'x-forwarded-for': '2.2.2.2' } }, from('10.0.0.1'))).status).toBe(429);
+  });
+
+  it('с TRUST_PROXY — последний адрес X-Forwarded-For (его дописал прокси); без заголовка — адрес сокета', async () => {
+    const { app } = await make({ trustProxy: true, rateLimits: { api: { limit: 1, windowMs: MIN }, create: loose } });
+    const get = (xff: string[], socket = '127.0.0.1') => {
+      const headers = new Headers(H);
+      for (const v of xff) headers.append('x-forwarded-for', v);
+      return app.request('/api/games', { headers }, from(socket));
+    };
+    // Клиент подставил чужой адрес первым, прокси дописал настоящий последним.
+    expect((await get(['6.6.6.6, 203.0.113.50'])).status).toBe(200);
+    expect((await get(['7.7.7.7, 203.0.113.50'])).status).toBe(429);
+    expect((await get([' 203.0.113.51 '])).status).toBe(200);
+    // Несколько заголовков склеиваются через запятую: последний адрес — из последнего.
+    expect((await get(['9.9.9.9', '203.0.113.52'])).status).toBe(200);
+    expect((await get(['203.0.113.52'])).status).toBe(429);
+    // Без заголовка и с пустым последним адресом — адрес сокета прокси.
+    expect((await get([])).status).toBe(200);
+    expect((await get(['8.8.8.8, '])).status).toBe(429);
+  });
+
+  it('длинный адрес из заголовка не раздувает память: ключ обрезан до 64 символов', async () => {
+    const { app } = await make({ trustProxy: true, rateLimits: { api: { limit: 1, windowMs: MIN }, create: loose } });
+    const long = 'a'.repeat(64);
+    expect((await app.request('/api/games', { headers: { ...H, 'x-forwarded-for': `${long}x` } }, from('127.0.0.1'))).status).toBe(200);
+    expect((await app.request('/api/games', { headers: { ...H, 'x-forwarded-for': `${long}y` } }, from('127.0.0.1'))).status).toBe(429);
+  });
+
+  it('на настоящем сокете счёт идёт по адресу соединения', async () => {
+    const { app } = await make({ rateLimits: { api: { limit: 1, windowMs: MIN }, create: loose } });
+    const server = serve({ fetch: app.fetch, port: 0, hostname: '127.0.0.1' });
+    // Настоящий ввод-вывод: обороты цикла событий с потолком, без часов.
+    const until = async (cond: () => boolean) => {
+      for (let i = 0; i < 100_000; i++) {
+        if (cond()) return;
+        await new Promise((r) => setImmediate(r));
+      }
+      throw new Error('условие не выполнилось за отведённые обороты очереди');
+    };
+    try {
+      await until(() => server.listening);
+      const address = server.address();
+      const port = typeof address === 'object' && address !== null ? address.port : 0;
+      expect((await fetch(`http://127.0.0.1:${port}/api/games`, { headers: H })).status).toBe(200);
+      // Запрос без сокета — другой ключ; тот же адрес, что у настоящего соединения, — уже сверх предела.
+      expect((await app.request('/api/games', { headers: H })).status).toBe(200);
+      expect((await app.request('/api/games', { headers: H }, from('127.0.0.1'))).status).toBe(429);
+      expect((await fetch(`http://127.0.0.1:${port}/api/games`, { headers: H })).status).toBe(429);
+    } finally {
+      server.close();
+      if ('closeAllConnections' in server) server.closeAllConnections();
+    }
   });
 });
