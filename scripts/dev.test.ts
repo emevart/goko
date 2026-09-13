@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { DEV_AGENT_NAME, devPlan, devStartOptions } from './dev.mjs';
+import { DEV_AGENT_NAME, devPlan, devStartOptions, startDev } from './dev.mjs';
 
 const secretEnv = {
   APP_KEY: 'secret-app',
@@ -58,5 +58,16 @@ describe('dev: опции запуска детей', () => {
 
   it('POSIX: каждый ребёнок — лидер своей группы, SIGTERM уходит дереву', () => {
     for (const p of plan.procs) expect(devStartOptions(p, '/repo', false)).toMatchObject({ cwd: '/repo', env: p.env, detached: true });
+  });
+
+  it('startDev запускает каждый процесс плана с devStartOptions', () => {
+    const calls: unknown[][] = [];
+    const running = startDev(plan, '/repo', (...args: unknown[]) => {
+      calls.push(args);
+      return { pid: calls.length };
+    });
+    expect(running.map((r) => r.name)).toEqual(plan.procs.map((p) => p.name));
+    expect(calls).toEqual(plan.procs.map((p) => [p.name, p.cmd, p.args, devStartOptions(p, '/repo')]));
+    expect(running.map((r) => r.child)).toEqual(plan.procs.map((_p, i) => ({ pid: i + 1 })));
   });
 });

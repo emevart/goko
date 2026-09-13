@@ -66,6 +66,16 @@ export function devStartOptions(p, root, windows = isWindows) {
   return { cwd: root, env: p.env, shell: p.shell, detached: !windows, windowsHide: false };
 }
 
+/**
+ * Запускает процессы плана. start — шов для теста (боевой путь — startLogged).
+ * @param {{ procs: { name: string, cmd: string, args: string[], env: Record<string, string>, shell?: boolean }[] }} plan
+ * @param {string} root
+ * @param {Function} [start]
+ */
+export function startDev(plan, root, start = startLogged) {
+  return plan.procs.map((p) => ({ name: p.name, child: start(p.name, p.cmd, p.args, devStartOptions(p, root)) }));
+}
+
 async function main() {
   const root = path.resolve(import.meta.dirname, '..');
   loadRootEnv(root);
@@ -73,19 +83,17 @@ async function main() {
   for (const note of plan.notes) console.log(note);
 
   /** @type {{ name: string, child: import('node:child_process').ChildProcess }[]} */
-  const running = [];
+  const running = startDev(plan, root);
   let stopping = false;
-  for (const p of plan.procs) {
-    const child = startLogged(p.name, p.cmd, p.args, devStartOptions(p, root));
+  for (const { name, child } of running) {
     child.on('exit', (code, signal) => {
-      console.log(`[${p.name}] завершился (${signal ?? code})`);
-      if (code === 2) console.log(`[!] ${p.name}: не хватает переменных окружения, см. npm run doctor и infra/.env.example`);
+      console.log(`[${name}] завершился (${signal ?? code})`);
+      if (code === 2) console.log(`[!] ${name}: не хватает переменных окружения, см. npm run doctor и infra/.env.example`);
       if (!stopping && running.every(({ child: c }) => hasExited(c))) {
         console.log('[X] dev: все процессы завершились');
         process.exit(1);
       }
     });
-    running.push({ name: p.name, child });
   }
   console.log(plan.ready);
 

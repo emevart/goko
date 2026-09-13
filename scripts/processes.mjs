@@ -66,9 +66,18 @@ export function spawnOptions(opts) {
 }
 
 // opts: { cwd, env, prefix, shell, detached, windowsHide }. Возвращает ChildProcess.
-export function startLogged(name, cmd, args, opts) {
-  const child = spawn(cmd, args, spawnOptions(opts));
-  const print = (line) => console.log(`${opts.prefix ?? ''}[${name}] ${line}`);
+// spawnImpl и out — швы для теста: боевой путь берёт node:child_process и console.log.
+/**
+ * @param {string} name
+ * @param {string} cmd
+ * @param {string[]} args
+ * @param {{ cwd: string, env: Record<string, string>, prefix?: string, shell?: boolean, detached?: boolean, windowsHide?: boolean }} opts
+ * @param {Function} [spawnImpl]
+ * @param {(line: string) => void} [out]
+ */
+export function startLogged(name, cmd, args, opts, spawnImpl = spawn, out = console.log) {
+  const child = spawnImpl(cmd, args, spawnOptions(opts));
+  const print = (line) => out(`${opts.prefix ?? ''}[${name}] ${line}`);
   pipeLines(child.stdout, print);
   pipeLines(child.stderr, print);
   return child;
