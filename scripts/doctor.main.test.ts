@@ -143,7 +143,7 @@ describe('doctor: боевой запуск', () => {
   );
 
   it(
-    'пустые значения из infra/.env.example — «не задано»: сети по умолчанию, пустой KATAGO_BIN не [X]',
+    'пустые и из пробелов значения — «не задано»: сети по умолчанию, KATAGO_BIN из пробелов не [X]',
     () => {
       // Сети по умолчанию лежат на месте: пустая переменная должна привести к ним, а не к пути ''.
       const models = path.join(dir, 'apps', 'go-engine', 'models');
@@ -151,9 +151,9 @@ describe('doctor: боевой запуск', () => {
       writeFileSync(path.join(models, 'kata1-b10c128-s1141046784-d204142634.txt.gz'), '');
       writeFileSync(path.join(models, 'b18c384nbt-humanv0.bin.gz'), '');
       const { lines, status } = runDoctor(
-        { ...SPIKE, KATAGO_MODEL: '', AGENT_NAME: '', KATAGO_BIN: '', ENGINE_KEY: '' },
+        { ...SPIKE, KATAGO_MODEL: '', ENGINE_KEY: '' },
         // Из пробелов — через окружение процесса: readDotEnv сам обрезает значения.
-        { extraEnv: { KATAGO_HUMAN_MODEL: '  ', APP_KEY: '  ', WEB_HOST: '  ' } },
+        { extraEnv: { KATAGO_HUMAN_MODEL: '  ', APP_KEY: '  ', WEB_HOST: '  ', AGENT_NAME: '  ', KATAGO_BIN: '  ' } },
       );
       expect(lines).toContain('[OK] основная сеть на месте (KATAGO_MODEL)');
       expect(lines).toContain('[OK] человеческая сеть на месте (KATAGO_HUMAN_MODEL)');
