@@ -1839,6 +1839,101 @@ describe('GameService: серия повторов фоновой задачи',
     expect(logs.filter((l) => l.startsWith('[!] engine:') && l.includes(leak))).toHaveLength(1);
   });
 
+  it('действие не человека (by engine) после retries_exhausted серию не перезапускает', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    let calls = 0;
+    const { service, bus } = await make(
+      unreachable(() => calls++),
+      { store: memoryStore(), retryDelaysMs: [10] },
+    );
+    const g = await service.create({ ...ENGINE_BLACK, ...S9, waitForReply: false });
+    const id = g.state.id;
+    const events = record(bus, `game:${id}`);
+    await untilTick(() => calls === 1);
+    await vi.advanceTimersByTimeAsync(10);
+    await untilTick(() => codes(events).includes('retries_exhausted'));
+    await expect(service.undo(id, { via: 'api' }, 'engine')).rejects.toMatchObject({ code: 'nothing_to_undo' });
+    await tick(10);
+    expect(calls).toBe(2);
+    expect(service.internalSizes().gaveUp).toBe(1);
+  });
+
+  it('отказ движка по устаревшей ревизии не обнуляет и не двигает счёт серии', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    let calls = 0;
+    let fail: ((e: unknown) => void) | undefined;
+    const engine: Engine = {
+      ...createFakeEngine(),
+      genmove: () => {
+        calls++;
+        if (calls === 2) {
+          return new Promise((_, reject) => {
+            fail = reject;
+          });
+        }
+        return Promise.reject(new ApiError('engine_unavailable', 'engine is unreachable'));
+      },
+    };
+    const { service, bus } = await make(engine, { store: memoryStore(), retryDelaysMs: [10, 1000] });
+    const g = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: false });
+    const id = g.state.id;
+    const events = record(bus, `game:${id}`);
+    await service.play(id, { coord: 'D4', waitForReply: false, via: 'api' });
+    await untilTick(() => codes(events).length === 1);
+    await vi.advanceTimersByTimeAsync(10);
+    await untilTick(() => calls === 2);
+    // Пока движок думает над D4, человек исправляет ход: ревизия меняется.
+    await service.correct(id, { coord: 'C3', waitForReply: false, via: 'voice' });
+    fail?.(new ApiError('engine_unavailable', 'engine is unreachable'));
+    await untilTick(() => codes(events).length === 2);
+    await tick(5);
+    expect(calls).toBe(3);
+    // Второй отказ серии: пауза 1000 мс, а не снова первая (10 мс).
+    await vi.advanceTimersByTimeAsync(10);
+    await tick(10);
+    expect(calls).toBe(3);
+    await vi.advanceTimersByTimeAsync(990);
+    await untilTick(() => calls === 4);
+  });
+
+  it('отказ счёта по устаревшей ревизии не обнуляет и не двигает счёт серии', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    let calls = 0;
+    let fail: ((e: unknown) => void) | undefined;
+    const engine: Engine = {
+      ...createFakeEngine(),
+      score: () => {
+        calls++;
+        if (calls === 2) {
+          return new Promise((_, reject) => {
+            fail = reject;
+          });
+        }
+        return Promise.reject(new Error('score failed'));
+      },
+    };
+    const { service, bus } = await make(engine, { store: memoryStore(), retryDelaysMs: [10, 1000] });
+    const g = await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false });
+    const id = g.state.id;
+    const events = record(bus, `game:${id}`);
+    await service.pass(id, { waitForReply: false, via: 'api' });
+    await service.pass(id, { waitForReply: false, via: 'api' });
+    await untilTick(() => codes(events).length === 1);
+    await vi.advanceTimersByTimeAsync(10);
+    await untilTick(() => calls === 2);
+    // Пока движок считает, меняется ранг: ревизия другая, два паса остаются.
+    await service.setRank(id, { color: 'W', rank: '5k' });
+    fail?.(new Error('score failed'));
+    await untilTick(() => codes(events).length === 2);
+    await tick(5);
+    expect(calls).toBe(3);
+    await vi.advanceTimersByTimeAsync(10);
+    await tick(10);
+    expect(calls).toBe(3);
+    await vi.advanceTimersByTimeAsync(990);
+    await untilTick(() => calls === 4);
+  });
+
   it('отказы записи: после retries_exhausted и resume серия снова начинается с первой паузы', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     const real = memoryStore();

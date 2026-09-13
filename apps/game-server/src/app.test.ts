@@ -863,7 +863,8 @@ describe('createApp: круг правок 1 пакета 12b', () => {
   });
 
   it('analyze и score: текст ошибки go-engine не уходит в HTTP-ответ, исходный текст — только в лог', async () => {
-    const leak = 'KataGo failed: /opt/katago/model.bin.gz at 10.1.2.3';
+    const leak = `KataGo failed: /opt/katago/model.bin.gz at 10.1.2.3 with ${LK.apiSecret}`;
+    const logged = 'KataGo failed: /opt/katago/model.bin.gz at 10.1.2.3 with [скрыто]';
     const fetch = fakeFetch([() => Response.json({ error: { code: 'bad_request', message: leak, details: { path: '/opt/katago' } } }, { status: 400 })]).fetch;
     const engine = createEngineClient({ baseUrl: 'http://engine.test', engineKey: 'ek', fetch });
     const { app, client, logs } = await make({ engine });
@@ -875,8 +876,15 @@ describe('createApp: круг правок 1 пакета 12b', () => {
       expect(JSON.parse(text), route).toEqual({ error: { code: 'bad_request', message: 'engine error: bad_request' } });
       expect(text).not.toContain('/opt');
     }
-    const lines = logs.filter((l) => l.includes(leak));
+    // В лог — через redact, как и прочие чужие тексты.
+    const lines = logs.filter((l) => l.includes(logged));
     expect(lines).toHaveLength(2);
     expect(lines.every((l) => l.startsWith('[!] game-server:'))).toBe(true);
+    expect(logs.some((l) => l.includes(LK.apiSecret))).toBe(false);
+    // Обычная ApiError без cause (своя ошибка сервера) в лог не пишется.
+    const before = logs.length;
+    await expect(client.getGame('nope')).rejects.toMatchObject({ code: 'not_found' });
+    await expect(client.play(state.id, { coord: 'Z99' })).rejects.toMatchObject({ code: 'invalid_coord' });
+    expect(logs.slice(before)).toEqual([]);
   });
 });
