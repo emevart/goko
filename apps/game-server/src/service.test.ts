@@ -274,6 +274,25 @@ describe('GameService: партия человек против движка', (
     expect(events.flatMap((e) => (e.type === 'state.updated' ? [e.cause] : []))).toEqual(['correct', 'engine']);
   });
 
+  // Спека, раздел о ревизии: каждый переход game.ts — ровно +1, а correct — два перехода (undo и ход)
+  // в одном коммите, поэтому его state.updated показывает скачок +2. Клиенты не должны ждать шага 1.
+  it('ревизия: play и ответ движка — по +1, correct — скачок +2 одним событием', async () => {
+    const { service, bus } = await make(createFakeEngine({ script: ['E5', 'F6'] }));
+    const g = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: true });
+    const events = record(bus, `game:${g.state.id}`);
+    const r0 = g.state.revision;
+    await service.play(g.state.id, { coord: 'D4', waitForReply: true, via: 'voice' });
+    const res = await service.correct(g.state.id, { coord: 'D5', waitForReply: true, via: 'voice' });
+    const steps = events.flatMap((e) => (e.type === 'state.updated' ? [[e.cause, e.state.revision - r0]] : []));
+    expect(steps).toEqual([
+      ['play', 1],
+      ['engine', 2],
+      ['correct', 4],
+      ['engine', 5],
+    ]);
+    expect(res.state.revision - r0).toBe(5);
+  });
+
   it('waitForReply с медленным движком: replyTimedOut, ход приходит событием', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     const engine = createFakeEngine({ script: ['E5'], delayMs: 200 });
