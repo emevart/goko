@@ -51,7 +51,10 @@ export const ENGINE_RESIGN_WINRATE = 0.03;
 // ENGINE_RESIGN_LEAD: число не из спеки, решение реализации; фиксируется в `docs/decisions/` после стадии 1.
 export const ENGINE_RESIGN_LEAD = -25;
 export const GENMOVE_VISITS = 10;
-export const ENGINE_RETRY_MS = 5000;
+// Серия повторов фоновой задачи: пауза перед k-м повтором — k-е число. Отказ после последней
+// паузы даёт одно событие engine_gave_up, и партия ждёт действия человека (resume).
+export const ENGINE_RETRY_DELAYS_MS: readonly number[] = [5_000, 10_000, 20_000, 40_000, 60_000];
+export const ENGINE_GAVE_UP_MESSAGE = 'background task gave up after retries';
 // Бюджет ожидания вопросов «кто впереди» и «оцени позицию». Цели спеки (10 с и 4 с)
 // описывают норму, бюджет обязан покрыть замер на сервере (счёт на 400 просмотрах —
 // 5,3 с) с запасом. Без бюджета вызывающий ждал бы два таймаута клиента: 60,2 и 30,2 с.
@@ -69,7 +72,7 @@ export type GameServiceDeps = {
   bus: EventBus;
   now?: () => Date;
   replyTimeoutMs?: number;
-  engineRetryMs?: number;
+  retryDelaysMs?: readonly number[];
   scoreBudgetMs?: number;
   analyzeBudgetMs?: number;
   log?: (line: string) => void;
@@ -94,6 +97,10 @@ export class GameService {
   private readonly scoringTasks = new Map<string, Promise<void>>();
   // Досрочные пробуждения фоновых пауз: close не должен ждать паузу перед повтором.
   private readonly wakeups = new Set<() => void>();
+  // Число отказов подряд в текущей серии повторов партии; удачная задача обнуляет.
+  private readonly failures = new Map<string, number>();
+  // Партии, чья серия исчерпана: kick их не трогает до действия человека.
+  private readonly gaveUp = new Set<string>();
   private closed = false;
 
   constructor(deps: GameServiceDeps) {
@@ -118,6 +125,14 @@ export class GameService {
     return [...this.games.values()]
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
       .map((g) => ({ id: g.id, createdAt: g.createdAt, status: g.status, moveCount: g.moves.length, seats: g.seats, ...(g.result ? { result: g.result } : {}) }));
+  }
+
+  // Действие человека на партии (мутирующий запрос, открытие потока событий): исчерпанная серия
+  // повторов начинается заново. Во время идущей серии и для незнакомой партии ничего не делает.
+  resume(id: string): void {
+    if (!this.gaveUp.delete(id)) return;
+    const state = this.games.get(id);
+    if (state) this.kick(state);
   }
 
   get(id: string): GameState {
@@ -155,6 +170,8 @@ export class GameService {
   }
 
   async play(id: string, req: PlayInput, by: By = 'human'): Promise<PlayResponse> {
+    // До проверок: на ходе движка ход человека отклоняется (not_your_turn), но серию всё равно перезапускает.
+    if (by === 'human') this.resume(id);
     const { state, move, waiter } = await this.locked(id, async () => {
       const prev = this.get(id);
       this.checkRevision(prev, req.expectedRevision);
@@ -173,6 +190,7 @@ export class GameService {
   }
 
   async resign(id: string, req: ResignInput, by: By = 'human'): Promise<StateResponse> {
+    if (by === 'human') this.resume(id);
     return this.locked(id, async () => {
       const next = resignGame(this.get(id), req.color);
       await this.commit(next, 'resign', by, req.via);
@@ -181,6 +199,7 @@ export class GameService {
   }
 
   async undo(id: string, req: UndoInput, by: By = 'human'): Promise<UndoResponse> {
+    if (by === 'human') this.resume(id);
     return this.locked(id, async () => {
       const prev = this.get(id);
       this.checkRevision(prev, req.expectedRevision);
@@ -192,6 +211,7 @@ export class GameService {
 
   // Атомарно: откат пары, новый ход человека, новый ответ движка. Одно событие state.updated cause 'correct'.
   async correct(id: string, req: CorrectInput, by: By = 'human'): Promise<PlayResponse> {
+    if (by === 'human') this.resume(id);
     const { state, move, waiter } = await this.locked(id, async () => {
       const rolled = undoGame(this.get(id));
       const color = rolled.state.toPlay;
@@ -205,6 +225,7 @@ export class GameService {
   }
 
   async setRank(id: string, req: SetRankInput): Promise<StateResponse> {
+    this.resume(id);
     return this.locked(id, async () => {
       const next = setRankGame(this.get(id), req.color, req.rank);
       await this.commit(next, 'rank', 'human');
@@ -409,7 +430,7 @@ export class GameService {
 
   // Запускает задачу движка или счёта, если она нужна и ещё не идёт. Повторная задача на ту же ревизию не ставится.
   private kick(state: GameState): void {
-    if (this.closed || state.status !== 'playing') return;
+    if (this.closed || state.status !== 'playing' || this.gaveUp.has(state.id)) return;
     if (state.consecutivePasses >= 2) {
       if (!this.scoringTasks.has(state.id)) this.startTask(this.scoringTasks, state.id, this.runScoring(state.id));
       return;
@@ -429,13 +450,10 @@ export class GameService {
     const run = async (): Promise<void> => {
       try {
         await task;
+        // Задача дошла до конца без броска: серия отказов прервана.
+        this.failures.delete(id);
       } catch (e) {
-        const message = e instanceof Error ? e.message : String(e);
-        const retryMs = this.deps.engineRetryMs ?? ENGINE_RETRY_MS;
-        this.deps.log?.(`[X] background task for game ${id} failed: ${message}; retrying in ${retryMs} ms`);
-        this.emitGame(id, publicError(e, 'internal', INTERNAL_MESSAGE));
-        this.releaseWaiters(id);
-        await this.sleep(retryMs);
+        await this.onFailure(id, e, 'internal', INTERNAL_MESSAGE, (detail) => `[X] background task for game ${id} failed: ${detail}`);
       } finally {
         // Запись снимается при любом исходе, даже если бросил сам обработчик отказа (лог
         // в закрытый поток): иначе для партии больше не поставилась бы ни одна задача.
@@ -473,8 +491,8 @@ export class GameService {
       try {
         reply = await this.deps.engine.genmove({ ...this.engineRequest(state), rank, maxVisits: GENMOVE_VISITS });
       } catch (e) {
-        await this.onEngineFailure(id, e);
-        continue;
+        if (await this.onEngineFailure(id, e)) continue;
+        return;
       }
       const applied = await this.locked(id, async () => {
         const current = this.games.get(id);
@@ -500,14 +518,32 @@ export class GameService {
     }
   }
 
-  // Движок недоступен: событие error, ожидающие получают null (клиент увидит replyTimedOut), пауза, повтор.
-  private async onEngineFailure(id: string, e: unknown): Promise<void> {
-    const message = e instanceof Error ? e.message : String(e);
-    const retryMs = this.deps.engineRetryMs ?? ENGINE_RETRY_MS;
-    this.deps.log?.(`[!] engine: ${message}; retrying in ${retryMs} ms`);
-    this.emitGame(id, publicError(e, 'engine_unavailable', ENGINE_UNAVAILABLE_MESSAGE));
+  // Отказ в серии повторов: событие error, ожидающие получают null (клиент увидит replyTimedOut),
+  // пауза очередной длины. Отказ после последней паузы — одно событие engine_gave_up, партия
+  // остаётся playing и ждёт resume. Возвращает true, если нужен повтор.
+  private async onFailure(id: string, e: unknown, code: ErrorCode, message: string, logLine: (detail: string) => string): Promise<boolean> {
+    const detail = e instanceof Error ? e.message : String(e);
+    const delays = this.deps.retryDelaysMs ?? ENGINE_RETRY_DELAYS_MS;
+    const count = (this.failures.get(id) ?? 0) + 1;
+    const retryMs = delays[count - 1];
+    if (retryMs === undefined) {
+      this.failures.delete(id);
+      this.gaveUp.add(id);
+      this.deps.log?.(`${logLine(detail)}; gave up after ${delays.length} retries`);
+      this.emitGame(id, { type: 'error', code: 'engine_gave_up', message: ENGINE_GAVE_UP_MESSAGE });
+      this.releaseWaiters(id);
+      return false;
+    }
+    this.failures.set(id, count);
+    this.deps.log?.(`${logLine(detail)}; retrying in ${retryMs} ms`);
+    this.emitGame(id, publicError(e, code, message));
     this.releaseWaiters(id);
     await this.sleep(retryMs);
+    return true;
+  }
+
+  private onEngineFailure(id: string, e: unknown): Promise<boolean> {
+    return this.onFailure(id, e, 'engine_unavailable', ENGINE_UNAVAILABLE_MESSAGE, (detail) => `[!] engine: ${detail}`);
   }
 
   // Два паса: счёт и завершение. При недоступности движка — повтор, партия остаётся playing.
@@ -519,8 +555,8 @@ export class GameService {
       try {
         result = await this.score(id);
       } catch (e) {
-        await this.onEngineFailure(id, e);
-        continue;
+        if (await this.onEngineFailure(id, e)) continue;
+        return;
       }
       // Партия изменилась, пока движок считал (setRank, третий пас): результат отбрасывается,
       // и счёт повторяется по новой ревизии. Выйти здесь нельзя: коммит, сменивший ревизию,
