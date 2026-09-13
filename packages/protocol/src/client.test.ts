@@ -1,3 +1,4 @@
+import { getEventListeners } from 'node:events';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ApiError, ClientTimeoutError, HttpError, createClient } from './index.ts';
 import { CLIENT_TIMEOUTS } from './client.ts';
@@ -454,6 +455,16 @@ describe('таймауты клиента', () => {
     const clientFailing = createClient({ baseUrl: 'http://api.test', appKey: 'k', fetch: failing.fetch });
     await expect(clientFailing.getGame('g1')).rejects.toBeInstanceOf(ApiError);
     expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('после вызова на сигнале запроса не остаётся слушателя отмены: ни после ответа, ни после ошибки', async () => {
+    const f = fakeFetch([() => Response.json(state), () => Response.json({ error: { code: 'not_found', message: 'no game' } }, { status: 404 })]);
+    const client = createClient({ baseUrl: 'http://api.test', appKey: 'k', fetch: f.fetch });
+    const ac = new AbortController();
+    expect((await client.getGame('g1', { signal: ac.signal })).id).toBe('g1');
+    await expect(client.getGame('g1')).rejects.toBeInstanceOf(ApiError);
+    expect(f.calls).toHaveLength(2);
+    for (const call of f.calls) expect(getEventListeners(call.init.signal as AbortSignal, 'abort')).toEqual([]);
   });
 
   it('ClientTimeoutError: английское сообщение для разработчика, код client_timeout', () => {
