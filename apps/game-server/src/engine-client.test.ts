@@ -23,6 +23,18 @@ const hang = () => (call: Call) =>
     call.init.signal?.addEventListener('abort', () => reject(call.init.signal?.reason ?? new Error('aborted')));
   });
 
+// Заголовки отданы сразу, тело не приходит никогда: поток обрывается только сигналом запроса,
+// как у настоящего fetch, когда движок отдал статус и замолчал.
+const stalledBody = (status: number) => (call: Call) =>
+  new Response(
+    new ReadableStream<Uint8Array>({
+      start(controller) {
+        call.init.signal?.addEventListener('abort', () => controller.error(call.init.signal?.reason ?? new Error('aborted')));
+      },
+    }),
+    { status, headers: { 'content-type': 'application/json' } },
+  );
+
 // Прокрутка времени с запасом: для тестов, которым важен исход, а не шаги.
 async function drain(): Promise<void> {
   await vi.advanceTimersByTimeAsync(120_000);
@@ -217,6 +229,47 @@ describe('createEngineClient', () => {
     await check((e) => e.genmove(req), 10_000);
     await check((e) => e.analyze({ ...req }), 15_000);
     await check((e) => e.score(scoreReq), 30_000);
+  });
+
+  it('заголовки пришли, тело застряло: таймаут прерывает и чтение тела', async () => {
+    const f = fakeFetch([stalledBody(200)]);
+    const engine = createEngineClient({ baseUrl: 'http://engine.test', engineKey: 'ek', fetch: f.fetch, retryDelayMs: 10, timeouts: { genmove: 300, analyze: 300, score: 300 } });
+    const p = engine.genmove(req);
+    const state = track(p);
+    const failing = expect(p).rejects.toMatchObject({ name: 'ApiError', code: 'engine_busy', message: 'engine did not respond within 300 ms' });
+    await vi.advanceTimersByTimeAsync(299);
+    expect(f.calls).toHaveLength(1);
+    // Тело первой попытки обрывается на 300-й: это таймаут, он стоит повтора.
+    await vi.advanceTimersByTimeAsync(1 + 10);
+    expect(f.calls).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(299);
+    expect(state.settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    await failing;
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('код ошибки пришёл, тело застряло: тоже таймаут, а не «ответил 503»', async () => {
+    const f = fakeFetch([stalledBody(503)]);
+    const engine = createEngineClient({ baseUrl: 'http://engine.test', engineKey: 'ek', fetch: f.fetch, retryDelayMs: 10, timeouts: { genmove: 300, analyze: 300, score: 300 } });
+    const p = engine.score(scoreReq);
+    const state = track(p);
+    const failing = expect(p).rejects.toMatchObject({ code: 'engine_busy', message: 'engine did not respond within 300 ms' });
+    await vi.advanceTimersByTimeAsync(299);
+    expect(state.settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1 + 10 + 300);
+    await failing;
+    expect(f.calls).toHaveLength(2);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('после отказа таймер запроса тоже снят: мусор в теле и код ошибки', async () => {
+    const garbage = createEngineClient({ baseUrl: 'http://engine.test', engineKey: 'ek', fetch: fakeFetch([() => Response.json({ move: 'D4' })]).fetch });
+    await expect(garbage.genmove(req)).rejects.toMatchObject({ code: 'engine_unavailable' });
+    expect(vi.getTimerCount()).toBe(0);
+    const refused = createEngineClient({ baseUrl: 'http://engine.test', engineKey: 'ek', fetch: fakeFetch([() => Response.json({ error: { code: 'bad_request', message: 'схема' } }, { status: 400 })]).fetch });
+    await expect(refused.genmove(req)).rejects.toMatchObject({ code: 'bad_request' });
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it('после ответа таймер запроса снят: клиент не держит процесс живым', async () => {
