@@ -2,10 +2,11 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { ApiError, type Color, type GameEvent, type GameState } from '@goko/protocol';
+import { ApiError, type Color, type GameEvent, GameSettings, type GameState } from '@goko/protocol';
 import type { Engine } from './engine-client.ts';
 import { EventBus } from './events.ts';
 import { type FakeEngine, createFakeEngine } from './fake-engine.ts';
+import { newGame } from './game.ts';
 import { GameService } from './service.ts';
 import { GameStore } from './store.ts';
 import { track } from './test-helpers.ts';
@@ -474,6 +475,20 @@ describe('GameService: партия человек против движка', (
     await expect(service.play(g.state.id, { coord: 'C3', color: 'W', waitForReply: false, via: 'api' })).rejects.toMatchObject({ code: 'not_your_turn' });
     await expect(service.create({ black: { controller: 'external' }, white: { controller: 'engine', rank: '10k' }, waitForReply: true })).rejects.toMatchObject({ code: 'unsupported_controller' });
     await expect(service.create({ black: { controller: 'human' }, white: { controller: 'external' }, waitForReply: true })).rejects.toMatchObject({ code: 'unsupported_controller' });
+  });
+
+  it('два места engine отклоняются при создании: unsupported_controller, партии и записи нет', async () => {
+    const engine = createFakeEngine();
+    const { service, store } = await make(engine);
+    const err = service.create({ black: { controller: 'engine', rank: '10k' }, white: { controller: 'engine' }, ...S9, waitForReply: false });
+    await expect(err).rejects.toMatchObject({ code: 'unsupported_controller', details: { black: 'engine', white: 'engine' } });
+    expect(service.list()).toEqual([]);
+    expect(await store.load()).toEqual([]);
+    await tick(5);
+    expect(engine.calls.genmove).toBe(0);
+    // Одно место engine — как обычно, в любом порядке цветов.
+    expect((await service.create({ ...ENGINE_BLACK, ...S9, waitForReply: false })).state.status).toBe('playing');
+    expect((await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: false })).state.status).toBe('playing');
   });
 
   it('analyze, score, ascii, sgf, setRank', async () => {
@@ -1490,10 +1505,12 @@ describe('GameService: фоновые задачи, дедлайны и мьют
   });
 
   it('движок против движка: после хода задача ставится заново, партия идёт дальше одного хода', async () => {
+    // Создать такую партию нельзя (unsupported_controller), но снапшот мог остаться с прежних версий:
+    // «kick после любого исхода задачи» держит и его.
+    const id = 'enginevsengine';
+    await new GameStore(dir).save(newGame({ id, createdAt: '2026-09-07T10:00:00.000Z', settings: GameSettings.parse({ boardSize: 9 }), seats: { B: { controller: 'engine', rank: '10k' }, W: { controller: 'engine', rank: '10k' } } }));
     const engine = createFakeEngine({ script: ['C3', 'D4', 'E5', 'F6'] });
     const { service } = await make(engine);
-    const g = await service.create({ black: { controller: 'engine', rank: '10k' }, white: { controller: 'engine', rank: '10k' }, ...S9, waitForReply: false });
-    const id = g.state.id;
     // Коммит хода движка зовёт kick, пока запись задачи ещё в карте: следующий ход ставит только
     // kick после завершения задачи.
     await untilTick(() => service.get(id).moves.length >= 4);
