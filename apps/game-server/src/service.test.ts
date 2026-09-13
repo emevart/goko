@@ -528,10 +528,17 @@ describe('GameService: партия человек против движка', (
   });
 
   it('sgf по счёту несёт перевес', async () => {
-    const { service } = await make(createFakeEngine());
-    const g = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: true });
-    await service.pass(g.state.id, { waitForReply: true, via: 'api' });
-    await untilTick(() => service.get(g.state.id).status === 'finished');
+    // Снапшоты в памяти и без ожидания ответа. Прежде тест писал три снапшота на диск и ждал ответа
+    // до 500 мс настоящего времени, а конец партии ждал по числу оборотов очереди: под нагрузкой
+    // запись на диск шла дольше, чем крутились обороты, и тест падал. Без ввода-вывода и таймеров
+    // вся цепочка (пас, ответ движка, счёт, три коммита) — только микрозадачи.
+    const saved: GameState[] = [];
+    const store = { load: async () => [], save: async (state: GameState) => void saved.push(state) } as unknown as GameStore;
+    const { service } = await make(createFakeEngine(), { store });
+    const g = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: false });
+    await service.pass(g.state.id, { waitForReply: false, via: 'api' });
+    await untilTick(() => service.get(g.state.id).status === 'finished', 50);
+    expect(saved.map((st) => st.status)).toEqual(['playing', 'playing', 'playing', 'finished']);
     expect(service.sgf(g.state.id)).toContain('RE[W+7.5]');
   });
 
@@ -866,6 +873,43 @@ describe('GameService: фоновые задачи, дедлайны и мьют
     // Следующая партия той же сессии объявляется как обычно.
     const created = await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: true }, { sessionId: 's1' });
     expect(seen[0]).toEqual({ type: 'session.game', gameId: created.state.id });
+  });
+
+  it('отказ записи новой партии сессии не оставляет в памяти ни привязки к сессии, ни ожидающего первого хода', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const real = new GameStore(dir);
+    let failures = 1;
+    const store = gatedStore(real, async () => {
+      if (failures-- > 0) throw new Error('disk full');
+    });
+    const engine = createFakeEngine({ script: ['C3'] });
+    // replyTimeoutMs по умолчанию (8 с), часы стоят: ожидающий, оставшийся от отказа, никто не разбудил бы.
+    const { service, bus } = await make(engine, { store, replyTimeoutMs: undefined });
+    const seen = record(bus, 'session:s1');
+    await expect(service.create({ ...ENGINE_BLACK, ...S9, waitForReply: true }, { sessionId: 's1' })).rejects.toThrow('disk full');
+    expect(service.internalSizes()).toEqual({ sessionsByGame: 0, waiters: 0 });
+    expect(seen).toEqual([]);
+    expect(engine.calls.genmove).toBe(0);
+    // Следующая партия той же сессии: объявляется, движок отвечает, ожидающий получает ход.
+    const created = await service.create({ ...ENGINE_BLACK, ...S9, waitForReply: true }, { sessionId: 's1' });
+    expect(created.firstMove).toMatchObject({ coord: 'C3' });
+    expect(seen[0]).toEqual({ type: 'session.game', gameId: created.state.id });
+    expect(service.internalSizes()).toEqual({ sessionsByGame: 1, waiters: 0 });
+    await service.close();
+    expect(service.internalSizes()).toEqual({ sessionsByGame: 1, waiters: 0 });
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('отказ записи новой партии без сессии и без ожидания: память пуста, отказ тот же', async () => {
+    const real = new GameStore(dir);
+    let failures = 1;
+    const store = gatedStore(real, async () => {
+      if (failures-- > 0) throw new Error('disk full');
+    });
+    const { service } = await make(createFakeEngine(), { store });
+    await expect(service.create({ ...HUMAN_BLACK, ...S9, waitForReply: false })).rejects.toThrow('disk full');
+    expect(service.internalSizes()).toEqual({ sessionsByGame: 0, waiters: 0 });
+    expect(service.list()).toEqual([]);
   });
 
   it('чужое изменение во время ожидания первого хода движка — не таймаут', async () => {

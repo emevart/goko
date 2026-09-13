@@ -135,6 +135,13 @@ export class GameService {
     if (state) this.kick(state);
   }
 
+  // Шов для тестов на утечки: размеры внутренних таблиц, которые публичным API не видны.
+  internalSizes(): { sessionsByGame: number; waiters: number } {
+    let waiters = 0;
+    for (const list of this.waiters.values()) waiters += list.length;
+    return { sessionsByGame: this.sessionsByGame.size, waiters };
+  }
+
   get(id: string): GameState {
     const state = this.games.get(id);
     if (!state) throw new ApiError('not_found', `game ${id} does not exist`);
@@ -161,7 +168,15 @@ export class GameService {
     // session.game шлёт commit: после записи снапшота, раньше событий партии (раздел 5 спеки).
     if (opts.sessionId) this.sessionsByGame.set(id, opts.sessionId);
     const waiter = state.pendingEngineMove && req.waitForReply ? this.registerWaiter(id, state.revision) : null;
-    await this.commit(state, 'new', 'system');
+    try {
+      await this.commit(state, 'new', 'system');
+    } catch (e) {
+      // Партии нет и не будет: id больше не встретится, поэтому привязка к сессии и ожидающий
+      // первого хода снимаются здесь, а не висят до close.
+      this.sessionsByGame.delete(id);
+      this.releaseWaiters(id);
+      throw e;
+    }
     if (!waiter) return { state };
     const firstMove = await this.waitForReply(waiter);
     const latest = this.get(id);
