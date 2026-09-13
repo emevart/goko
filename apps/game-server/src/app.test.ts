@@ -55,11 +55,13 @@ type MakeOptions = {
   rooms?: RoomCreator & { calls: RoomCall[] };
   livekit?: Partial<AppDeps['livekit']>;
   closing?: AbortSignal;
+  delayMs?: number;
 };
 
 async function make(opts: MakeOptions = {}) {
   const bus = new EventBus();
-  const service = new GameService({ store: new GameStore(dir), engine: createFakeEngine({ script: opts.script }), bus, replyTimeoutMs: 500 });
+  const engine = createFakeEngine({ script: opts.script, delayMs: opts.delayMs });
+  const service = new GameService({ store: new GameStore(dir), engine, bus, replyTimeoutMs: 500 });
   opened.push(service);
   await service.init();
   const sessions = new SessionManager({ max: opts.maxSessions ?? 3, ttlMs: opts.ttlMs ?? 60_000, now: opts.now });
@@ -80,7 +82,7 @@ async function make(opts: MakeOptions = {}) {
   // Клиент протокола поверх app.request: без сети.
   const fetchFn = ((input: string | URL | Request, init?: RequestInit) => app.request(String(input).replace('http://app.test', ''), init)) as unknown as typeof fetch;
   const client = createClient({ baseUrl: 'http://app.test', appKey: KEY, fetch: fetchFn });
-  return { app, service, bus, client, sessions, rooms, logs };
+  return { app, service, bus, client, sessions, rooms, logs, engine };
 }
 
 const decoder = new TextDecoder();
@@ -106,6 +108,18 @@ const untilTick = async (cond: () => boolean, turns = 1000): Promise<void> => {
   }
   throw new Error('условие не выполнилось за отведённые обороты очереди');
 };
+
+type CaughtError = { code: string; status: number; message: string; details?: Record<string, unknown> };
+
+// Ошибка отклонённого промиса; успех — ошибка теста.
+async function errorOf(promise: Promise<unknown>): Promise<CaughtError> {
+  return promise.then(
+    () => {
+      throw new Error('ожидался отказ');
+    },
+    (e: unknown) => e as CaughtError,
+  );
+}
 
 function streamOf(res: Response): ReadableStreamDefaultReader<Uint8Array> {
   if (!res.body) throw new Error('у ответа нет тела');
@@ -168,9 +182,14 @@ describe('createApp: маршруты брифа', () => {
     const res = await client.play(state.id, { coord: 'd4', via: 'tap' });
     expect(res.move.coord).toBe('D4');
     expect(res.reply?.coord).toBe('E5');
-    await expect(client.play(state.id, { coord: 'E5' })).rejects.toMatchObject({ code: 'illegal_move', status: 400 });
+    // details доходят до клиента целиком: по ним агент объясняет отказ одной фразой.
+    const illegal = await errorOf(client.play(state.id, { coord: 'E5' }));
+    expect(illegal).toMatchObject({ code: 'illegal_move', status: 400 });
+    expect(illegal.details).toEqual({ reason: 'occupied', coord: 'E5' });
     await expect(client.play(state.id, { coord: 'I5' })).rejects.toMatchObject({ code: 'invalid_coord', status: 400 });
-    await expect(client.play(state.id, { coord: 'C3', expectedRevision: 0 })).rejects.toMatchObject({ code: 'revision_conflict', status: 409 });
+    const conflict = await errorOf(client.play(state.id, { coord: 'C3', expectedRevision: 0 }));
+    expect(conflict).toMatchObject({ code: 'revision_conflict', status: 409 });
+    expect(conflict.details).toEqual({ revision: 2 });
     await expect(client.getGame('nope')).rejects.toMatchObject({ code: 'not_found', status: 404 });
     await expect(client.setRank(state.id, { color: 'W', rank: '99k' as never })).rejects.toMatchObject({ code: 'bad_request', status: 400 });
     const state2 = await client.getGame(state.id);
@@ -182,7 +201,9 @@ describe('createApp: маршруты брифа', () => {
   it('лимит сессий — 429 limit_reached', async () => {
     const { client } = await make({ maxSessions: 1 });
     await client.createSession();
-    await expect(client.createSession()).rejects.toMatchObject({ code: 'limit_reached', status: 429 });
+    const err = await errorOf(client.createSession());
+    expect(err).toMatchObject({ code: 'limit_reached', status: 429 });
+    expect(err.details).toEqual({ max: 1 });
   });
 
   it('поток партии: sync первым, затем события; при обрыве подписка снимается', async () => {
@@ -292,15 +313,14 @@ describe('createApp: X-App-Key, тела и ошибки', () => {
   });
 
   it('непредвиденная ошибка — 500 internal без подробностей наружу, подробности в лог', async () => {
-    const { client, service, logs } = await make();
+    const { app, service, logs } = await make();
     vi.spyOn(service, 'list').mockImplementation(() => {
       throw new Error('disk exploded at /secret/path');
     });
-    const err = await client.listGames().then(
-      () => undefined,
-      (e: unknown) => e as { code: string; status: number; message: string },
-    );
-    expect(err).toMatchObject({ code: 'internal', status: 500, message: 'внутренняя ошибка сервера' });
+    const res = await app.request('/api/games', { headers: { 'x-app-key': KEY } });
+    expect(res.status).toBe(500);
+    // Тело сверяется целиком: ни стека, ни пути, ни details.
+    expect(await res.json()).toEqual({ error: { code: 'internal', message: 'внутренняя ошибка сервера' } });
     expect(logs.some((l) => l.startsWith('[X] game-server:') && l.includes('disk exploded'))).toBe(true);
   });
 
@@ -318,17 +338,17 @@ describe('createApp: X-App-Key, тела и ошибки', () => {
 
 describe('createApp: сессии и LiveKit', () => {
   it('отказ createRoom — 500 internal без секретов, место в лимите свободно', async () => {
-    const rooms = fakeRooms(new Error(`twirp: unauthenticated for ${LK.apiSecret}`));
+    // SDK секреты в сообщение не кладёт, но строка лога не должна на это полагаться.
+    const rooms = fakeRooms(new Error(`twirp: unauthenticated key=${LK.apiKey} secret=${LK.apiSecret} app=${KEY}`));
     const { client, sessions, logs } = await make({ maxSessions: 1, rooms });
-    const err = await client.createSession().then(
-      () => undefined,
-      (e: unknown) => e as { code: string; status: number; message: string },
-    );
+    const err = await errorOf(client.createSession());
     expect(err).toMatchObject({ code: 'internal', status: 500, message: 'не удалось подготовить комнату LiveKit для сессии' });
     expect(JSON.stringify(err)).not.toContain(LK.apiSecret);
     expect(rooms.calls).toHaveLength(1);
     expect(sessions.list()).toEqual([]);
-    expect(logs.some((l) => l.startsWith('[X] game-server: сессия') && l.includes('twirp'))).toBe(true);
+    const line = logs.find((l) => l.startsWith('[X] game-server: сессия'));
+    expect(line).toMatch(/не создана: twirp: unauthenticated key=\[скрыто\] secret=\[скрыто\] app=\[скрыто\]$/);
+    for (const secret of [LK.apiKey, LK.apiSecret, KEY]) expect(logs.join('\n')).not.toContain(secret);
     // Место не утекло: при лимите 1 следующая сессия создаётся, как только LiveKit ответил.
     rooms.createRoom = async (options) => {
       rooms.calls.push(options as RoomCall);
@@ -366,6 +386,58 @@ describe('createApp: сессии и LiveKit', () => {
     const text = await readUntil(reader, (t) => t.includes('"cause":"new"'));
     expect(text.indexOf('event: session.game')).toBe(0);
     await reader.cancel();
+  });
+
+  it('currentGameId переключается по событию session.game: поток, открытый пока движок думает, шлёт новую партию', async () => {
+    const { client, app, service, sessions, engine } = await make({ script: ['E5'], delayMs: 100 });
+    const { session } = await client.createSession();
+    const old = await client.newGame(session.id, HUMAN_ONLY);
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    // Человек белыми: первым ходит движок, ответ POST ждёт его хода.
+    const pending = client.newGame(session.id, { ...HUMAN_BLACK, black: { controller: 'engine', rank: '10k' }, white: { controller: 'human' } });
+    await untilTick(() => service.list().length === 2);
+    const fresh = service.list().find((g) => g.id !== old.state.id);
+    if (!fresh) throw new Error('новой партии нет');
+    expect(sessions.get(session.id).currentGameId).toBe(fresh.id);
+    const reader = streamOf(await app.request(`/api/sessions/${session.id}/events`, { headers: { 'x-app-key': KEY } }));
+    const first = await readUntil(reader, (t) => t.includes('\n\n'));
+    expect(first).toContain(`"gameId":"${fresh.id}"`);
+    await reader.cancel();
+    await untilTick(() => engine.calls.genmove === 1);
+    await vi.advanceTimersByTimeAsync(100);
+    expect((await pending).firstMove?.coord).toBe('E5');
+    expect(sessions.get(session.id).currentGameId).toBe(fresh.id);
+  });
+
+  it('две партии в сессии параллельно: currentGameId — последняя объявленная, а не последняя дождавшаяся', async () => {
+    const { client, sessions, bus, engine } = await make({ script: ['E5'], delayMs: 100 });
+    const { session } = await client.createSession();
+    const announced: string[] = [];
+    bus.subscribe(`session:${session.id}`, (e) => {
+      if (e.type === 'session.game') announced.push(e.gameId);
+    });
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const slow = client.newGame(session.id, { ...HUMAN_BLACK, black: { controller: 'engine', rank: '10k' }, white: { controller: 'human' } });
+    await untilTick(() => announced.length === 1);
+    const quick = await client.newGame(session.id, HUMAN_ONLY);
+    await untilTick(() => engine.calls.genmove === 1);
+    await vi.advanceTimersByTimeAsync(100);
+    const slowRes = await slow;
+    expect(announced).toEqual([slowRes.state.id, quick.state.id]);
+    expect(sessions.get(session.id).currentGameId).toBe(quick.state.id);
+  });
+
+  it('сессия истекла, пока движок думал над первым ходом: партия создана, ответ 200', async () => {
+    let t = 0;
+    const { client, sessions, engine } = await make({ script: ['E5'], delayMs: 100, ttlMs: MIN, now: () => t });
+    const { session } = await client.createSession();
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const pending = client.newGame(session.id, { ...HUMAN_BLACK, black: { controller: 'engine', rank: '10k' }, white: { controller: 'human' } });
+    await untilTick(() => engine.calls.genmove === 1);
+    expect(sessions.get(session.id).currentGameId).not.toBeNull();
+    t = 2 * MIN;
+    await vi.advanceTimersByTimeAsync(100);
+    expect((await pending).firstMove?.coord).toBe('E5');
   });
 
   it('операции сессии продлевают её срок: новая партия (даже с битым телом) и открытие потока', async () => {

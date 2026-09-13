@@ -59,6 +59,10 @@ export function createApp(deps: AppDeps): Hono {
   const heartbeatMs = deps.heartbeatMs ?? DEFAULT_HEARTBEAT_MS;
   // Сравнение за постоянное время: дайджесты одной длины, поэтому разная длина ключа не даёт раннего выхода.
   const appKeyDigest = digest(deps.appKey);
+  // Известные секреты вырезаются из текста чужих исключений перед записью в лог.
+  // Длинные первыми: ключ может оказаться частью секрета.
+  const secrets = [deps.appKey, deps.livekit.apiKey, deps.livekit.apiSecret].filter((s) => s !== '').sort((a, b) => b.length - a.length);
+  const redact = (text: string) => secrets.reduce((acc, secret) => acc.split(secret).join('[скрыто]'), text);
   const fail = (c: Context, code: ErrorCode, message: string, details?: Record<string, unknown>) =>
     c.json({ error: { code, message, ...(details ? { details } : {}) } }, ERROR_STATUS[code] as ContentfulStatusCode);
 
@@ -139,6 +143,8 @@ export function createApp(deps: AppDeps): Hono {
   // Срок сессии продлевается каждым событием её канала: ходы идут на /api/games/:id/* без sessionId,
   // и без этого сессия истекла бы посреди партии. Наблюдатель истёкшей сессии снимает себя сам
   // на первом событии, а наблюдатели сессий без событий — при создании следующей сессии.
+  // currentGameId переключается здесь же, по session.game: порядок совпадает с порядком событий
+  // в потоке, а не с порядком ответов (ответ с ходом движка приходит позже).
   const watchers = new Map<string, () => void>();
   const isAlive = (sid: string) => sessions.list().some((s) => s.id === sid);
   const unwatch = (sid: string) => {
@@ -151,9 +157,10 @@ export function createApp(deps: AppDeps): Hono {
   const watch = (sid: string) => {
     watchers.set(
       sid,
-      bus.subscribe(`session:${sid}`, () => {
-        if (isAlive(sid)) sessions.touch(sid);
-        else unwatch(sid);
+      bus.subscribe(`session:${sid}`, (event) => {
+        if (!isAlive(sid)) return unwatch(sid);
+        if (event.type === 'session.game') sessions.setGame(sid, event.gameId);
+        else sessions.touch(sid);
       }),
     );
   };
@@ -176,7 +183,7 @@ export function createApp(deps: AppDeps): Hono {
       await createSessionRoom(deps.rooms, { room: session.room, agentName: deps.livekit.agentName, sessionId: session.id });
     } catch (e) {
       sessions.remove(session.id);
-      deps.log?.(`[X] game-server: сессия ${session.id} не создана: ${e instanceof Error ? e.message : String(e)}`);
+      deps.log?.(`[X] game-server: сессия ${session.id} не создана: ${redact(e instanceof Error ? e.message : String(e))}`);
       throw new ApiError('internal', 'не удалось подготовить комнату LiveKit для сессии');
     }
     watch(session.id);
@@ -188,9 +195,9 @@ export function createApp(deps: AppDeps): Hono {
     sessions.get(sid);
     sessions.touch(sid); // операция с sessionId продлевает срок сессии, даже если тело не пройдёт схему
     const req = NewGameRequest.parse(await body(c));
-    const res = await service.create(req, { sessionId: sid });
-    sessions.setGame(sid, res.state.id);
-    return c.json(res);
+    // currentGameId ставит наблюдатель по session.game; сессия, истёкшая пока движок думал, не превращает
+    // уже созданную партию в 404.
+    return c.json(await service.create(req, { sessionId: sid }));
   });
 
   app.get('/api/sessions/:sid/events', (c) => {
