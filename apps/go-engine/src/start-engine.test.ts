@@ -95,10 +95,11 @@ describe('запуск go-engine', () => {
     expect(rec.logs.some((l) => l.includes('прогрет'))).toBe(true);
   });
 
-  it('движок не поднялся: порт не открывается, выход с кодом', async () => {
+  it('движок не поднялся: порт не открывается, выход с кодом после остановки движка', async () => {
     const { deps, rec } = harness(() => Promise.reject(new Error('no engine')));
     await startEngine(deps);
-    expect(rec.events).not.toContain('listen');
+    // stop раньше exit: живой KataGo (ответ-ошибка, молчание) иначе пережил бы node.
+    expect(rec.events).toEqual(['engine.start', 'engine.query', 'engine.stop', `exit ${WARMUP_EXIT_CODE}`]);
     expect(rec.exits).toEqual([WARMUP_EXIT_CODE]);
     expect(rec.logs.some((l) => l.startsWith('[X]') && l.includes('no engine'))).toBe(true);
   });
@@ -160,8 +161,9 @@ describe('запуск go-engine', () => {
     expect(await rec.exited).toBe(0);
     await started;
     expect(rec.exits).toEqual([0]);
-    expect(rec.events).not.toContain('listen');
-    expect(rec.events).toContain('engine.stop');
+    // Полный порядок: stop раньше exit. Вне контейнера process.exit раньше stop() оставил бы
+    // KataGo тюнить ядра сиротой до EOF на stdin.
+    expect(rec.events).toEqual(['engine.start', 'engine.query', 'engine.stop', 'exit 0']);
     expect(rec.logs.some((l) => l.startsWith('[X]'))).toBe(false);
     expect(rec.closes).toBe(0);
   });
@@ -173,6 +175,8 @@ describe('запуск go-engine', () => {
     await started;
     expect(await rec.exited).toBe(0);
     expect(rec.events).not.toContain('listen');
+    // Сервис не поднялся: строка «прогрет» сбила бы читающего лог.
+    expect(rec.logs.some((l) => l.includes('прогрет'))).toBe(false);
     expect(rec.exits).toEqual([0]);
   });
 

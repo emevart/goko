@@ -15,12 +15,15 @@ import { WARMUP_EXIT_CODE, WARMUP_QUERY, WARMUP_TIMEOUT_MS, warmupOrExit } from 
 
 type Call = { query: KataQuery; timeoutMs: number | undefined };
 
-// Подделка движка: запоминает запрос прогрева и отвечает тем, чем велено.
+// Подделка движка: запоминает запрос прогрева и отвечает тем, чем велено. events — общий список
+// с подделанным exit теста: по нему виден порядок остановки движка и выхода.
 function fakeKatago(answer: () => Promise<KataResponse>) {
   const calls: Call[] = [];
+  const events: string[] = [];
   let stops = 0;
   return {
     calls,
+    events,
     get stops() {
       return stops;
     },
@@ -31,6 +34,7 @@ function fakeKatago(answer: () => Promise<KataResponse>) {
       },
       stop: async (): Promise<void> => {
         stops++;
+        events.push('stop');
       },
     },
   };
@@ -55,10 +59,16 @@ describe('прогрев движка при старте', () => {
     const f = fakeKatago(() => Promise.reject(new KataGoError('crashed', 'katago exited with code 2')));
     const logs: string[] = [];
     const exits: number[] = [];
-    const ready = await warmupOrExit({ katago: f.katago, log: (l) => logs.push(l), exit: (c) => exits.push(c) });
+    const exit = (code: number) => {
+      exits.push(code);
+      f.events.push(`exit ${code}`);
+    };
+    const ready = await warmupOrExit({ katago: f.katago, log: (l) => logs.push(l), exit });
     expect(ready).toBe(false); // вызывающий не начинает слушать порт
     expect(exits).toEqual([WARMUP_EXIT_CODE]);
     expect(f.stops).toBe(1); // процесс и таймеры отпущены, иначе выход подвиснет
+    // stop раньше exit: живой KataGo (ответ-ошибка, молчание 300 с) иначе пережил бы node.
+    expect(f.events).toEqual(['stop', `exit ${WARMUP_EXIT_CODE}`]);
     const line = logs.find((l) => l.startsWith('[X]'));
     expect(line).toContain('прогрев');
     expect(line).toContain('katago exited with code 2');
@@ -78,6 +88,16 @@ describe('прогрев движка при старте', () => {
     expect(exits).toEqual([]); // код 0 ставит обработчик сигнала, а не прогрев
     expect(f.stops).toBe(0); // движок останавливает тот же обработчик
     expect(logs.some((l) => l.startsWith('[X]'))).toBe(false);
+  });
+
+  it('сигнал пришёл, когда ответ прогрева уже был в пути: без строки [OK] прогрет', async () => {
+    const f = fakeKatago(async () => ({ id: 'q1' }));
+    const logs: string[] = [];
+    const exits: number[] = [];
+    await warmupOrExit({ katago: f.katago, log: (l) => logs.push(l), exit: (c) => exits.push(c), cancelled: () => true });
+    expect(logs.some((l) => l.startsWith('[OK]'))).toBe(false);
+    expect(exits).toEqual([]);
+    expect(f.stops).toBe(0);
   });
 
   it('свой бюджет прогрева доходит до движка и попадает в сообщение об отказе', async () => {

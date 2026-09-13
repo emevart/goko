@@ -52,6 +52,8 @@ export async function warmupOrExit(deps: WarmupDeps): Promise<boolean> {
     exit(WARMUP_EXIT_CODE);
     return false;
   }
-  deps.log?.(`[OK] go-engine: движок прогрет за ${Math.round(performance.now() - started)} мс`);
+  // Сигнал пришёл, когда ответ уже был в пути: порт не откроется, и строка «прогрет» сбила бы
+  // читающего лог. true остаётся: решение о порте принимает вызывающий по своему флагу остановки.
+  if (deps.cancelled?.() !== true) deps.log?.(`[OK] go-engine: движок прогрет за ${Math.round(performance.now() - started)} мс`);
   return true;
 }
