@@ -194,7 +194,7 @@ Session = { id, room: string, currentGameId: string | null, createdAt }
 
 | Операция | Маршрут | Вход | Выход |
 | --- | --- | --- | --- |
-| `create_session` | `POST /api/sessions` | — | `{ session, livekit: { url, token } }`; токен несёт `RoomAgentDispatch{agentName: "goko", metadata: {sessionId}}` |
+| `create_session` | `POST /api/sessions` | — | `{ session, livekit: { url, token } }`; комнату с `agents: [{agentName: "goko", metadata: {sessionId}}]` создаёт сервер, токен только `roomJoin` (D-0001) |
 | `session_new_game` | `POST /api/sessions/:sid/games` | `{ black: Seat, white: Seat, settings?, waitForReply?: boolean = true }` | `{ state, firstMove? }`; сессия переключается, событие `session.game`; если первым ходит движок, его ход ждётся как в `play` |
 | `create_game` | `POST /api/games` | то же | то же (без сессии, для MCP) |
 | `get_game` | `GET /api/games/:id` | — | `GameState` |
@@ -304,8 +304,10 @@ Node 22, Hono, zod-схемы из `packages/protocol`.
   Повторная задача на ту же ревизию не ставится.
 - Клиент go-engine с таймаутами (genmove 10 с, analyze 15 с, score 30 с) и
   одним повтором; недоступность — `engine_unavailable`, партия не портится.
-- Токены LiveKit через `livekit-server-sdk`; `roomConfig.agents` с
-  `agentName: "goko"` и `metadata: { sessionId }`.
+- LiveKit через `livekit-server-sdk`: комнату `goko-<id>` создаёт сервер
+  (`RoomServiceClient.createRoom`, `agents` с `agentName: "goko"` и
+  `metadata: { sessionId }`, `emptyTimeout` 300 с); токен телефона — только
+  `roomJoin` на эту комнату, TTL равен TTL сессии (D-0001).
 - Забор: заголовок `X-App-Key` для всех `/api/*`, значение из `.env`; веб
   получает его из своего конфига сборки. Это не аутентификация, а защита от
   случайных прохожих; настоящая авторизация — при интеграции в sdamex.

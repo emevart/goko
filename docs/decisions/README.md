@@ -48,4 +48,4 @@ updated: YYYY-MM-DD
 
 | № | Решение | Дата | Статус |
 | --- | --- | --- | --- |
-| — | пока пусто | — | — |
+| [0001](0001-livekit-room-created-by-server.md) | Комнату LiveKit создаёт game-server, телефону только roomJoin; TTL токена = TTL сессии | 2026-09-13 | living |
