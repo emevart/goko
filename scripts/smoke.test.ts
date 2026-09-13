@@ -128,17 +128,28 @@ describe('smoke: ожидание /health', () => {
     const { hasExited } = await import('./processes.mjs');
     const child = spawn(process.execPath, ['-e', 'process.exit(3)'], { stdio: 'ignore' });
     let calls = 0;
+    let callsAfterExit = 0;
+    let t = 0;
     const result = await waitChildHealth(child, 'http://h/health', 310_000, {
       fetchImpl: async () => {
         calls++;
+        if (hasExited(child)) callsAfterExit++;
         throw new TypeError('fetch failed');
       },
-      now: () => 0, // потолок не наступает никогда: выйти можно только по выходу ребёнка
-      sleep: () => (hasExited(child) ? Promise.resolve() : new Promise((resolve) => child.once('exit', () => resolve(undefined)))),
+      now: () => t,
+      // До выхода ребёнка сон ждёт его события, часы стоят. После выхода часы идут шагами: без
+      // проверки выхода ожидание дошло бы до потолка сотнями пустых запросов, а не зависло.
+      sleep: (ms) => {
+        if (!hasExited(child)) return new Promise((resolve) => child.once('exit', () => resolve(undefined)));
+        t += ms;
+        return Promise.resolve();
+      },
     });
     expect(result).toBe(false);
     expect(child.exitCode).toBe(3);
     expect(calls).toBeGreaterThanOrEqual(1);
+    expect(callsAfterExit).toBe(0);
+    expect(t).toBe(0); // после выхода не было ни одного сна
   });
 
   it('waitChildHealth: вышедший по сигналу ребёнок — ни одного запроса; живой — опрос и pred', async () => {
