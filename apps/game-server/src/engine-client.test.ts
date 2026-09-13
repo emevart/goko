@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { type Call, fakeFetch } from '@goko/protocol';
-import { ENGINE_RETRY_DELAY_MS, ENGINE_TIMEOUTS, createEngineClient } from './engine-client.ts';
+import { ENGINE_RETRY_DELAY_MS, ENGINE_TIMEOUTS, createEngineClient, isConnectionError } from './engine-client.ts';
 import { track } from './test-helpers.ts';
 
 const req = { boardSize: 13, rules: 'chinese' as const, komi: 7.5, moves: [], rank: '10k' as const };
@@ -35,6 +35,15 @@ const stalledBody = (status: number) => (call: Call) =>
     { status, headers: { 'content-type': 'application/json' } },
   );
 
+// Ошибка fetch при отказе соединения, как у undici: TypeError('fetch failed') с системной ошибкой в cause.
+const connectionError = (code: string) => {
+  const cause = Object.assign(new Error(`connect ${code} 127.0.0.1:8788`), { code });
+  return new TypeError('fetch failed', { cause });
+};
+const refused = () => () => {
+  throw connectionError('ECONNREFUSED');
+};
+
 // Прокрутка времени с запасом: для тестов, которым важен исход, а не шаги.
 async function drain(): Promise<void> {
   await vi.advanceTimersByTimeAsync(120_000);
@@ -65,10 +74,10 @@ describe('createEngineClient', () => {
     expect(f.calls.map((c) => c.url)).toEqual(['http://engine.test/v1/genmove', 'http://engine.test/v1/analyze', 'http://engine.test/v1/score']);
   });
 
-  it('один повтор при сетевой ошибке и при 503, затем успех', async () => {
+  it.each(['ECONNREFUSED', 'ECONNRESET', 'UND_ERR_SOCKET'])('genmove: один повтор на ошибку соединения %s до ответа, затем успех', async (code) => {
     const f = fakeFetch([
       () => {
-        throw new TypeError('fetch failed');
+        throw connectionError(code);
       },
       () => Response.json(ok),
     ]);
@@ -77,33 +86,72 @@ describe('createEngineClient', () => {
     await drain();
     expect((await first).move).toBe('D4');
     expect(f.calls).toHaveLength(2);
-
-    const g = fakeFetch([() => Response.json({ error: { code: 'engine_busy', message: 'очередь' } }, { status: 503 }), () => Response.json(ok)]);
-    const engine2 = createEngineClient({ baseUrl: 'http://engine.test', engineKey: 'ek', fetch: g.fetch, retryDelayMs: 1 });
-    const second = engine2.genmove(req);
-    await drain();
-    expect((await second).move).toBe('D4');
-    expect(g.calls).toHaveLength(2);
   });
 
-  it('две неудачи подряд -> ApiError engine_unavailable (сеть) или код движка (503)', async () => {
+  it('genmove: две ошибки соединения подряд -> engine_unavailable, попыток ровно две', async () => {
+    const f = fakeFetch([refused()]);
+    const engine = createEngineClient({ baseUrl: 'http://engine.test', engineKey: 'ek', fetch: f.fetch, retryDelayMs: 1 });
+    const failing = expect(engine.genmove(req)).rejects.toMatchObject({ name: 'ApiError', code: 'engine_unavailable', message: 'engine is unreachable' });
+    await drain();
+    await failing;
+    expect(f.calls).toHaveLength(2);
+  });
+
+  it('analyze и score не повторяются даже на ошибку соединения', async () => {
+    const f = fakeFetch([refused()]);
+    const engine = createEngineClient({ baseUrl: 'http://engine.test', engineKey: 'ek', fetch: f.fetch, retryDelayMs: 1 });
+    const analyzing = expect(engine.analyze({ ...req })).rejects.toMatchObject({ code: 'engine_unavailable' });
+    await drain();
+    await analyzing;
+    expect(f.calls).toHaveLength(1);
+    const scoring = expect(engine.score(scoreReq)).rejects.toMatchObject({ code: 'engine_unavailable' });
+    await drain();
+    await scoring;
+    expect(f.calls).toHaveLength(2);
+  });
+
+  it('genmove: 503 go-engine не повторяется — ответ получен', async () => {
+    const g = fakeFetch([() => Response.json({ error: { code: 'engine_busy', message: 'очередь' } }, { status: 503 }), () => Response.json(ok)]);
+    const engine = createEngineClient({ baseUrl: 'http://engine.test', engineKey: 'ek', fetch: g.fetch, retryDelayMs: 1 });
+    const failing = expect(engine.genmove(req)).rejects.toMatchObject({ code: 'engine_busy' });
+    await drain();
+    await failing;
+    expect(g.calls).toHaveLength(1);
+  });
+
+  it('genmove: ошибка fetch без кода соединения не повторяется', async () => {
     const f = fakeFetch([
       () => {
         throw new TypeError('fetch failed');
       },
+      () => Response.json(ok),
     ]);
     const engine = createEngineClient({ baseUrl: 'http://engine.test', engineKey: 'ek', fetch: f.fetch, retryDelayMs: 1 });
-    const failing = expect(engine.genmove(req)).rejects.toMatchObject({ name: 'ApiError', code: 'engine_unavailable' });
+    const failing = expect(engine.genmove(req)).rejects.toMatchObject({ code: 'engine_unavailable', message: 'engine is unreachable' });
     await drain();
     await failing;
-    expect(f.calls).toHaveLength(2);
+    expect(f.calls).toHaveLength(1);
+  });
 
-    const g = fakeFetch([() => Response.json({ error: { code: 'engine_busy', message: 'очередь' } }, { status: 503 })]);
-    const engine2 = createEngineClient({ baseUrl: 'http://engine.test', engineKey: 'ek', fetch: g.fetch, retryDelayMs: 1 });
-    const failing2 = expect(engine2.analyze({ ...req })).rejects.toMatchObject({ code: 'engine_busy' });
-    await drain();
-    await failing2;
-    expect(g.calls).toHaveLength(2);
+  it('isConnectionError: код в цепочке cause и в AggregateError, глубина ограничена', () => {
+    expect(isConnectionError(connectionError('ECONNREFUSED'))).toBe(true);
+    expect(isConnectionError(Object.assign(new Error('x'), { code: 'ECONNRESET' }))).toBe(true);
+    expect(isConnectionError(new TypeError('fetch failed', { cause: new AggregateError([Object.assign(new Error('a'), { code: 'EHOSTUNREACH' }), Object.assign(new Error('b'), { code: 'ECONNREFUSED' })]) }))).toBe(true);
+    expect(isConnectionError(new TypeError('fetch failed', { cause: Object.assign(new Error('socket'), { code: 'UND_ERR_SOCKET' }) }))).toBe(true);
+    for (const code of ['ETIMEDOUT', 'ENOTFOUND', 'UND_ERR_HEADERS_TIMEOUT', 'ABORT_ERR']) {
+      expect(isConnectionError(connectionError(code)), code).toBe(false);
+    }
+    expect(isConnectionError(new TypeError('fetch failed'))).toBe(false);
+    expect(isConnectionError(null)).toBe(false);
+    expect(isConnectionError('ECONNREFUSED')).toBe(false);
+    // Цепочка из шести обёрток над кодом: глубже предела не ищем, цикл cause не зависает.
+    let deep: Error = Object.assign(new Error('root'), { code: 'ECONNREFUSED' });
+    for (let i = 0; i < 5; i++) deep = new Error('wrap', { cause: deep });
+    expect(isConnectionError(deep)).toBe(true);
+    expect(isConnectionError(new Error('wrap', { cause: deep }))).toBe(false);
+    const loop = new Error('loop') as Error & { cause?: unknown };
+    loop.cause = loop;
+    expect(isConnectionError(loop)).toBe(false);
   });
 
   it('4xx не повторяется и отдаётся как ApiError', async () => {
@@ -115,31 +163,31 @@ describe('createEngineClient', () => {
     expect(f.calls).toHaveLength(1);
   });
 
-  it('ответ не по протоколу с кодом ошибки -> engine_unavailable', async () => {
-    const f = fakeFetch([() => new Response('<html>502</html>', { status: 502 })]);
+  it('ответ не по протоколу с кодом ошибки -> engine_unavailable без повтора', async () => {
+    const f = fakeFetch([() => new Response('<html>502</html>', { status: 502 }), () => Response.json(ok)]);
     const engine = createEngineClient({ baseUrl: 'http://engine.test', engineKey: 'ek', fetch: f.fetch, retryDelayMs: 1 });
     const failing = expect(engine.genmove(req)).rejects.toMatchObject({ code: 'engine_unavailable', message: 'engine responded with 502' });
     await drain();
     await failing;
-    expect(f.calls).toHaveLength(2);
+    expect(f.calls).toHaveLength(1);
   });
 
-  it('таймаут -> engine_busy после повтора', async () => {
+  it('таймаут -> engine_busy без повтора', async () => {
     const f = fakeFetch([hang()]);
     const engine = createEngineClient({ baseUrl: 'http://engine.test', engineKey: 'ek', fetch: f.fetch, retryDelayMs: 1, timeouts: { genmove: 20, analyze: 20, score: 20 } });
     const failing = expect(engine.genmove(req)).rejects.toMatchObject({ code: 'engine_busy' });
     await drain();
     await failing;
-    expect(f.calls).toHaveLength(2);
+    expect(f.calls).toHaveLength(1);
   });
 
-  it('500 тоже повторяется: граница повтора — сам код 500, а не «больше 500»', async () => {
+  it('500 без тела по протоколу не повторяется', async () => {
     const f = fakeFetch([() => new Response('boom', { status: 500 }), () => Response.json(ok)]);
     const engine = createEngineClient({ baseUrl: 'http://engine.test', engineKey: 'ek', fetch: f.fetch, retryDelayMs: 1 });
-    const pending = engine.genmove(req);
+    const failing = expect(engine.genmove(req)).rejects.toMatchObject({ code: 'engine_unavailable', message: 'engine responded with 500' });
     await drain();
-    expect((await pending).move).toBe('D4');
-    expect(f.calls).toHaveLength(2);
+    await failing;
+    expect(f.calls).toHaveLength(1);
   });
 
   it('успешный ответ не по схеме -> ApiError engine_unavailable без повтора', async () => {
@@ -165,12 +213,7 @@ describe('createEngineClient', () => {
   });
 
   it('пауза перед повтором берётся из retryDelayMs, по шагам таймера', async () => {
-    const f = fakeFetch([
-      () => {
-        throw new TypeError('fetch failed');
-      },
-      () => Response.json(ok),
-    ]);
+    const f = fakeFetch([refused(), () => Response.json(ok)]);
     const engine = createEngineClient({ baseUrl: 'http://engine.test', engineKey: 'ek', fetch: f.fetch, retryDelayMs: 150 });
     const pending = engine.genmove(req);
     await vi.advanceTimersByTimeAsync(149);
@@ -180,7 +223,7 @@ describe('createEngineClient', () => {
     expect((await pending).move).toBe('D4');
   });
 
-  it('каждой операции достаётся свой таймаут, и он тратится дважды', async () => {
+  it('каждой операции достаётся свой таймаут, и тратится он один раз', async () => {
     const hangs = fakeFetch([hang()]);
     const engine = createEngineClient({
       baseUrl: 'http://engine.test',
@@ -189,45 +232,52 @@ describe('createEngineClient', () => {
       retryDelayMs: 10,
       timeouts: { genmove: 20, analyze: 200, score: 400 },
     });
-    // Две попытки на операцию: до второго таймаута отказа быть не должно.
     const check = async (call: () => Promise<unknown>, timeoutMs: number, callsBefore: number) => {
       const p = call();
       const state = track(p);
-      const failing = expect(p).rejects.toMatchObject({ code: 'engine_busy' });
-      await vi.advanceTimersByTimeAsync(timeoutMs - 1);
-      expect(hangs.calls).toHaveLength(callsBefore + 1);
-      await vi.advanceTimersByTimeAsync(1 + 10); // таймаут первой попытки и пауза повтора
-      expect(hangs.calls).toHaveLength(callsBefore + 2);
+      const failing = expect(p).rejects.toMatchObject({ code: 'engine_busy', message: `engine did not respond within ${timeoutMs} ms` });
       await vi.advanceTimersByTimeAsync(timeoutMs - 1);
       expect(state.settled).toBe(false);
       await vi.advanceTimersByTimeAsync(1);
       await failing;
       expect(state.settled).toBe(true);
+      await vi.advanceTimersByTimeAsync(10 + timeoutMs);
+      expect(hangs.calls).toHaveLength(callsBefore + 1);
+      expect(vi.getTimerCount()).toBe(0);
     };
     await check(() => engine.genmove(req), 20, 0);
-    await check(() => engine.analyze({ ...req }), 200, 2);
-    await check(() => engine.score(scoreReq), 400, 4);
+    await check(() => engine.analyze({ ...req }), 200, 1);
+    await check(() => engine.score(scoreReq), 400, 2);
   });
 
-  it('умолчания по шагам таймера: genmove 10 с, analyze 15 с, score 30 с, пауза 200 мс', async () => {
+  it('умолчания по шагам таймера: genmove 10 с, analyze 8 с, score 18 с, повтора после таймаута нет', async () => {
     const check = async (call: (e: ReturnType<typeof createEngineClient>) => Promise<unknown>, timeoutMs: number) => {
       const f = fakeFetch([hang()]);
       const engine = createEngineClient({ baseUrl: 'http://engine.test', engineKey: 'ek', fetch: f.fetch });
       const p = call(engine);
+      const state = track(p);
       const failing = expect(p).rejects.toMatchObject({ code: 'engine_busy', message: `engine did not respond within ${timeoutMs} ms` });
       await vi.advanceTimersByTimeAsync(timeoutMs - 1);
-      expect(f.calls).toHaveLength(1); // таймаут ещё не наступил
+      expect(state.settled).toBe(false); // таймаут ещё не наступил
       await vi.advanceTimersByTimeAsync(1);
-      await vi.advanceTimersByTimeAsync(199);
-      expect(f.calls).toHaveLength(1); // пауза перед повтором ещё идёт
-      await vi.advanceTimersByTimeAsync(1);
-      expect(f.calls).toHaveLength(2);
-      await vi.advanceTimersByTimeAsync(timeoutMs);
       await failing;
+      await vi.advanceTimersByTimeAsync(ENGINE_RETRY_DELAY_MS + timeoutMs);
+      expect(f.calls).toHaveLength(1);
     };
     await check((e) => e.genmove(req), 10_000);
-    await check((e) => e.analyze({ ...req }), 15_000);
-    await check((e) => e.score(scoreReq), 30_000);
+    await check((e) => e.analyze({ ...req }), 8_000);
+    await check((e) => e.score(scoreReq), 18_000);
+  });
+
+  it('пауза по умолчанию перед повтором genmove — 200 мс', async () => {
+    const f = fakeFetch([refused(), () => Response.json(ok)]);
+    const engine = createEngineClient({ baseUrl: 'http://engine.test', engineKey: 'ek', fetch: f.fetch });
+    const pending = engine.genmove(req);
+    await vi.advanceTimersByTimeAsync(199);
+    expect(f.calls).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(f.calls).toHaveLength(2);
+    expect((await pending).move).toBe('D4');
   });
 
   it('заголовки пришли, тело застряло: таймаут прерывает и чтение тела', async () => {
@@ -237,14 +287,12 @@ describe('createEngineClient', () => {
     const state = track(p);
     const failing = expect(p).rejects.toMatchObject({ name: 'ApiError', code: 'engine_busy', message: 'engine did not respond within 300 ms' });
     await vi.advanceTimersByTimeAsync(299);
-    expect(f.calls).toHaveLength(1);
-    // Тело первой попытки обрывается на 300-й: это таймаут, он стоит повтора.
-    await vi.advanceTimersByTimeAsync(1 + 10);
-    expect(f.calls).toHaveLength(2);
-    await vi.advanceTimersByTimeAsync(299);
     expect(state.settled).toBe(false);
+    // Тело обрывается на 300-й: это таймаут, повтора нет.
     await vi.advanceTimersByTimeAsync(1);
     await failing;
+    await vi.advanceTimersByTimeAsync(10 + 300);
+    expect(f.calls).toHaveLength(1);
     expect(vi.getTimerCount()).toBe(0);
   });
 
@@ -260,7 +308,7 @@ describe('createEngineClient', () => {
     const failing = expect(engine.genmove(req)).rejects.toMatchObject({ code: 'engine_busy', message: 'engine did not respond within 300 ms' });
     await vi.advanceTimersByTimeAsync(300 + 10 + 300);
     await failing;
-    expect(f.calls).toHaveLength(2);
+    expect(f.calls).toHaveLength(1);
   });
 
   it('код ошибки пришёл, тело застряло: тоже таймаут, а не «ответил 503»', async () => {
@@ -273,7 +321,7 @@ describe('createEngineClient', () => {
     expect(state.settled).toBe(false);
     await vi.advanceTimersByTimeAsync(1 + 10 + 300);
     await failing;
-    expect(f.calls).toHaveLength(2);
+    expect(f.calls).toHaveLength(1);
     expect(vi.getTimerCount()).toBe(0);
   });
 
@@ -338,16 +386,16 @@ describe('createEngineClient', () => {
     });
   });
 
-  // Наружу как свои проходят только занятость и недоступность движка: на них у агента есть реплика
-  // и они стоят повтора. unauthorized, bad_request и internal go-engine — ошибка нашей стороны
+  // Наружу как свои проходят только занятость и недоступность движка: на них у агента есть реплика.
+  // Повтора нет ни у одного кода: ответ получен. unauthorized, bad_request и internal go-engine — ошибка нашей стороны
   // (ключ, схема, отказ KataGo), и в публичном API это internal: чужой 401 или 400 выглядел бы как
   // ошибка вызывающего. Код go-engine остаётся в message, исходная ошибка — в cause.
   const engineCodes: [code: string, status: number, outCode: string, outStatus: number, calls: number][] = [
-    ['engine_busy', 503, 'engine_busy', 503, 2],
-    ['engine_unavailable', 503, 'engine_unavailable', 503, 2],
+    ['engine_busy', 503, 'engine_busy', 503, 1],
+    ['engine_unavailable', 503, 'engine_unavailable', 503, 1],
     ['unauthorized', 401, 'internal', 500, 1],
     ['bad_request', 400, 'internal', 500, 1],
-    ['internal', 500, 'internal', 500, 2],
+    ['internal', 500, 'internal', 500, 1],
   ];
   for (const [code, status, outCode, outStatus, calls] of engineCodes) {
     it(`код go-engine ${code} (${status}) наружу как ${outCode}`, async () => {
@@ -364,8 +412,97 @@ describe('createEngineClient', () => {
     });
   }
 
-  it('константы по умолчанию: таймауты 10/15/30 с, пауза перед повтором 200 мс', () => {
-    expect(ENGINE_TIMEOUTS).toEqual({ genmove: 10_000, analyze: 15_000, score: 30_000 });
+  it('константы по умолчанию: таймауты 10/8/18 с, пауза перед повтором 200 мс', () => {
+    expect(ENGINE_TIMEOUTS).toEqual({ genmove: 10_000, analyze: 8_000, score: 18_000 });
     expect(ENGINE_RETRY_DELAY_MS).toBe(200);
+  });
+});
+
+// Отмена вызывающим (B1): signal доходит до fetch, отказ — причина сигнала, повтора после отмены нет.
+describe('отмена вызова движка', () => {
+  const ops: { name: string; run: (e: ReturnType<typeof createEngineClient>, signal: AbortSignal) => Promise<unknown> }[] = [
+    { name: 'genmove', run: (e, signal) => e.genmove(req, signal) },
+    { name: 'analyze', run: (e, signal) => e.analyze({ ...req }, signal) },
+    { name: 'score', run: (e, signal) => e.score(scoreReq, signal) },
+  ];
+
+  it.each(ops)('$name: abort до ответа рвёт fetch, отказ — причина сигнала, таймеров не остаётся', async ({ run }) => {
+    const f = fakeFetch([hang()]);
+    const engine = createEngineClient({ baseUrl: 'http://engine.test', engineKey: 'ek', fetch: f.fetch });
+    const ac = new AbortController();
+    const p = run(engine, ac.signal);
+    const state = track(p);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(f.calls[0]?.init.signal?.aborted).toBe(false);
+    const reason = new Error('deadline');
+    ac.abort(reason);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(state.settled).toBe(true);
+    await expect(p).rejects.toBe(reason);
+    expect(f.calls[0]?.init.signal?.aborted).toBe(true);
+    await drain();
+    expect(f.calls).toHaveLength(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each(ops)('$name: abort во время чтения тела — тоже причина сигнала, а не engine_busy', async ({ run }) => {
+    const f = fakeFetch([stalledBody(200)]);
+    const engine = createEngineClient({ baseUrl: 'http://engine.test', engineKey: 'ek', fetch: f.fetch });
+    const ac = new AbortController();
+    const p = run(engine, ac.signal);
+    const failing = expect(p).rejects.toBe('stop');
+    await vi.advanceTimersByTimeAsync(10);
+    ac.abort('stop');
+    await failing;
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each(ops)('$name: уже отменённый сигнал — fetch не вызывается', async ({ run }) => {
+    const f = fakeFetch([() => Response.json(ok)]);
+    const engine = createEngineClient({ baseUrl: 'http://engine.test', engineKey: 'ek', fetch: f.fetch });
+    const ac = new AbortController();
+    ac.abort('gone');
+    await expect(run(engine, ac.signal)).rejects.toBe('gone');
+    expect(f.calls).toHaveLength(0);
+  });
+
+  it('genmove: abort во время паузы перед повтором — второй попытки нет', async () => {
+    const f = fakeFetch([refused(), () => Response.json(ok)]);
+    const engine = createEngineClient({ baseUrl: 'http://engine.test', engineKey: 'ek', fetch: f.fetch });
+    const ac = new AbortController();
+    const p = engine.genmove(req, ac.signal);
+    const failing = expect(p).rejects.toBe('stop');
+    await vi.advanceTimersByTimeAsync(100);
+    expect(f.calls).toHaveLength(1);
+    ac.abort('stop');
+    await failing;
+    await drain();
+    expect(f.calls).toHaveLength(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('genmove: ошибка соединения, пришедшая после abort, не повторяется', async () => {
+    const ac = new AbortController();
+    const f = fakeFetch([
+      () => {
+        ac.abort('stop');
+        throw connectionError('ECONNRESET');
+      },
+      () => Response.json(ok),
+    ]);
+    const engine = createEngineClient({ baseUrl: 'http://engine.test', engineKey: 'ek', fetch: f.fetch });
+    const failing = expect(engine.genmove(req, ac.signal)).rejects.toBe('stop');
+    await drain();
+    await failing;
+    expect(f.calls).toHaveLength(1);
+  });
+
+  it('ответ до отмены не портится поздним abort', async () => {
+    const f = fakeFetch([() => Response.json(ok)]);
+    const engine = createEngineClient({ baseUrl: 'http://engine.test', engineKey: 'ek', fetch: f.fetch });
+    const ac = new AbortController();
+    expect((await engine.genmove(req, ac.signal)).move).toBe('D4');
+    ac.abort('late');
+    expect(vi.getTimerCount()).toBe(0);
   });
 });

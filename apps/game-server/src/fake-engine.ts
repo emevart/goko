@@ -58,13 +58,27 @@ export function createFakeEngine(opts: FakeEngineOptions = {}): FakeEngine {
   const random = opts.random ?? Math.random;
   const passAfterPass = opts.passAfterPass ?? true;
   const calls = { genmove: 0, analyze: 0, score: 0 };
-  const wait = () => (opts.delayMs ? new Promise<void>((r) => setTimeout(r, opts.delayMs)) : Promise.resolve());
+  // Задержка ответа, прерываемая отменой, как у клиента движка: отказ — причина сигнала.
+  const wait = (signal: AbortSignal | undefined): Promise<void> =>
+    new Promise<void>((resolve, reject) => {
+      if (signal?.aborted) return reject(signal.reason);
+      if (!opts.delayMs) return resolve();
+      const onAbort = () => {
+        clearTimeout(timer);
+        reject(signal?.reason);
+      };
+      const timer = setTimeout(() => {
+        signal?.removeEventListener('abort', onAbort);
+        resolve();
+      }, opts.delayMs);
+      signal?.addEventListener('abort', onAbort, { once: true });
+    });
 
   return {
     calls,
-    async genmove(req: EngineGenmoveRequest): Promise<EngineGenmoveResponse> {
+    async genmove(req: EngineGenmoveRequest, signal?: AbortSignal): Promise<EngineGenmoveResponse> {
       calls.genmove++;
-      await wait();
+      await wait(signal);
       const t0 = performance.now();
       const color = sideToMove(req.moves);
       let move = script.shift();
@@ -74,9 +88,9 @@ export function createFakeEngine(opts: FakeEngineOptions = {}): FakeEngine {
       }
       return { move, winrateB: 0.5, scoreLeadB: 0, humanPolicyTop: [{ coord: move, prob: 1 }], humanFallback: false, ms: Math.round(performance.now() - t0) };
     },
-    async analyze(req: EngineAnalyzeRequest): Promise<EngineAnalyzeResponse> {
+    async analyze(req: EngineAnalyzeRequest, signal?: AbortSignal): Promise<EngineAnalyzeResponse> {
       calls.analyze++;
-      await wait();
+      await wait(signal);
       const pos = positionOf(req);
       const color = sideToMove(req.moves);
       const best = randomLegal(pos, color, random);
@@ -88,9 +102,9 @@ export function createFakeEngine(opts: FakeEngineOptions = {}): FakeEngine {
         ownership: req.includeOwnership === false ? undefined : naiveOwnership(pos),
       };
     },
-    async score(req: EngineScoreRequest): Promise<EngineScoreResponse> {
+    async score(req: EngineScoreRequest, signal?: AbortSignal): Promise<EngineScoreResponse> {
       calls.score++;
-      await wait();
+      await wait(signal);
       const pos = positionOf(req);
       const ownership = naiveOwnership(pos);
       // Наивное владение даёт каждому камню +-1 в его же пользу, поэтому мёртвых групп

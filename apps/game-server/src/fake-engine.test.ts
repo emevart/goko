@@ -181,4 +181,44 @@ describe('createFakeEngine', () => {
     expect(a.ownership).toBeUndefined();
     expect(a.visits).toBe(7);
   });
+
+  // Отмена (B1): фейк ведёт себя как клиент движка — отказ причиной сигнала, задержка снимается.
+  type Call = { name: 'genmove' | 'analyze' | 'score'; run: (e: ReturnType<typeof createFakeEngine>, signal: AbortSignal) => Promise<unknown> };
+  const calls: Call[] = [
+    { name: 'genmove', run: (e, signal) => e.genmove({ ...base, moves: [], rank: '10k' }, signal) },
+    { name: 'analyze', run: (e, signal) => e.analyze({ ...base, moves: [] }, signal) },
+    { name: 'score', run: (e, signal) => e.score({ ...base, moves: [] }, signal) },
+  ];
+
+  it.each(calls)('$name: abort во время задержки — отказ причиной сигнала, таймер снят', async ({ name, run }) => {
+    const engine = createFakeEngine({ script: ['E5'], delayMs: 1_000 });
+    const ac = new AbortController();
+    const p = run(engine, ac.signal);
+    const state = track(p);
+    await vi.advanceTimersByTimeAsync(10);
+    expect(state.settled).toBe(false);
+    ac.abort('stop');
+    await expect(p).rejects.toBe('stop');
+    expect(vi.getTimerCount()).toBe(0);
+    expect(engine.calls[name]).toBe(1);
+  });
+
+  it.each(calls)('$name: уже отменённый сигнал — отказ без задержки', async ({ run }) => {
+    const engine = createFakeEngine({ script: ['E5'] });
+    const ac = new AbortController();
+    ac.abort('gone');
+    await expect(run(engine, ac.signal)).rejects.toBe('gone');
+  });
+
+  it('сценарный ход не расходуется отменённым genmove', async () => {
+    const engine = createFakeEngine({ script: ['E5'], delayMs: 100 });
+    const ac = new AbortController();
+    const p = engine.genmove({ ...base, moves: [], rank: '10k' }, ac.signal);
+    const failing = expect(p).rejects.toBe('stop');
+    ac.abort('stop');
+    await failing;
+    const next = engine.genmove({ ...base, moves: [], rank: '10k' });
+    await vi.advanceTimersByTimeAsync(100);
+    expect((await next).move).toBe('E5');
+  });
 });
