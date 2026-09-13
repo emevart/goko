@@ -1878,7 +1878,7 @@ describe('GameService: серия повторов фоновой задачи',
     expect(res).toMatchObject({ move: { coord: 'C3' }, replyTimedOut: true });
   });
 
-  it('сдача человека после retries_exhausted снимает отметку исчерпанной серии', async () => {
+  it('сдача человека после retries_exhausted: движок не зовётся, в потоке только сдача, пауз нет (PB1)', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     let calls = 0;
     const { service, bus } = await make(
@@ -1891,19 +1891,125 @@ describe('GameService: серия повторов фоновой задачи',
     await untilTick(() => calls === 1);
     await vi.advanceTimersByTimeAsync(10);
     await untilTick(() => codes(events).includes('retries_exhausted'));
+    await tick(5);
+    expect(calls).toBe(2);
     expect(service.internalSizes().gaveUp).toBe(1);
-    // Партия кончается, перезапускать нечего: отметка не должна пережить партию.
-    // resign зовёт resume до мьютекса (как и прочие действия): при отказе записи сдачи партия
-    // осталась бы playing, и серия должна идти. Попытка, начатая до коммита сдачи, отбрасывается.
+    const before = events.length;
     await service.resign(id, { color: 'W', via: 'voice' });
     expect(service.internalSizes().gaveUp).toBe(0);
-    expect(service.get(id).status).toBe('finished');
     await tick(10);
-    const after = calls;
     await vi.advanceTimersByTimeAsync(10_000);
     await tick(10);
-    expect(calls).toBe(after);
+    expect(events.slice(before).map((e) => e.type)).toEqual(['state.updated', 'game.finished']);
+    expect(calls).toBe(2);
     expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('отказ записи сдачи после retries_exhausted перезапускает серию: партия осталась playing', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    let calls = 0;
+    const real = memoryStore();
+    const store = {
+      load: () => real.load(),
+      save: async (state: GameState) => {
+        if (state.status === 'finished') throw new Error('disk is full');
+        return real.save(state);
+      },
+    } as unknown as GameStore;
+    const { service, bus } = await make(
+      unreachable(() => calls++),
+      { store, retryDelaysMs: [10] },
+    );
+    const g = await service.create({ ...ENGINE_BLACK, ...S9, waitForReply: false });
+    const id = g.state.id;
+    const events = record(bus, `game:${id}`);
+    await untilTick(() => calls === 1);
+    await vi.advanceTimersByTimeAsync(10);
+    await untilTick(() => codes(events).includes('retries_exhausted'));
+    await tick(5);
+    await expect(service.resign(id, { color: 'W', via: 'voice' })).rejects.toThrow('disk is full');
+    expect(service.get(id).status).toBe('playing');
+    await untilTick(() => calls === 3);
+    await untilTick(() => codes(events).length === 2);
+    expect(codes(events)).toEqual(['retries_exhausted', 'engine_unavailable']);
+  });
+
+  it('отказ движка по устаревшей ревизии не считается: сдача во время раздумья — без error и без паузы', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    let fail: ((e: unknown) => void) | undefined;
+    let calls = 0;
+    const thinking: Engine = {
+      ...createFakeEngine(),
+      genmove: () => {
+        calls++;
+        return new Promise((_, reject) => {
+          fail = reject;
+        });
+      },
+    };
+    const { service, bus } = await make(thinking, { store: memoryStore(), retryDelaysMs: [10] });
+    const g = await service.create({ ...ENGINE_BLACK, ...S9, waitForReply: false });
+    const id = g.state.id;
+    const events = record(bus, `game:${id}`);
+    await untilTick(() => calls === 1);
+    await service.resign(id, { color: 'W', via: 'voice' });
+    fail?.(new ApiError('engine_unavailable', 'engine is unreachable'));
+    await tick(10);
+    expect(codes(events)).toEqual([]);
+    expect(vi.getTimerCount()).toBe(0);
+    expect(calls).toBe(1);
+  });
+
+  it('отказ счёта по устаревшей ревизии не считается: undo второго паса во время счёта — без error и без паузы', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    let fail: ((e: unknown) => void) | undefined;
+    let calls = 0;
+    const scoring: Engine = {
+      ...createFakeEngine(),
+      score: () => {
+        calls++;
+        return new Promise((_, reject) => {
+          fail = reject;
+        });
+      },
+    };
+    const { service, bus } = await make(scoring, { store: memoryStore(), retryDelaysMs: [10] });
+    const g = await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false });
+    const id = g.state.id;
+    const events = record(bus, `game:${id}`);
+    await service.pass(id, { waitForReply: false, via: 'api' });
+    await service.pass(id, { waitForReply: false, via: 'api' });
+    await untilTick(() => calls === 1);
+    await service.undo(id, { via: 'voice' });
+    fail?.(new Error('score failed'));
+    await tick(10);
+    expect(codes(events)).toEqual([]);
+    expect(vi.getTimerCount()).toBe(0);
+    expect(calls).toBe(1);
+  });
+
+  it('отказ движка, пришедший после close, не шлёт событие error', async () => {
+    let fail: ((e: unknown) => void) | undefined;
+    let calls = 0;
+    const thinking: Engine = {
+      ...createFakeEngine(),
+      genmove: () => {
+        calls++;
+        return new Promise((_, reject) => {
+          fail = reject;
+        });
+      },
+    };
+    const logs: string[] = [];
+    const { service, bus } = await make(thinking, { store: memoryStore(), retryDelaysMs: [10], log: (l) => logs.push(l) });
+    const g = await service.create({ ...ENGINE_BLACK, ...S9, waitForReply: false });
+    const events = record(bus, `game:${g.state.id}`);
+    await untilTick(() => calls === 1);
+    const closing = service.close();
+    fail?.(new ApiError('engine_unavailable', 'engine is unreachable'));
+    await closing;
+    expect(codes(events)).toEqual([]);
+    expect(logs).toEqual([]);
   });
 
   it('resume во время серии ничего не добавляет, для незнакомой партии не бросает', async () => {

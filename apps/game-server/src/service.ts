@@ -137,6 +137,20 @@ export class GameService {
     if (state) this.kick(state);
   }
 
+  // Мутирующее действие человека: отметка исчерпанной серии снимается до операции, а задача
+  // ставится после неё. Удачный коммит поставит задачу сам и уже по новому состоянию: после сдачи
+  // движок не зовётся. Отклонённая операция (not_your_turn, nothing_to_undo, отказ записи) задачу
+  // ставит здесь, и серия идёт заново. resume (открытие потока) ставит задачу сразу: операции нет.
+  private async humanAction<T>(id: string, human: boolean, op: () => Promise<T>): Promise<T> {
+    const resumed = human && this.gaveUp.delete(id);
+    try {
+      return await op();
+    } finally {
+      const state = resumed ? this.games.get(id) : undefined;
+      if (state) this.kick(state);
+    }
+  }
+
   // Шов для тестов на утечки: размеры внутренних таблиц, которые публичным API не видны.
   internalSizes(): { sessionsByGame: number; waiters: number; gaveUp: number } {
     let waiters = 0;
@@ -187,9 +201,8 @@ export class GameService {
   }
 
   async play(id: string, req: PlayInput, by: By = 'human'): Promise<PlayResponse> {
-    // До проверок: на ходе движка ход человека отклоняется (not_your_turn), но серию всё равно перезапускает.
-    if (by === 'human') this.resume(id);
-    const { state, move, waiter } = await this.locked(id, async () => {
+    // На ходе движка ход человека отклоняется (not_your_turn), но серию всё равно перезапускает.
+    const { state, move, waiter } = await this.humanAction(id, by === 'human', () => this.locked(id, async () => {
       const prev = this.get(id);
       this.checkRevision(prev, req.expectedRevision);
       const color = req.color ?? prev.toPlay;
@@ -198,7 +211,7 @@ export class GameService {
       const waiter = req.waitForReply && next.state.pendingEngineMove ? this.registerWaiter(id, next.state.revision) : null;
       await this.commit(next.state, next.move.coord === 'pass' ? 'pass' : 'play', by, req.via);
       return { ...next, waiter };
-    });
+    }));
     return this.withReply(id, state, move, waiter);
   }
 
@@ -207,29 +220,26 @@ export class GameService {
   }
 
   async resign(id: string, req: ResignInput, by: By = 'human'): Promise<StateResponse> {
-    if (by === 'human') this.resume(id);
-    return this.locked(id, async () => {
+    return this.humanAction(id, by === 'human', () => this.locked(id, async () => {
       const next = resignGame(this.get(id), req.color);
       await this.commit(next, 'resign', by, req.via);
       return { state: next };
-    });
+    }));
   }
 
   async undo(id: string, req: UndoInput, by: By = 'human'): Promise<UndoResponse> {
-    if (by === 'human') this.resume(id);
-    return this.locked(id, async () => {
+    return this.humanAction(id, by === 'human', () => this.locked(id, async () => {
       const prev = this.get(id);
       this.checkRevision(prev, req.expectedRevision);
       const rolled = undoGame(prev);
       await this.commit(rolled.state, 'undo', by, req.via);
       return { state: this.get(id), removed: rolled.removed };
-    });
+    }));
   }
 
   // Атомарно: откат пары, новый ход человека, новый ответ движка. Одно событие state.updated cause 'correct'.
   async correct(id: string, req: CorrectInput, by: By = 'human'): Promise<PlayResponse> {
-    if (by === 'human') this.resume(id);
-    const { state, move, waiter } = await this.locked(id, async () => {
+    const { state, move, waiter } = await this.humanAction(id, by === 'human', () => this.locked(id, async () => {
       const rolled = undoGame(this.get(id));
       const color = rolled.state.toPlay;
       this.checkSeat(rolled.state, color, by);
@@ -237,17 +247,16 @@ export class GameService {
       const waiter = req.waitForReply && next.state.pendingEngineMove ? this.registerWaiter(id, next.state.revision) : null;
       await this.commit(next.state, 'correct', by, req.via);
       return { ...next, waiter };
-    });
+    }));
     return this.withReply(id, state, move, waiter);
   }
 
   async setRank(id: string, req: SetRankInput): Promise<StateResponse> {
-    this.resume(id);
-    return this.locked(id, async () => {
+    return this.humanAction(id, true, () => this.locked(id, async () => {
       const next = setRankGame(this.get(id), req.color, req.rank);
       await this.commit(next, 'rank', 'human');
       return { state: next };
-    });
+    }));
   }
 
   async analyze(id: string, req: AnalyzeInput): Promise<Analysis> {
@@ -508,6 +517,9 @@ export class GameService {
       try {
         reply = await this.deps.engine.genmove({ ...this.engineRequest(state), rank, maxVisits: GENMOVE_VISITS });
       } catch (e) {
+        // Партия изменилась, пока движок думал (сдача, undo), или сервер закрывается: отказ по старой
+        // ревизии не в счёт — ни события, ни паузы. Следующий виток перечитает состояние.
+        if (this.outdated(id, state)) continue;
         if (await this.onEngineFailure(id, e)) continue;
         return;
       }
@@ -559,6 +571,10 @@ export class GameService {
     return true;
   }
 
+  private outdated(id: string, state: GameState): boolean {
+    return this.closed || this.games.get(id)?.revision !== state.revision;
+  }
+
   private onEngineFailure(id: string, e: unknown): Promise<boolean> {
     return this.onFailure(id, e, 'engine_unavailable', ENGINE_UNAVAILABLE_MESSAGE, (detail) => `[!] engine: ${detail}`);
   }
@@ -572,6 +588,7 @@ export class GameService {
       try {
         result = await this.score(id);
       } catch (e) {
+        if (this.outdated(id, state)) continue;
         if (await this.onEngineFailure(id, e)) continue;
         return;
       }
