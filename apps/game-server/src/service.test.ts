@@ -1397,6 +1397,22 @@ describe('GameService: фоновые задачи, дедлайны и мьют
     expect(service.get(id).moves.map((m) => m.coord)).toEqual(['C3', 'F6']);
   });
 
+  it('движок против движка: после хода задача ставится заново, партия идёт дальше одного хода', async () => {
+    const engine = createFakeEngine({ script: ['C3', 'D4', 'E5', 'F6'] });
+    const { service } = await make(engine);
+    const g = await service.create({ black: { controller: 'engine', rank: '10k' }, white: { controller: 'engine', rank: '10k' }, ...S9, waitForReply: false });
+    const id = g.state.id;
+    // Коммит хода движка зовёт kick, пока запись задачи ещё в карте: следующий ход ставит только
+    // kick после завершения задачи.
+    await untilTick(() => service.get(id).moves.length >= 4);
+    expect(service.get(id).moves.slice(0, 4).map((m) => `${m.color}${m.coord}`)).toEqual(['BC3', 'WD4', 'BE5', 'WF6']);
+    await service.close();
+    const after = service.get(id).moves.length;
+    await tick(20);
+    // После close kick ничего не ставит: партия замирает.
+    expect(service.get(id).moves).toHaveLength(after);
+  });
+
   it('отказ записи хода человека: ошибка у вызывающего, состояние не меняется, ход можно повторить', async () => {
     const real = new GameStore(dir);
     let failures = 1;

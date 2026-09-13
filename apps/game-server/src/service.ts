@@ -409,7 +409,6 @@ export class GameService {
   // новое состояние только после удачной записи, так что повтор начинается с того, что лежит на диске.
   private startTask(tasks: Map<string, Promise<void>>, id: string, task: Promise<void>): void {
     const run = async (): Promise<void> => {
-      let retry = false;
       try {
         await task;
       } catch (e) {
@@ -420,15 +419,17 @@ export class GameService {
         this.emitGame(id, { type: 'error', code, message });
         this.releaseWaiters(id);
         await this.sleep(retryMs);
-        retry = true;
       } finally {
         // Запись снимается при любом исходе, даже если бросил сам обработчик отказа (лог
         // в закрытый поток): иначе для партии больше не поставилась бы ни одна задача.
         tasks.delete(id);
       }
+      // kick после любого исхода, а не только после отказа: коммит, случившийся пока запись задачи
+      // была в карте (ход движка за движок, коммит в зазоре до delete), новую задачу не поставил.
+      // Лишнего kick не бывает: он сам проверяет, нужна ли задача, и ничего не делает после close.
+      // После отказа kick идёт только когда пауза перед повтором прошла.
       const state = this.games.get(id);
-      // kick сам не ставит задачу после close и в завершённой партии.
-      if (retry && state) this.kick(state);
+      if (state) this.kick(state);
     };
     // Бросок обработчика отказа сообщить уже некуда: лог сломан. Гасим, чтобы не уронить процесс.
     tasks.set(
