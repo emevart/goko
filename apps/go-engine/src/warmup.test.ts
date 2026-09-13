@@ -253,6 +253,7 @@ describe('строка отказа прогрева', () => {
       return Promise.reject(new Error('katago exited with code null'));
     });
     const logs: string[] = [];
+    vi.advanceTimersByTime(1000); // часы процесса не с нуля: отсчёт идёт от начала прогрева
     await warmupOrExit({ katago: f.katago, log: (l) => logs.push(l), exit: () => undefined });
     const line = logs.find((l) => l.startsWith('[X]'));
     expect(line).toContain('через 4321 мс');
