@@ -362,6 +362,26 @@ describe('startServer: конфигурация из env', () => {
     expect((await started.app.request('/api/sessions', { method: 'POST', headers })).status).toBe(200);
   });
 
+  it('истёкшая сессия снимает привязки своих партий в сервисе', async () => {
+    say();
+    const { deps, rec } = harness();
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const started = await startServer({ ...deps, env: { ...deps.env, SESSION_TTL_MS: '60000' } });
+    if (!started) throw new Error('сервер не запустился');
+    const headers = { 'x-app-key': BASE_ENV.APP_KEY, 'content-type': 'application/json' };
+    const created = await started.app.request('/api/sessions', { method: 'POST', headers });
+    const { session } = (await created.json()) as { session: { id: string } };
+    const body = JSON.stringify({ black: { controller: 'human' }, white: { controller: 'human' }, settings: { boardSize: 9 } });
+    expect((await started.app.request(`/api/sessions/${session.id}/games`, { method: 'POST', headers, body })).status).toBe(200);
+    expect(started.service.internalSizes()).toMatchObject({ sessionsByGame: 1, currentGames: 1 });
+    const forget = vi.spyOn(started.service, 'forgetSession');
+    vi.setSystemTime(Date.now() + 60_001);
+    expect(started.sessions.list()).toEqual([]);
+    expect(forget.mock.calls).toEqual([[session.id]]);
+    expect(started.service.internalSizes()).toMatchObject({ sessionsByGame: 0, currentGames: 0 });
+    expect(rec.serviceDeps).toHaveLength(1);
+  });
+
   it('FAKE_ENGINE=1: фейковый движок, ENGINE_KEY не нужен, строка [!]; иначе клиент go-engine с ENGINE_URL и ENGINE_KEY', async () => {
     say();
     const fake = harness();

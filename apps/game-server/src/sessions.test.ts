@@ -201,6 +201,45 @@ describe('SessionManager', () => {
     expect(errorOf(() => m.get(b.id))).toMatchObject({ code: 'not_found' });
   });
 
+  it('onRemove: вызывается ровно раз на каждую удалённую и на каждую истёкшую сессию', () => {
+    let t = 0;
+    const removed: string[] = [];
+    const m = new SessionManager({ max: 3, ttlMs: 100, now: () => t, onRemove: (id) => removed.push(id) });
+    const a = m.create();
+    const b = m.create();
+    expect(m.remove(a.id)).toBe(true);
+    expect(m.remove(a.id)).toBe(false);
+    expect(m.remove('nope')).toBe(false);
+    expect(removed).toEqual([a.id]);
+    t = 50;
+    const c = m.create();
+    t = 120;
+    // Истечение замечает любой метод: здесь list.
+    expect(m.list().map((s) => s.id)).toEqual([c.id]);
+    expect(m.sweep()).toBe(0);
+    expect(removed).toEqual([a.id, b.id]);
+    t = 200;
+    expect(errorOf(() => m.get(c.id))).toMatchObject({ code: 'not_found' });
+    expect(removed).toEqual([a.id, b.id, c.id]);
+  });
+
+  it('onRemove видит сессию уже удалённой: освободившееся место можно занять из обработчика', () => {
+    let t = 0;
+    const seen: boolean[] = [];
+    const m: SessionManager = new SessionManager({
+      max: 1,
+      ttlMs: 100,
+      now: () => t,
+      onRemove: (id) => seen.push(m.list().some((s) => s.id === id)),
+    });
+    const a = m.create();
+    m.remove(a.id);
+    m.create();
+    t = 101;
+    m.sweep();
+    expect(seen).toEqual([false, false]);
+  });
+
   it('createdAt — ISO от инжектируемых часов', () => {
     const m = new SessionManager({ max: 1, ttlMs: 100, now: () => Date.parse('2026-09-07T10:00:00.000Z') });
     expect(m.create().createdAt).toBe('2026-09-07T10:00:00.000Z');

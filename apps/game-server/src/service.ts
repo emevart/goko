@@ -34,7 +34,7 @@ import { errorDetail } from './error-detail.ts';
 import type { EventBus } from './events.ts';
 import { applyMove, finishByScore, newGame, positionOf, resign as resignGame, setRank as setRankGame, undo as undoGame } from './game.ts';
 import { newId } from './ids.ts';
-import type { GameStore } from './store.ts';
+import type { SnapshotStore } from './store.ts';
 
 // Входы операций — уже разобранные схемой тела (z.output): defaults подставлены.
 export type NewGameInput = z.output<typeof NewGameRequest>;
@@ -58,9 +58,18 @@ export const ENGINE_RETRY_DELAYS_MS: readonly number[] = [5_000, 10_000, 20_000,
 export const RETRIES_EXHAUSTED_MESSAGE = 'background task retries are exhausted';
 // Бюджет ожидания вопросов «кто впереди» и «оцени позицию». Цели спеки (10 с и 4 с)
 // описывают норму, бюджет обязан покрыть замер на сервере (счёт на 400 просмотрах —
-// 5,3 с) с запасом. Без бюджета вызывающий ждал бы два таймаута клиента: 60,2 и 30,2 с.
-export const SCORE_BUDGET_MS = 15_000;
+// 5,3 с) с запасом. Правило «движок < клиент < сервис» (D-0010): go-engine 15 и 6 с, клиент
+// движка 18 и 8 с, сервис 20 и 10 с. По дедлайну вызов движка отменяется (abort), поздний ответ
+// никому не отдаётся.
+export const SCORE_BUDGET_MS = 20_000;
 export const ANALYZE_BUDGET_MS = 10_000;
+// Не больше стольких незавершённых партий на сервере (D-0012): лишний create — too_many_games.
+export const MAX_ACTIVE_GAMES = 20;
+// Снапшот завершённой партии живёт столько после последней активности (последний ход, иначе
+// создание); более старые init удаляет с диска (D-0012).
+export const FINISHED_RETENTION_MS = 30 * 24 * 3600 * 1000;
+// Попыток выдать свободный id партии: совпадение случайных id почти невозможно, цикл лишь страховка (D-0009).
+export const MAX_ID_ATTEMPTS = 8;
 export const DEFAULT_RANK = '10k' as const;
 // Тексты события error для сырых исключений: наружу только код и общий английский текст,
 // подробности (путь к снапшоту, адрес движка) — только в лог.
@@ -68,7 +77,7 @@ export const INTERNAL_MESSAGE = 'internal server error';
 export const ENGINE_UNAVAILABLE_MESSAGE = 'engine is unavailable';
 
 export type GameServiceDeps = {
-  store: GameStore;
+  store: SnapshotStore;
   engine: Engine;
   bus: EventBus;
   now?: () => Date;
@@ -76,8 +85,15 @@ export type GameServiceDeps = {
   retryDelaysMs?: readonly number[];
   scoreBudgetMs?: number;
   analyzeBudgetMs?: number;
+  maxActiveGames?: number;
+  finishedRetentionMs?: number;
+  newId?: () => string;
   log?: (line: string) => void;
 };
+
+// Вызов движка под бюджетом: result отказывает по дедлайну или отмене сразу, settled оседает,
+// когда осел сам вызов движка (движок, не слушающий abort, может ещё считать).
+type Budgeted<T> = { result: Promise<T>; settled: Promise<void> };
 
 // Ожидающий ответа движка на состояние с ревизией revision.
 type Waiter = { revision: number; resolve: (move: Move | null) => void };
@@ -89,12 +105,24 @@ function publicError(gameId: string, e: unknown, code: ErrorCode, message: strin
   return e instanceof ApiError ? { type: 'error', gameId, code: e.code, message: e.message } : { type: 'error', gameId, code, message };
 }
 
+// Последняя активность партии для срока хранения снапшота: время последнего хода, иначе создания.
+function lastActivity(state: GameState): number {
+  return Date.parse(state.moves.at(-1)?.at ?? state.createdAt);
+}
+
 export class GameService {
   private readonly deps: GameServiceDeps;
   private readonly games = new Map<string, GameState>();
   private readonly locks = new Map<string, Promise<void>>();
   private readonly waiters = new Map<string, Waiter[]>();
   private readonly sessionsByGame = new Map<string, string>();
+  // Текущая партия сессии по сервису (раздел 5 спеки): в канал сессии идут события только её.
+  // Ставится коммитом новой партии сессии, тем же, что шлёт session.game.
+  private readonly currentGameBySession = new Map<string, string>();
+  // Партии, чей create ещё пишет снапшот: занимают id и место в лимите незавершённых партий.
+  private readonly pendingCreates = new Set<string>();
+  // Отмена фоновых задач партии (ход движка и счёт делят один сигнал): смена партии в сессии и close.
+  private readonly taskAborts = new Map<string, AbortController>();
   private readonly engineTasks = new Map<string, Promise<void>>();
   private readonly scoringTasks = new Map<string, Promise<void>>();
   // Досрочные пробуждения фоновых пауз: close не должен ждать паузу перед повтором.
@@ -110,7 +138,20 @@ export class GameService {
   }
 
   async init(): Promise<void> {
-    for (const state of await this.deps.store.load()) this.games.set(state.id, state);
+    // Срок хранения (D-0012): снапшот завершённой партии старше срока удаляется и в память не идёт.
+    // Отказ удаления — строка [!] в лог, партия всё равно не загружается: следующий init попробует снова.
+    const cutoff = (this.deps.now?.() ?? new Date()).getTime() - (this.deps.finishedRetentionMs ?? FINISHED_RETENTION_MS);
+    for (const state of await this.deps.store.load()) {
+      if (state.status === 'finished' && lastActivity(state) < cutoff) {
+        try {
+          await this.deps.store.remove(state.id);
+        } catch (e) {
+          this.log(`[!] could not remove the expired snapshot of game ${state.id}: ${errorDetail(e)}`);
+        }
+        continue;
+      }
+      this.games.set(state.id, state);
+    }
     for (const state of this.games.values()) this.kick(state);
   }
 
@@ -120,7 +161,16 @@ export class GameService {
     this.waiters.clear();
     // Пауза перед повтором обрывается: иначе остановка сервера ждала бы её целиком.
     for (const wake of [...this.wakeups]) wake();
+    // Идущие вызовы движка отменяются: остановка не ждёт раздумья, результат после close не применяется.
+    for (const controller of this.taskAborts.values()) controller.abort();
     await Promise.allSettled([...this.engineTasks.values(), ...this.scoringTasks.values()]);
+  }
+
+  // Сессия удалена или истекла: привязки её партий снимаются, события в её канал больше не идут.
+  // Фоновые задачи партий не трогаются: партия живёт и без сессии.
+  forgetSession(sessionId: string): void {
+    this.currentGameBySession.delete(sessionId);
+    for (const [gameId, sid] of this.sessionsByGame) if (sid === sessionId) this.sessionsByGame.delete(gameId);
   }
 
   list(): GameSummary[] {
@@ -152,10 +202,16 @@ export class GameService {
   }
 
   // Шов для тестов на утечки: размеры внутренних таблиц, которые публичным API не видны.
-  internalSizes(): { sessionsByGame: number; waiters: number; gaveUp: number } {
+  internalSizes(): { sessionsByGame: number; currentGames: number; waiters: number; gaveUp: number; taskAborts: number } {
     let waiters = 0;
     for (const list of this.waiters.values()) waiters += list.length;
-    return { sessionsByGame: this.sessionsByGame.size, waiters, gaveUp: this.gaveUp.size };
+    return {
+      sessionsByGame: this.sessionsByGame.size,
+      currentGames: this.currentGameBySession.size,
+      waiters,
+      gaveUp: this.gaveUp.size,
+      taskAborts: this.taskAborts.size,
+    };
   }
 
   get(id: string): GameState {
@@ -174,13 +230,15 @@ export class GameService {
       throw new ApiError('unsupported_controller', 'two engine seats are not supported', { black: 'engine', white: 'engine' });
     }
     const withRank = (seat: NewGameInput['black']) => (seat.controller === 'engine' && !seat.rank ? { ...seat, rank: DEFAULT_RANK } : seat);
-    const id = newId();
+    this.checkActiveLimit();
+    const id = this.freeId();
     const state = newGame({
       id,
       createdAt: this.now(),
       settings: GameSettings.parse(req.settings ?? {}),
       seats: { B: withRank(req.black), W: withRank(req.white) },
     });
+    this.pendingCreates.add(id);
     // session.game шлёт commit: после записи снапшота, раньше событий партии (раздел 5 спеки).
     if (opts.sessionId) this.sessionsByGame.set(id, opts.sessionId);
     const waiter = state.pendingEngineMove && req.waitForReply ? this.registerWaiter(id, state.revision) : null;
@@ -192,6 +250,8 @@ export class GameService {
       this.sessionsByGame.delete(id);
       this.releaseWaiters(id);
       throw e;
+    } finally {
+      this.pendingCreates.delete(id);
     }
     if (!waiter) return { state };
     const firstMove = await this.waitForReply(waiter);
@@ -221,7 +281,10 @@ export class GameService {
 
   async resign(id: string, req: ResignInput, by: By = 'human'): Promise<StateResponse> {
     return this.humanAction(id, by === 'human', () => this.locked(id, async () => {
-      const next = resignGame(this.get(id), req.color);
+      const prev = this.get(id);
+      // Сдаться за место движка может только сам движок (раздел 5 спеки).
+      this.checkSeat(prev, req.color, by);
+      const next = resignGame(prev, req.color);
       await this.commit(next, 'resign', by, req.via);
       return { state: next };
     }));
@@ -261,7 +324,8 @@ export class GameService {
 
   async analyze(id: string, req: AnalyzeInput): Promise<Analysis> {
     const state = this.get(id);
-    const r = await this.withBudget(this.deps.engine.analyze({ ...this.engineRequest(state), maxVisits: req.maxVisits, includeOwnership: true }), this.deps.analyzeBudgetMs ?? ANALYZE_BUDGET_MS);
+    const call = this.budgeted((signal) => this.deps.engine.analyze({ ...this.engineRequest(state), maxVisits: req.maxVisits, includeOwnership: true }, signal), this.deps.analyzeBudgetMs ?? ANALYZE_BUDGET_MS);
+    const r = await call.result;
     const ownership = r.ownership ?? new Array<number>(state.board.length).fill(0);
     return {
       visits: r.visits,
@@ -275,14 +339,7 @@ export class GameService {
 
   // Счёт без завершения партии («кто впереди по площади»); автосчёт после двух пасов использует его же.
   async score(id: string): Promise<Result> {
-    const state = this.get(id);
-    const r = await this.withBudget(this.deps.engine.score(this.engineRequest(state)), this.deps.scoreBudgetMs ?? SCORE_BUDGET_MS);
-    return {
-      winner: r.winner,
-      margin: r.margin,
-      reason: 'score',
-      score: { areaB: r.areaB, areaW: r.areaW, komi: state.settings.komi, dead: r.dead, ownership: r.ownership },
-    };
+    return this.scoreCall(this.get(id)).result;
   }
 
   ascii(id: string): string {
@@ -314,31 +371,92 @@ export class GameService {
 
   // Пауза, прерываемая на close. После close пауза не начинается вовсе: close уже обошёл
   // набор пробуждений, и новую паузу будить было бы некому.
-  private sleep(ms: number): Promise<void> {
-    if (this.closed) return Promise.resolve();
+  // Отменённая задача (signal) тоже будит паузу: отмена не ждёт паузы серии.
+  private sleep(ms: number, signal?: AbortSignal): Promise<void> {
+    if (this.closed || signal?.aborted) return Promise.resolve();
     return new Promise<void>((resolve) => {
       const wake = () => {
         clearTimeout(timer);
         this.wakeups.delete(wake);
+        signal?.removeEventListener('abort', wake);
         resolve();
       };
       const timer = setTimeout(wake, ms);
       this.wakeups.add(wake);
+      signal?.addEventListener('abort', wake, { once: true });
     });
   }
 
-  // Дедлайн вызывающего: движок сам повторяет запрос, и без бюджета «кто впереди»
-  // молчал бы десятки секунд. Отказ того же вида, что и таймаут ответа движка.
-  private async withBudget<T>(work: Promise<T>, ms: number): Promise<T> {
-    let timer: NodeJS.Timeout | undefined;
-    const deadline = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(new ApiError('engine_busy', `engine did not respond within ${ms} ms`)), ms);
-    });
+  // Дедлайн вызывающего: без бюджета «кто впереди» молчал бы до таймаута клиента движка. Отказ того
+  // же вида, что и таймаут ответа движка. По дедлайну и по отмене outer вызов движка получает abort:
+  // запрос к go-engine обрывается, и KataGo снимает запрос. Поздний ответ result уже не меняет.
+  private budgeted<T>(call: (signal: AbortSignal) => Promise<T>, ms: number, outer?: AbortSignal): Budgeted<T> {
+    const controller = new AbortController();
+    let work: Promise<T>;
     try {
-      return await Promise.race([work, deadline]);
-    } finally {
-      clearTimeout(timer);
+      work = call(controller.signal);
+    } catch (e) {
+      work = Promise.reject(e);
     }
+    const settled = work.then(
+      () => undefined,
+      () => undefined,
+    );
+    const result = (async () => {
+      let timer: NodeJS.Timeout | undefined;
+      let onOuterAbort: (() => void) | undefined;
+      const interrupted = new Promise<never>((_, reject) => {
+        const stop = (reason: unknown) => {
+          reject(reason);
+          controller.abort(reason);
+        };
+        timer = setTimeout(() => stop(new ApiError('engine_busy', `engine did not respond within ${ms} ms`)), ms);
+        if (!outer) return;
+        onOuterAbort = () => stop(outer.reason);
+        if (outer.aborted) onOuterAbort();
+        else outer.addEventListener('abort', onOuterAbort, { once: true });
+      });
+      try {
+        return await Promise.race([work, interrupted]);
+      } finally {
+        clearTimeout(timer);
+        if (onOuterAbort) outer?.removeEventListener('abort', onOuterAbort);
+      }
+    })();
+    return { result, settled };
+  }
+
+  private scoreCall(state: GameState, outer?: AbortSignal): Budgeted<Result> {
+    const call = this.budgeted((signal) => this.deps.engine.score(this.engineRequest(state), signal), this.deps.scoreBudgetMs ?? SCORE_BUDGET_MS, outer);
+    const result = call.result.then(
+      (r): Result => ({
+        winner: r.winner,
+        margin: r.margin,
+        reason: 'score',
+        score: { areaB: r.areaB, areaW: r.areaW, komi: state.settings.komi, dead: r.dead, ownership: r.ownership },
+      }),
+    );
+    return { result, settled: call.settled };
+  }
+
+  // Лимит незавершённых партий (D-0012). Партия, чей create ещё пишет снапшот, уже занимает место.
+  private checkActiveLimit(): void {
+    const max = this.deps.maxActiveGames ?? MAX_ACTIVE_GAMES;
+    let active = 0;
+    for (const state of this.games.values()) if (state.status !== 'finished') active++;
+    for (const id of this.pendingCreates) if (!this.games.has(id)) active++;
+    if (active >= max) throw new ApiError('too_many_games', `limit of ${max} unfinished games reached`, { max });
+  }
+
+  // Id партии не должен совпасть ни с существующей, ни с создаваемой (D-0009): совпавший
+  // перезаписал бы чужой снапшот. Исчерпанные попытки — дефект генератора, это internal.
+  private freeId(): string {
+    const generate = this.deps.newId ?? newId;
+    for (let i = 0; i < MAX_ID_ATTEMPTS; i++) {
+      const id = generate();
+      if (!this.games.has(id) && !this.pendingCreates.has(id)) return id;
+    }
+    throw new Error('could not generate a free game id');
   }
 
   // Сломанный лог (запись в закрытый поток) не вправе менять ход партии: строка теряется, а отказ
@@ -409,7 +527,7 @@ export class GameService {
     // Новая партия сессии объявляется только когда она уже есть в сервисе: подписчик на session.game
     // (currentGameId, поток сессии) сразу читает её состояние. При отказе записи события нет.
     const sessionId = this.sessionsByGame.get(next.id);
-    if (cause === 'new' && sessionId) this.deps.bus.emit(`session:${sessionId}`, { type: 'session.game', gameId: next.id });
+    if (cause === 'new' && sessionId) this.switchSessionGame(sessionId, next.id);
     this.emitGame(next.id, { type: 'state.updated', state: next, cause, by, ...(via ? { via } : {}), ...(humanFallback === undefined ? {} : { humanFallback }) });
     if (next.status === 'finished' && prev?.status !== 'finished' && next.result) this.emitGame(next.id, { type: 'game.finished', result: next.result });
     this.settleWaiters(next, cause, prev);
@@ -440,10 +558,47 @@ export class GameService {
     );
   }
 
+  // Новая партия сессии становится текущей (раздел 5 спеки): прежняя отвязывается от сессии, её фоновая
+  // задача отменяется. Статус прежней не меняется; её события идут только в её канал game:<id>.
+  private switchSessionGame(sessionId: string, id: string): void {
+    const previous = this.currentGameBySession.get(sessionId);
+    this.currentGameBySession.set(sessionId, id);
+    if (previous !== undefined && previous !== id) {
+      if (this.sessionsByGame.get(previous) === sessionId) this.sessionsByGame.delete(previous);
+      this.cancelBackground(previous);
+    }
+    this.deps.bus.emit(`session:${sessionId}`, { type: 'session.game', gameId: id });
+  }
+
+  // Отмена фоновой задачи партии: вызов движка получает abort, пауза серии обрывается, поздний ответ не
+  // применяется. Отменённая задача не перезапускается сама (как после retries_exhausted): её снова
+  // поставит действие человека на партии или открытие её потока (resume). Ожидающие ответа получают null.
+  private cancelBackground(id: string): void {
+    const controller = this.taskAborts.get(id);
+    this.taskAborts.delete(id);
+    controller?.abort();
+    if (!this.engineTasks.has(id) && !this.scoringTasks.has(id)) return;
+    this.failures.delete(id);
+    this.gaveUp.add(id);
+    this.releaseWaiters(id);
+  }
+
+  // Сигнал фоновых задач партии; отменённый заменяется новым для следующей задачи.
+  private taskSignal(id: string): AbortSignal {
+    let controller = this.taskAborts.get(id);
+    if (!controller || controller.signal.aborted) {
+      controller = new AbortController();
+      this.taskAborts.set(id, controller);
+    }
+    return controller.signal;
+  }
+
+  // Канал сессии получает событие, только если партия — текущая партия сессии в момент отправки:
+  // поздние события прежней партии (ход движка, ошибка) не попадают в поток новой (раздел 5 спеки).
   private emitGame(id: string, event: GameEvent): void {
     this.deps.bus.emit(`game:${id}`, event);
     const sessionId = this.sessionsByGame.get(id);
-    if (sessionId) this.deps.bus.emit(`session:${sessionId}`, event);
+    if (sessionId && this.currentGameBySession.get(sessionId) === id) this.deps.bus.emit(`session:${sessionId}`, event);
   }
 
   private registerWaiter(id: string, revision: number): Promise<Move | null> {
@@ -499,11 +654,15 @@ export class GameService {
   private kick(state: GameState): void {
     if (this.closed || state.status !== 'playing' || this.gaveUp.has(state.id)) return;
     if (state.consecutivePasses >= 2) {
-      if (!this.scoringTasks.has(state.id)) this.startTask(this.scoringTasks, state.id, this.runScoring(state.id));
+      if (!this.scoringTasks.has(state.id)) {
+        const signal = this.taskSignal(state.id);
+        this.startTask(this.scoringTasks, state.id, signal, this.runScoring(state.id, signal));
+      }
       return;
     }
     if (state.pendingEngineMove && !this.engineTasks.has(state.id)) {
-      this.startTask(this.engineTasks, state.id, this.runEngine(state.id));
+      const signal = this.taskSignal(state.id);
+      this.startTask(this.engineTasks, state.id, signal, this.runEngine(state.id, signal));
     }
   }
 
@@ -513,7 +672,7 @@ export class GameService {
   // вечно, а человек получал бы not_your_turn. Поэтому после события error и паузы задача
   // ставится заново. Состояние в памяти при этом не расходится с диском: commit публикует
   // новое состояние только после удачной записи, так что повтор начинается с того, что лежит на диске.
-  private startTask(tasks: Map<string, Promise<void>>, id: string, task: Promise<void>): void {
+  private startTask(tasks: Map<string, Promise<void>>, id: string, signal: AbortSignal, task: Promise<void>): void {
     const run = async (): Promise<void> => {
       try {
         // await task обязан быть первой инструкцией run: run() вызывается до tasks.set, и finally с
@@ -523,11 +682,13 @@ export class GameService {
         // Счёт серии здесь не обнуляется: удачная задача всегда кончается коммитом, и обнуляет он.
         // Задача, вышедшая без коммита, вышла из-за чужого коммита (он обнулил) или из-за close.
       } catch (e) {
-        await this.onFailure(id, e, 'internal', INTERNAL_MESSAGE, (detail) => `[X] background task for game ${id} failed: ${detail}`);
+        await this.onFailure(id, e, 'internal', INTERNAL_MESSAGE, (detail) => `[X] background task for game ${id} failed: ${detail}`, signal);
       } finally {
         // Запись снимается при любом исходе, даже если бросил сам обработчик отказа:
         // иначе для партии больше не поставилась бы ни одна задача.
         tasks.delete(id);
+        // Сигнал делят задачи движка и счёта партии: снимается, когда не осталось ни одной.
+        if (!this.engineTasks.has(id) && !this.scoringTasks.has(id)) this.taskAborts.delete(id);
       }
       // kick после любого исхода, а не только после отказа: коммит, случившийся пока запись задачи
       // была в карте (ход движка за движок, коммит в зазоре до delete), новую задачу не поставил.
@@ -551,8 +712,9 @@ export class GameService {
   }
 
   // Цикл хода движка: думает вне мьютекса, применяет под мьютексом только если ревизия не изменилась.
-  private async runEngine(id: string): Promise<void> {
-    while (!this.closed) {
+  // signal — отмена задачи (смена партии в сессии, close): вызов движка обрывается, ответ не применяется.
+  private async runEngine(id: string, signal: AbortSignal): Promise<void> {
+    while (!this.closed && !signal.aborted) {
       const state = this.games.get(id);
       if (!state || state.status !== 'playing' || !state.pendingEngineMove) return;
       const color = state.toPlay;
@@ -560,17 +722,20 @@ export class GameService {
       this.emitGame(id, { type: 'engine.thinking', gameId: id, color });
       let reply: Awaited<ReturnType<Engine['genmove']>>;
       try {
-        reply = await this.deps.engine.genmove({ ...this.engineRequest(state), rank, maxVisits: GENMOVE_VISITS });
+        reply = await this.deps.engine.genmove({ ...this.engineRequest(state), rank, maxVisits: GENMOVE_VISITS }, signal);
       } catch (e) {
+        // Отмена задачи — не отказ движка: ни события, ни паузы.
+        if (signal.aborted) return;
         // Партия изменилась, пока движок думал (сдача, undo), или сервер закрывается: отказ по старой
         // ревизии не в счёт — ни события, ни паузы. Следующий виток перечитает состояние.
         if (this.outdated(id, state)) continue;
-        if (await this.onEngineFailure(id, e)) continue;
+        if (await this.onEngineFailure(id, e, signal)) continue;
         return;
       }
       const applied = await this.locked(id, async () => {
         const current = this.games.get(id);
-        if (this.closed || !current || current.revision !== state.revision) return false; // партия изменилась, пока движок думал
+        // Партия изменилась, пока движок думал, или задача отменена: ответ не применяется.
+        if (this.closed || signal.aborted || !current || current.revision !== state.revision) return false;
         const engineWinrate = color === 'B' ? reply.winrateB : 1 - reply.winrateB;
         const engineLead = color === 'B' ? reply.scoreLeadB : -reply.scoreLeadB;
         // Спека говорит «после 60-го хода», поэтому строгое `>`, а не `>=`.
@@ -595,7 +760,7 @@ export class GameService {
   // Отказ в серии повторов: событие error, ожидающие получают null (клиент увидит replyTimedOut),
   // пауза очередной длины. Отказ после последней паузы — одно событие retries_exhausted, партия
   // остаётся playing и ждёт resume. Возвращает true, если нужен повтор.
-  private async onFailure(id: string, e: unknown, code: ErrorCode, message: string, logLine: (detail: string) => string): Promise<boolean> {
+  private async onFailure(id: string, e: unknown, code: ErrorCode, message: string, logLine: (detail: string) => string, signal?: AbortSignal): Promise<boolean> {
     const detail = errorDetail(e);
     const delays = this.deps.retryDelaysMs ?? ENGINE_RETRY_DELAYS_MS;
     const count = (this.failures.get(id) ?? 0) + 1;
@@ -612,7 +777,7 @@ export class GameService {
     this.log(`${logLine(detail)}; retrying in ${retryMs} ms`);
     this.emitGame(id, publicError(id, e, code, message));
     this.releaseWaiters(id);
-    await this.sleep(retryMs);
+    await this.sleep(retryMs, signal);
     return true;
   }
 
@@ -620,21 +785,25 @@ export class GameService {
     return this.closed || this.games.get(id)?.revision !== state.revision;
   }
 
-  private onEngineFailure(id: string, e: unknown): Promise<boolean> {
-    return this.onFailure(id, e, 'engine_unavailable', ENGINE_UNAVAILABLE_MESSAGE, (detail) => `[!] engine: ${detail}`);
+  private onEngineFailure(id: string, e: unknown, signal: AbortSignal): Promise<boolean> {
+    return this.onFailure(id, e, 'engine_unavailable', ENGINE_UNAVAILABLE_MESSAGE, (detail) => `[!] engine: ${detail}`, signal);
   }
 
   // Два паса: счёт и завершение. При недоступности движка — повтор, партия остаётся playing.
-  private async runScoring(id: string): Promise<void> {
-    while (!this.closed) {
+  private async runScoring(id: string, signal: AbortSignal): Promise<void> {
+    while (!this.closed && !signal.aborted) {
       const state = this.games.get(id);
       if (!state || state.status !== 'playing' || state.consecutivePasses < 2) return;
+      const call = this.scoreCall(state, signal);
       let result: Result;
       try {
-        result = await this.score(id);
+        result = await call.result;
       } catch (e) {
-        if (this.outdated(id, state)) continue;
-        if (await this.onEngineFailure(id, e)) continue;
+        // Отказ по бюджету или отмена обрывают ожидание, но движок может ещё считать: событие error и
+        // пауза серии идут сразу, а второй счёт не начинается, пока не осел первый вызов движка.
+        const retry = !signal.aborted && (this.outdated(id, state) || (await this.onEngineFailure(id, e, signal)));
+        await call.settled;
+        if (retry) continue;
         return;
       }
       // Партия изменилась, пока движок считал (setRank, третий пас): результат отбрасывается,
@@ -642,7 +811,7 @@ export class GameService {
       // новую задачу счёта не поставил — эта ещё числилась в карте, и партия осталась бы без итога.
       const applied = await this.locked(id, async () => {
         const current = this.games.get(id);
-        if (this.closed || !current || current.revision !== state.revision) return false;
+        if (this.closed || signal.aborted || !current || current.revision !== state.revision) return false;
         // причина `pass`: спека не вводит отдельной причины для автосчёта
         await this.commit(finishByScore(current, result), 'pass', 'system');
         return true;

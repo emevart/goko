@@ -184,7 +184,8 @@ export async function startServer(deps: StartDeps = {}): Promise<StartedServer |
     exit(INIT_EXIT_CODE);
     return null;
   }
-  const sessions = new SessionManager({ max: config.maxSessions, ttlMs: config.sessionTtlMs });
+  // Удалённая или истёкшая сессия снимает привязки своих партий в сервисе: иначе они копились бы до рестарта.
+  const sessions = new SessionManager({ max: config.maxSessions, ttlMs: config.sessionTtlMs, onRemove: (sid) => service.forgetSession(sid) });
   const rooms = createRooms({ url: config.livekit.url, apiKey: config.livekit.apiKey, apiSecret: config.livekit.apiSecret });
   const closing = new AbortController();
   const inFlight = new InFlight();

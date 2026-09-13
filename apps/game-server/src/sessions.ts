@@ -5,7 +5,8 @@
 import { ApiError, type Session } from '@goko/protocol';
 import { newId } from './ids.ts';
 
-export type SessionManagerOptions = { max: number; ttlMs: number; now?: () => number };
+// onRemove — после удаления сессии (remove или истечение срока): сервис снимает привязки её партий.
+export type SessionManagerOptions = { max: number; ttlMs: number; now?: () => number; onRemove?: (id: string) => void };
 
 export function roomName(sessionId: string): string {
   return `goko-${sessionId}`;
@@ -33,14 +34,12 @@ export class SessionManager {
 
   sweep(): number {
     const cutoff = this.now() - this.opts.ttlMs;
-    let removed = 0;
-    for (const [id, e] of this.entries) {
-      if (e.lastSeen < cutoff) {
-        this.entries.delete(id);
-        removed++;
-      }
-    }
-    return removed;
+    const expired: string[] = [];
+    for (const [id, e] of this.entries) if (e.lastSeen < cutoff) expired.push(id);
+    for (const id of expired) this.entries.delete(id);
+    // Обработчики — после удаления всех истёкших: обработчик видит таблицу уже выметенной.
+    for (const id of expired) this.opts.onRemove?.(id);
+    return expired.length;
   }
 
   // Живая запись или undefined; истёкшие к этому моменту уже выметены.
@@ -85,7 +84,9 @@ export class SessionManager {
   // true — живая сессия удалена; false — её нет или она уже истекла.
   remove(id: string): boolean {
     this.sweep();
-    return this.entries.delete(id);
+    const removed = this.entries.delete(id);
+    if (removed) this.opts.onRemove?.(id);
+    return removed;
   }
 
   list(): Session[] {
