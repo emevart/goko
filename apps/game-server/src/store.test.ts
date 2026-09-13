@@ -86,6 +86,16 @@ describe('GameStore', () => {
     expect((await readdir(dir)).filter((f) => f.endsWith('.tmp'))).toEqual([]);
     expect(await readdir(dir)).toEqual(['g1.json']);
   });
+
+  it('remove на настоящем fs: снапшот исчезает из load, повторный remove без ошибки', async () => {
+    const store = new GameStore(dir);
+    await store.save(state());
+    await store.save({ ...state(), id: 'g2' });
+    await store.remove('g1');
+    expect((await store.load()).map((g) => g.id)).toEqual(['g2']);
+    await store.remove('g1');
+    expect(await readdir(dir)).toEqual(['g2.json']);
+  });
 });
 
 // Подделка store для тестов сервиса обязана вести себя как диск: хранить снимок на момент записи.
@@ -112,5 +122,12 @@ describe('memoryStore', () => {
     const store = memoryStore([seed]);
     seed.revision = 99;
     expect(await store.load()).toEqual([state()]);
+  });
+
+  it('remove убирает снапшот из load и записывает id в removed', async () => {
+    const store = memoryStore([state(), { ...state(), id: 'g2' }]);
+    await store.remove('g1');
+    expect((await store.load()).map((g) => g.id)).toEqual(['g2']);
+    expect(store.removed).toEqual(['g1']);
   });
 });

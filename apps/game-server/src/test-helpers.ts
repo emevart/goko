@@ -1,26 +1,32 @@
 // Ошибка синхронного вызова как значение: проверяем code и details через toMatchObject.
 import type { ApiError, GameState } from '@goko/protocol';
-import type { GameStore } from './store.ts';
+import type { SnapshotStore } from './store.ts';
 
 // Снапшоты в памяти вместо диска. Настоящая запись идёт в пуле потоков и под нагрузкой длится
 // дольше любого разумного числа оборотов очереди, поэтому тесты, которые ждут фоновый коммит по
 // оборотам, пишут сюда: запись здесь — только микрозадачи. saved — все записи по порядку,
 // load — последнее состояние каждой партии (как после рестарта), seed — снапшоты «с прошлого запуска».
 // Как и диск, хранит снимки (structuredClone) при записи и отдаёт копии при чтении: правка состояния
-// на месте после коммита не должна быть видна «на диске».
-export type MemoryStore = GameStore & { saved: GameState[] };
+// на месте после коммита не должна быть видна «на диске». removed — удалённые снапшоты по порядку.
+export type MemoryStore = SnapshotStore & { saved: GameState[]; removed: string[] };
 
 export function memoryStore(seed: GameState[] = []): MemoryStore {
   const saved: GameState[] = [];
+  const removed: string[] = [];
   const latest = new Map<string, GameState>(seed.map((state) => [state.id, structuredClone(state)]));
   return {
     dir: '(memory)',
     saved,
+    removed,
     init: async () => undefined,
     load: async () => [...latest.values()].map((state) => structuredClone(state)).sort((a, b) => a.createdAt.localeCompare(b.createdAt)),
     save: async (state: GameState) => {
       saved.push(structuredClone(state));
       latest.set(state.id, structuredClone(state));
+    },
+    remove: async (id: string) => {
+      removed.push(id);
+      latest.delete(id);
     },
   };
 }
