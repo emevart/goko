@@ -4,6 +4,7 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { newGame } from './game.ts';
 import { GameStore } from './store.ts';
+import { memoryStore } from './test-helpers.ts';
 
 let dir = '';
 beforeEach(async () => {
@@ -84,5 +85,32 @@ describe('GameStore', () => {
     expect(loaded[0]?.revision).toBe(5);
     expect((await readdir(dir)).filter((f) => f.endsWith('.tmp'))).toEqual([]);
     expect(await readdir(dir)).toEqual(['g1.json']);
+  });
+});
+
+// Подделка store для тестов сервиса обязана вести себя как диск: хранить снимок на момент записи.
+// Иначе правка состояния на месте после коммита была бы видна и «на диске», и тесты «память не
+// уходит вперёд диска» её не заметили бы.
+describe('memoryStore', () => {
+  it('save хранит снимок: правка записанного объекта и прочитанного не меняет хранимое', async () => {
+    const store = memoryStore();
+    const s = state();
+    await store.save(s);
+    s.moves.push({ n: 1, color: 'B', coord: 'D4', captured: 0, at: T });
+    s.seats.W.rank = '5k';
+    expect(store.saved[0]).toEqual(state());
+    const loaded = await store.load();
+    expect(loaded).toEqual([state()]);
+    const first = loaded[0];
+    if (!first) throw new Error('expected a loaded game');
+    first.moves.push({ n: 1, color: 'B', coord: 'D4', captured: 0, at: T });
+    expect(await store.load()).toEqual([state()]);
+  });
+
+  it('seed тоже копируется: правка исходного снапшота не видна в load', async () => {
+    const seed = state();
+    const store = memoryStore([seed]);
+    seed.revision = 99;
+    expect(await store.load()).toEqual([state()]);
   });
 });

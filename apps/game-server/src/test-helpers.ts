@@ -6,19 +6,21 @@ import type { GameStore } from './store.ts';
 // дольше любого разумного числа оборотов очереди, поэтому тесты, которые ждут фоновый коммит по
 // оборотам, пишут сюда: запись здесь — только микрозадачи. saved — все записи по порядку,
 // load — последнее состояние каждой партии (как после рестарта), seed — снапшоты «с прошлого запуска».
+// Как и диск, хранит снимки (structuredClone) при записи и отдаёт копии при чтении: правка состояния
+// на месте после коммита не должна быть видна «на диске».
 export type MemoryStore = GameStore & { saved: GameState[] };
 
 export function memoryStore(seed: GameState[] = []): MemoryStore {
   const saved: GameState[] = [];
-  const latest = new Map<string, GameState>(seed.map((state) => [state.id, state]));
+  const latest = new Map<string, GameState>(seed.map((state) => [state.id, structuredClone(state)]));
   return {
     dir: '(memory)',
     saved,
     init: async () => undefined,
-    load: async () => [...latest.values()].sort((a, b) => a.createdAt.localeCompare(b.createdAt)),
+    load: async () => [...latest.values()].map((state) => structuredClone(state)).sort((a, b) => a.createdAt.localeCompare(b.createdAt)),
     save: async (state: GameState) => {
-      saved.push(state);
-      latest.set(state.id, state);
+      saved.push(structuredClone(state));
+      latest.set(state.id, structuredClone(state));
     },
   };
 }
