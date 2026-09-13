@@ -114,10 +114,15 @@ export function createApp(deps: AppDeps): Hono {
       let open = true;
       let wake: (() => void) | null = null;
       const queue: GameEvent[] = [];
+      // stop обрывает и запись, застрявшую на медленном клиенте: stream.abort() отменяет чтение
+      // внутреннего потока, ждущая запись завершается, цикл выходит. Без этого поток сверх предела
+      // очереди или при остановке сервера висел бы до разгрузки сокета. abort идемпотентен, поэтому
+      // вызов из собственного onAbort не зацикливается.
       const stop = () => {
         open = false;
         unsubscribe();
         wake?.();
+        stream.abort();
       };
       const unsubscribe = bus.subscribe(channel, (event) => {
         queue.push(event);

@@ -111,6 +111,11 @@ const untilTick = async (cond: () => boolean, turns = 1000): Promise<void> => {
   throw new Error('условие не выполнилось за отведённые обороты очереди');
 };
 
+// Ровно n оборотов очереди событий без условия: дать циклу потока дойти до застрявшей записи.
+const turns = async (n: number): Promise<void> => {
+  for (let i = 0; i < n; i++) await new Promise((r) => setImmediate(r));
+};
+
 type CaughtError = { code: string; status: number; message: string; details?: Record<string, unknown> };
 
 // Ошибка отклонённого промиса; успех — ошибка теста.
@@ -824,6 +829,41 @@ describe('createApp: пакет 12b — пределы, сессии, серия
     }
     expect((await reader.read()).done).toBe(true);
     expect(text.split('event: engine.thinking').length - 1).toBeLessThan(SSE_QUEUE_LIMIT);
+  });
+
+  it('медленный клиент, который не читает вовсе: предел очереди обрывает застрявшую запись, цикл потока выходит', async () => {
+    const closing = new AbortController();
+    const { app, client, bus } = await make({ closing: closing.signal });
+    const { state } = await client.createGame(HUMAN_ONLY);
+    const channel = `game:${state.id}`;
+    // Тело не читается ни разу: запись в поток стоит на обратном давлении.
+    const res = await app.request(`/api/games/${state.id}/events`, { headers: { 'x-app-key': KEY } });
+    // Сначала несколько событий, чтобы цикл встал в записи, потом поток сверх предела.
+    for (let i = 0; i < 5; i++) bus.emit(channel, { type: 'engine.thinking', color: 'B' });
+    await turns(20);
+    expect(getEventListeners(closing.signal, 'abort')).toHaveLength(1);
+    for (let i = 0; i <= SSE_QUEUE_LIMIT; i++) bus.emit(channel, { type: 'engine.thinking', color: 'B' });
+    expect(bus.count(channel)).toBe(0);
+    // Цикл потока снимает слушатель сигнала остановки только на выходе: значит, запись не держит его.
+    await untilTick(() => getEventListeners(closing.signal, 'abort').length === 0);
+    expect(getEventListeners(closing.signal, 'abort')).toHaveLength(0);
+    await res.body?.cancel();
+  });
+
+  it('остановка сервера при клиенте, который не читает: поток закрывается, а не ждёт разгрузки сокета', async () => {
+    const closing = new AbortController();
+    const { app, client, bus } = await make({ closing: closing.signal });
+    const { state } = await client.createGame(HUMAN_ONLY);
+    const channel = `game:${state.id}`;
+    const res = await app.request(`/api/games/${state.id}/events`, { headers: { 'x-app-key': KEY } });
+    // Несколько событий: запись встаёт на обратном давлении, очередь ниже предела.
+    for (let i = 0; i < 5; i++) bus.emit(channel, { type: 'engine.thinking', color: 'B' });
+    await turns(20);
+    expect(getEventListeners(closing.signal, 'abort')).toHaveLength(1);
+    closing.abort();
+    await untilTick(() => getEventListeners(closing.signal, 'abort').length === 0);
+    expect(bus.count(channel)).toBe(0);
+    await res.body?.cancel();
   });
 
   it('SSE_QUEUE_LIMIT — 1000', () => {
