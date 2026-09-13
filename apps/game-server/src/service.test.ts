@@ -9,12 +9,12 @@ import { type FakeEngine, createFakeEngine } from './fake-engine.ts';
 import { newGame } from './game.ts';
 import { ENGINE_RETRY_DELAYS_MS, GameService, RETRIES_EXHAUSTED_MESSAGE } from './service.ts';
 import { GameStore } from './store.ts';
-import { track } from './test-helpers.ts';
+import { type GuardedService, closeWithin, guardService, memoryStore, track } from './test-helpers.ts';
 
 let dir = '';
 // Сервисы теста закрываются до удаления каталога: иначе фоновая задача движка
 // пишет снапшот в уже снесённый каталог и роняет прогон необработанным отказом.
-let opened: GameService[] = [];
+let opened: GuardedService[] = [];
 beforeEach(async () => {
   dir = await mkdtemp(path.join(tmpdir(), 'goko-service-'));
   opened = [];
@@ -22,8 +22,14 @@ beforeEach(async () => {
 afterEach(async () => {
   // Тесты с управляемым временем возвращают настоящие таймеры до закрытия сервисов.
   vi.useRealTimers();
-  for (const service of opened) await service.close();
-  await rm(dir, { recursive: true, force: true });
+  try {
+    for (const { service, startsAfterClose } of opened) {
+      await closeWithin(service);
+      expect(startsAfterClose(), 'startTask после close').toBe(0);
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 const HUMAN_BLACK = { black: { controller: 'human' as const }, white: { controller: 'engine' as const, rank: '10k' as const } };
@@ -35,20 +41,15 @@ const S9 = { settings: { boardSize: 9 as const } };
 // Серия повторов с одинаковыми паузами: для тестов, которым не важны сами паузы 5/10/20/40/60 с.
 const delays = (ms: number): number[] => new Array<number>(5).fill(ms);
 
+// Сервис на снапшотах в памяти (диск — только там, где тест проверяет файлы) и под guardService:
+// afterEach закрывает его с потолком и проверяет, что после close не ставилось ни одной задачи.
 async function make(engine: Engine, extra: Partial<ConstructorParameters<typeof GameService>[0]> = {}) {
   const bus = new EventBus();
-  const store = new GameStore(dir);
-  const service = new GameService({ store, engine, bus, replyTimeoutMs: 500, retryDelaysMs: delays(20), ...extra });
-  opened.push(service);
+  const store = extra.store ?? memoryStore();
+  const service = new GameService({ engine, bus, replyTimeoutMs: 500, retryDelaysMs: delays(20), ...extra, store });
+  opened.push(guardService(service));
   await service.init();
   return { service, bus, store };
-}
-
-// Снапшоты в памяти: для тестов, которые ждут фоновый коммит по оборотам очереди. Настоящая запись
-// на диск идёт в пуле потоков и под нагрузкой длится дольше любого разумного числа оборотов.
-function memoryStore(): GameStore & { saved: GameState[] } {
-  const saved: GameState[] = [];
-  return { saved, load: async () => [], save: async (state: GameState) => void saved.push(state) } as unknown as GameStore & { saved: GameState[] };
 }
 
 function record(bus: EventBus, channel: string): GameEvent[] {
@@ -83,7 +84,9 @@ const thinkThrough = async (engine: FakeEngine, genmoveCalls: number, delayMs: n
 describe('GameService: партия человек против движка', () => {
   it('create -> play с ответом движка -> события -> снапшот', async () => {
     const engine = createFakeEngine({ script: ['E5'] });
-    const { service, bus, store } = await make(engine);
+    // Единственный тест сервиса на настоящем диске: все ожидания здесь — await операций, а не
+    // обороты очереди, и ответ ждётся с таймаутом по умолчанию (8 с), а не 500 мс.
+    const { service, bus, store } = await make(engine, { store: new GameStore(dir), replyTimeoutMs: undefined });
     const created = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: true });
     expect(created.state.toPlay).toBe('B');
     expect(created.firstMove).toBeUndefined();
@@ -340,7 +343,8 @@ describe('GameService: партия человек против движка', (
     await closing;
 
     const fast = createFakeEngine({ script: ['G7'], delayMs: 50 });
-    const second = await make(fast);
+    // Тот же набор снапшотов: второй сервис читает то, что записал первый.
+    const second = await make(fast, { store: first.store });
     expect(second.service.get(g.state.id).moves.map((m) => m.coord)).toEqual(['D4']);
     await thinkThrough(fast, 1, 50);
     await untilTick(() => second.service.get(g.state.id).moves.length === 2);
@@ -635,12 +639,26 @@ describe('GameService: партия человек против движка', (
     const engine = createFakeEngine({ script: ['E5'] });
     const { service } = await make(engine);
     const g = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: true });
-    await service.close();
+    await closeWithin(service);
     const res = await service.play(g.state.id, { coord: 'D4', waitForReply: false, via: 'api' });
     expect(res.state.pendingEngineMove).toBe(true);
     await tick(10);
     expect(engine.calls.genmove).toBe(0);
     expect(service.get(g.state.id).moves).toHaveLength(1);
+  });
+
+  it('после close фоновые задачи не ставятся: вращение ловится счётчиком startTask, а не зависанием', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const engine = createFakeEngine({ script: ['E5'] });
+    const { service } = await make(engine);
+    const g = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: false });
+    const guarded = opened.at(-1);
+    if (!guarded) throw new Error('сервис не под guardService');
+    await closeWithin(service);
+    await service.play(g.state.id, { coord: 'D4', waitForReply: false, via: 'api' });
+    await tick(10);
+    expect(guarded.startsAfterClose()).toBe(0);
+    expect(engine.calls.genmove).toBe(0);
   });
 
   it('откат во время повтора счёта прекращает счёт', async () => {
@@ -727,7 +745,7 @@ describe('GameService: партия человек против движка', (
     const g = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: true });
     const pending = service.play(g.state.id, { coord: 'D4', waitForReply: true, via: 'api' });
     await untilTick(() => service.get(g.state.id).pendingEngineMove);
-    await service.close();
+    await closeWithin(service);
     const res = await pending;
     expect(res.reply).toBeUndefined();
     expect(service.get(g.state.id).moves).toHaveLength(1);
@@ -747,7 +765,7 @@ describe('GameService: фоновые задачи, дедлайны и мьют
   }
 
   it('отказ записи снапшота в фоновой задаче не роняет процесс, а уходит событием error', async () => {
-    const real = new GameStore(dir);
+    const real = memoryStore();
     // Падает ровно на коммите хода движка: этот коммит идёт из фоновой задачи,
     // которую никто не ждёт, поэтому неперехваченный отказ убил бы процесс.
     const store = gatedStore(real, async (state) => {
@@ -761,11 +779,11 @@ describe('GameService: фоновые задачи, дедлайны и мьют
     expect(events.find((e) => e.type === 'error')).toEqual({ type: 'error', code: 'internal', message: 'internal server error' });
     // Партия осталась на последнем удачно записанном состоянии.
     expect(service.get(g.state.id).moves).toHaveLength(1);
-    await service.close();
+    await closeWithin(service);
   });
 
   it('сырое исключение фоновой задачи: наружу код и общий текст, путь к снапшоту только в лог', async () => {
-    const real = new GameStore(dir);
+    const real = memoryStore();
     const secretPath = path.join(dir, 'abc.json.4242.tmp');
     const store = gatedStore(real, async (state) => {
       if (state.moves.length === 2) throw Object.assign(new Error(`ENOSPC: no space left on device, open '${secretPath}'`), { code: 'ENOSPC' });
@@ -782,7 +800,7 @@ describe('GameService: фоновые задачи, дедлайны и мьют
     expect(sessionEvents.filter((e) => e.type === 'error')).toEqual([expected]);
     expect(JSON.stringify([...gameEvents, ...sessionEvents])).not.toContain('abc.json');
     expect(lines.some((l) => l.startsWith('[X]') && l.includes(secretPath))).toBe(true);
-    await service.close();
+    await closeWithin(service);
   });
 
   it('сырое исключение движка: наружу engine_unavailable и общий текст, подробности в лог', async () => {
@@ -809,7 +827,7 @@ describe('GameService: фоновые задачи, дедлайны и мьют
   });
 
   it('код ApiError из фоновой задачи попадает в событие error как есть', async () => {
-    const real = new GameStore(dir);
+    const real = memoryStore();
     const store = gatedStore(real, async (state) => {
       if (state.moves.length === 2) throw new ApiError('bad_request', 'snapshot rejected');
     });
@@ -821,11 +839,11 @@ describe('GameService: фоновые задачи, дедлайны и мьют
     // Свой код ошибки не подменяется на internal: по нему вызывающий отличает
     // отказ движка от внутренней поломки.
     expect(events.find((e) => e.type === 'error')).toMatchObject({ code: 'bad_request', message: 'snapshot rejected' });
-    await service.close();
+    await closeWithin(service);
   });
 
   it('close дожидается фоновой записи снапшота', async () => {
-    const real = new GameStore(dir);
+    const real = memoryStore();
     let release: (() => void) | undefined;
     let saved = false;
     const store = gatedStore(real, async (state) => {
@@ -866,7 +884,7 @@ describe('GameService: фоновые задачи, дедлайны и мьют
   });
 
   it('отказ записи снапшота новой партии: session.game нет, create отклоняется', async () => {
-    const real = new GameStore(dir);
+    const real = memoryStore();
     let failed = false;
     const store = gatedStore(real, async () => {
       if (failed) return;
@@ -885,7 +903,7 @@ describe('GameService: фоновые задачи, дедлайны и мьют
 
   it('отказ записи новой партии сессии не оставляет в памяти ни привязки к сессии, ни ожидающего первого хода', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
-    const real = new GameStore(dir);
+    const real = memoryStore();
     let failures = 1;
     const store = gatedStore(real, async () => {
       if (failures-- > 0) throw new Error('disk full');
@@ -903,13 +921,13 @@ describe('GameService: фоновые задачи, дедлайны и мьют
     expect(created.firstMove).toMatchObject({ coord: 'C3' });
     expect(seen[0]).toEqual({ type: 'session.game', gameId: created.state.id });
     expect(service.internalSizes()).toEqual({ sessionsByGame: 1, waiters: 0, gaveUp: 0 });
-    await service.close();
+    await closeWithin(service);
     expect(service.internalSizes()).toEqual({ sessionsByGame: 1, waiters: 0, gaveUp: 0 });
     expect(vi.getTimerCount()).toBe(0);
   });
 
   it('отказ записи новой партии без сессии и без ожидания: память пуста, отказ тот же', async () => {
-    const real = new GameStore(dir);
+    const real = memoryStore();
     let failures = 1;
     const store = gatedStore(real, async () => {
       if (failures-- > 0) throw new Error('disk full');
@@ -989,7 +1007,7 @@ describe('GameService: фоновые задачи, дедлайны и мьют
   });
 
   it('мьютекс партии: два хода подряд без ожидания применяются по очереди', async () => {
-    const real = new GameStore(dir);
+    const real = memoryStore();
     // Запись отдаёт управление: без мьютекса второй ход успел бы прочитать состояние
     // до коммита первого и переписал бы его.
     const store = gatedStore(real, async () => {
@@ -1186,7 +1204,7 @@ describe('GameService: фоновые задачи, дедлайны и мьют
     await tick();
     expect(calls).toBe(2);
     // Часы стоят: если бы close ждал паузу целиком, он не вернулся бы никогда.
-    await service.close();
+    await closeWithin(service);
     expect(service.get(g.state.id).moves).toHaveLength(1);
   });
 
@@ -1311,7 +1329,7 @@ describe('GameService: фоновые задачи, дедлайны и мьют
     const events = record(bus, `game:${g.state.id}`);
     await service.play(g.state.id, { coord: 'D4', waitForReply: false, via: 'api' });
     await untilTick(() => events.some((e) => e.type === 'error'));
-    await service.close();
+    await closeWithin(service);
     // Разбуженная пауза обязана снять свой таймер: иначе он держал бы событийный
     // цикл ещё секунду после остановки сервера.
     expect(vi.getTimerCount()).toBe(0);
@@ -1452,7 +1470,7 @@ describe('GameService: фоновые задачи, дедлайны и мьют
 
   it('close раньше отказа записи снапшота: пауза перед повтором не начинается', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
-    const real = new GameStore(dir);
+    const real = memoryStore();
     let fail: (() => void) | undefined;
     const store = gatedStore(real, async (state) => {
       if (state.moves.length === 2) {
@@ -1479,7 +1497,7 @@ describe('GameService: фоновые задачи, дедлайны и мьют
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     const { service } = await make(createFakeEngine({ script: ['E5'] }), { store: memoryStore(), replyTimeoutMs: undefined });
     const g = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: false });
-    await service.close();
+    await closeWithin(service);
     // Часы стоят: ответа движка после close не будет, и ждать его 8 с незачем.
     const playing = service.play(g.state.id, { coord: 'D4', waitForReply: true, via: 'api' });
     const state = track(playing);
@@ -1491,7 +1509,7 @@ describe('GameService: фоновые задачи, дедлайны и мьют
 
   it('отказ записи хода движка: ошибка видна, партия не расходится с диском и продолжается сама', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
-    const real = new GameStore(dir);
+    const real = memoryStore();
     let failures = 1;
     const store = gatedStore(real, async (state) => {
       if (state.moves.length === 2 && failures-- > 0) throw new Error('disk is full');
@@ -1533,7 +1551,7 @@ describe('GameService: фоновые задачи, дедлайны и мьют
 
   it('диск не чинится: каждый повтор — новое событие error, память не уходит вперёд диска', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
-    const real = new GameStore(dir);
+    const real = memoryStore();
     const store = gatedStore(real, async (state) => {
       if (state.moves.length === 2) throw new Error('disk is full');
     });
@@ -1550,13 +1568,13 @@ describe('GameService: фоновые задачи, дедлайны и мьют
     expect(service.get(id).moves).toHaveLength(1);
     expect((await real.load())[0]?.moves).toHaveLength(1);
     // Остановка во время паузы перед очередным повтором не ждёт её.
-    await service.close();
+    await closeWithin(service);
     expect(vi.getTimerCount()).toBe(0);
   });
 
   it('отказ записи итога счёта: ошибка видна, счёт повторяется, партия завершается', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
-    const real = new GameStore(dir);
+    const real = memoryStore();
     let failures = 1;
     const store = gatedStore(real, async (state) => {
       if (state.status === 'finished' && failures-- > 0) throw new Error('disk is full');
@@ -1580,7 +1598,7 @@ describe('GameService: фоновые задачи, дедлайны и мьют
 
   it('бросивший лог в обработчике отказа не оставляет партию без задачи движка навсегда', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
-    const real = new GameStore(dir);
+    const real = memoryStore();
     let failures = 1;
     const store = gatedStore(real, async (state) => {
       if (state.moves.length === 2 && failures-- > 0) throw new Error('disk is full');
@@ -1609,14 +1627,14 @@ describe('GameService: фоновые задачи, дедлайны и мьют
     // Создать такую партию нельзя (unsupported_controller), но снапшот мог остаться с прежних версий:
     // «kick после любого исхода задачи» держит и его.
     const id = 'enginevsengine';
-    await new GameStore(dir).save(newGame({ id, createdAt: '2026-09-07T10:00:00.000Z', settings: GameSettings.parse({ boardSize: 9 }), seats: { B: { controller: 'engine', rank: '10k' }, W: { controller: 'engine', rank: '10k' } } }));
+    const seed = newGame({ id, createdAt: '2026-09-07T10:00:00.000Z', settings: GameSettings.parse({ boardSize: 9 }), seats: { B: { controller: 'engine', rank: '10k' }, W: { controller: 'engine', rank: '10k' } } });
     const engine = createFakeEngine({ script: ['C3', 'D4', 'E5', 'F6'] });
-    const { service } = await make(engine);
+    const { service } = await make(engine, { store: memoryStore([seed]) });
     // Коммит хода движка зовёт kick, пока запись задачи ещё в карте: следующий ход ставит только
     // kick после завершения задачи.
     await untilTick(() => service.get(id).moves.length >= 4);
     expect(service.get(id).moves.slice(0, 4).map((m) => `${m.color}${m.coord}`)).toEqual(['BC3', 'WD4', 'BE5', 'WF6']);
-    await service.close();
+    await closeWithin(service);
     const after = service.get(id).moves.length;
     await tick(20);
     // После close kick ничего не ставит: партия замирает.
@@ -1624,7 +1642,7 @@ describe('GameService: фоновые задачи, дедлайны и мьют
   });
 
   it('отказ записи хода человека: ошибка у вызывающего, состояние не меняется, ход можно повторить', async () => {
-    const real = new GameStore(dir);
+    const real = memoryStore();
     let failures = 1;
     const store = gatedStore(real, async (state) => {
       if (state.moves.length === 1 && failures-- > 0) throw new Error('disk is full');
@@ -1720,7 +1738,7 @@ describe('GameService: серия повторов фоновой задачи',
 
   it('отказ записи снапшота считается в той же серии: после последней паузы одно retries_exhausted', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
-    const real = new GameStore(dir);
+    const real = memoryStore();
     const store = {
       load: () => real.load(),
       save: async (state: GameState) => {
@@ -2189,7 +2207,7 @@ describe('GameService: серия повторов фоновой задачи',
     await untilTick(() => calls === 1);
     await vi.advanceTimersByTimeAsync(10);
     await untilTick(() => codes(events).includes('retries_exhausted'));
-    await service.close();
+    await closeWithin(service);
     service.resume(id);
     await service.setRank(id, { color: 'B', rank: '5k' });
     await tick(10);

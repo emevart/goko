@@ -1,7 +1,4 @@
 import { getEventListeners } from 'node:events';
-import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { RoomAgentDispatch, TokenVerifier } from 'livekit-server-sdk';
 import { GameSettings, createClient, fakeFetch, parseSseStream } from '@goko/protocol';
@@ -12,7 +9,7 @@ import { createFakeEngine } from './fake-engine.ts';
 import type { RoomCreator } from './livekit.ts';
 import { GameService } from './service.ts';
 import { SessionManager } from './sessions.ts';
-import { GameStore } from './store.ts';
+import { type GuardedService, closeWithin, guardService, memoryStore } from './test-helpers.ts';
 
 const KEY = 'app-secret';
 const LK = { url: 'wss://lk.test', apiKey: 'devkey', apiSecret: 'secret-of-at-least-32-characters-long', agentName: 'goko-dev', tokenTtlSeconds: 3600 };
@@ -20,17 +17,17 @@ const HUMAN_BLACK = { black: { controller: 'human' as const }, white: { controll
 const HUMAN_ONLY = { black: { controller: 'human' as const }, white: { controller: 'human' as const }, settings: { boardSize: 9 as const } };
 const MIN = 60_000;
 
-let dir = '';
-let opened: GameService[] = [];
+let opened: GuardedService[] = [];
 beforeEach(async () => {
-  dir = await mkdtemp(path.join(tmpdir(), 'goko-app-'));
   opened = [];
 });
 afterEach(async () => {
   vi.useRealTimers();
   vi.restoreAllMocks();
-  for (const service of opened) await service.close();
-  await rm(dir, { recursive: true, force: true });
+  for (const { service, startsAfterClose } of opened) {
+    await closeWithin(service);
+    expect(startsAfterClose(), 'startTask после close').toBe(0);
+  }
 });
 
 type RoomCall = { name: string; emptyTimeout: number; agents: RoomAgentDispatch[] };
@@ -63,9 +60,11 @@ type MakeOptions = {
 async function make(opts: MakeOptions = {}) {
   const bus = new EventBus();
   const engine = createFakeEngine({ script: opts.script, delayMs: opts.delayMs });
-  const store = new GameStore(dir);
+  // Снапшоты в памяти: тесты ждут фоновый коммит по оборотам очереди, а настоящая запись на диск
+  // под нагрузкой не укладывается ни в какое их число.
+  const store = memoryStore();
   const service = new GameService({ store, engine: opts.engine ?? engine, bus, replyTimeoutMs: 500 });
-  opened.push(service);
+  opened.push(guardService(service));
   await service.init();
   const sessions = new SessionManager({ max: opts.maxSessions ?? 3, ttlMs: opts.ttlMs ?? 60_000, now: opts.now });
   const rooms = opts.rooms ?? fakeRooms();
@@ -349,7 +348,7 @@ describe('createApp: X-App-Key, тела и ошибки', () => {
     const messages = [...(await Promise.all(failures)).map((e) => e.message), ...bodies.map((b) => b.error.message)];
     expect(messages).toHaveLength(10);
     for (const message of messages) expect(message).toMatch(/^[ -~]+$/);
-    await service.close();
+    await closeWithin(service);
   });
 
   it('ascii — text/plain, sgf — application/x-go-sgf', async () => {
