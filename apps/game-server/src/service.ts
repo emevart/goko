@@ -209,7 +209,7 @@ export class GameService {
       this.checkSeat(prev, color, by);
       const next = applyMove(prev, color, req.coord, this.now());
       const waiter = req.waitForReply && next.state.pendingEngineMove ? this.registerWaiter(id, next.state.revision) : null;
-      await this.commit(next.state, next.move.coord === 'pass' ? 'pass' : 'play', by, req.via);
+      await this.commitOrReleaseWaiter(next.state, next.move.coord === 'pass' ? 'pass' : 'play', by, req.via);
       return { ...next, waiter };
     }));
     return this.withReply(id, state, move, waiter);
@@ -245,7 +245,7 @@ export class GameService {
       this.checkSeat(rolled.state, color, by);
       const next = applyMove(rolled.state, color, req.coord, this.now());
       const waiter = req.waitForReply && next.state.pendingEngineMove ? this.registerWaiter(id, next.state.revision) : null;
-      await this.commit(next.state, 'correct', by, req.via);
+      await this.commitOrReleaseWaiter(next.state, 'correct', by, req.via);
       return { ...next, waiter };
     }));
     return this.withReply(id, state, move, waiter);
@@ -397,6 +397,30 @@ export class GameService {
     if (next.status === 'finished' && prev?.status !== 'finished' && next.result) this.emitGame(next.id, { type: 'game.finished', result: next.result });
     this.settleWaiters(next, cause, prev);
     this.kick(next);
+  }
+
+  // Коммит хода с ожидающим ответа на его ревизию: при отказе записи ревизии не будет, и ожидающий
+  // снимается сразу. Ожидающие прежних ревизий (ответ движка на прошлый ход) остаются.
+  private async commitOrReleaseWaiter(next: GameState, cause: StateCause, by: By, via?: Via): Promise<void> {
+    try {
+      await this.commit(next, cause, by, via);
+    } catch (e) {
+      this.releaseWaitersFrom(next.id, next.revision);
+      throw e;
+    }
+  }
+
+  private releaseWaitersFrom(id: string, revision: number): void {
+    const list = this.waiters.get(id);
+    if (!list) return;
+    this.waiters.set(
+      id,
+      list.filter((w) => {
+        if (w.revision < revision) return true;
+        w.resolve(null);
+        return false;
+      }),
+    );
   }
 
   private emitGame(id: string, event: GameEvent): void {

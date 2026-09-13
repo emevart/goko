@@ -920,6 +920,52 @@ describe('GameService: фоновые задачи, дедлайны и мьют
     expect(service.list()).toEqual([]);
   });
 
+  it('отказ записи хода с ожиданием ответа не оставляет ожидающего (play)', async () => {
+    const real = memoryStore();
+    let failNext = false;
+    const store = { load: () => real.load(), save: async (state: GameState) => {
+      if (failNext) {
+        failNext = false;
+        throw new Error('disk full');
+      }
+      return real.save(state);
+    } } as unknown as GameStore;
+    const { service } = await make(createFakeEngine({ script: ['E5'] }), { store, replyTimeoutMs: undefined });
+    const g = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: false });
+    failNext = true;
+    await expect(service.play(g.state.id, { coord: 'D4', waitForReply: true, via: 'voice' })).rejects.toThrow('disk full');
+    expect(service.internalSizes().waiters).toBe(0);
+    const res = await service.play(g.state.id, { coord: 'D4', waitForReply: true, via: 'voice' });
+    expect(res.reply).toMatchObject({ coord: 'E5' });
+    expect(service.internalSizes().waiters).toBe(0);
+  });
+
+  it('отказ записи correct снимает только своего ожидающего: ожидающий прежнего хода получает ответ движка', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const real = memoryStore();
+    let failNext = false;
+    const store = { load: () => real.load(), save: async (state: GameState) => {
+      if (failNext) {
+        failNext = false;
+        throw new Error('disk full');
+      }
+      return real.save(state);
+    } } as unknown as GameStore;
+    const engine = createFakeEngine({ script: ['E5'], delayMs: 100 });
+    const { service } = await make(engine, { store, replyTimeoutMs: undefined });
+    const g = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: false });
+    const playing = service.play(g.state.id, { coord: 'D4', waitForReply: true, via: 'voice' });
+    await untilTick(() => engine.calls.genmove === 1);
+    expect(service.internalSizes().waiters).toBe(1);
+    failNext = true;
+    await expect(service.correct(g.state.id, { coord: 'C3', waitForReply: true, via: 'voice' })).rejects.toThrow('disk full');
+    expect(service.internalSizes().waiters).toBe(1);
+    await vi.advanceTimersByTimeAsync(100);
+    const res = await playing;
+    expect(res.reply).toMatchObject({ coord: 'E5' });
+    expect(service.internalSizes().waiters).toBe(0);
+  });
+
   it('чужое изменение во время ожидания первого хода движка — не таймаут', async () => {
     const { service, bus } = await make(createFakeEngine({ script: ['C3'], delayMs: 300 }), { replyTimeoutMs: 3000 });
     let id = '';
