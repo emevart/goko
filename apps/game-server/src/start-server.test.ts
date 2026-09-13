@@ -430,6 +430,24 @@ describe('startServer: конфигурация из env', () => {
   });
 });
 
+describe('startServer: секреты в логе приложения', () => {
+  it('ENGINE_KEY доходит до redact приложения: стек с ключом движка в лог не попадает', async () => {
+    say();
+    const { deps, rec } = harness();
+    const started = await startServer({ ...deps, env: { ...deps.env, FAKE_ENGINE: undefined, ENGINE_KEY: 'engine-key-value', ENGINE_URL: 'http://engine.test' } });
+    if (!started) throw new Error('сервер не запустился');
+    vi.spyOn(started.service, 'list').mockImplementation(() => {
+      const e = new Error('boom');
+      e.stack = 'Error: boom at engine-key-value';
+      throw e;
+    });
+    expect((await started.app.request('/api/games', { headers: { 'x-app-key': BASE_ENV.APP_KEY } })).status).toBe(500);
+    const line = rec.logs.find((l) => l.startsWith('[X] game-server:')) ?? '';
+    expect(line).toContain('at [скрыто]');
+    expect(rec.logs.join(' ')).not.toContain('engine-key-value');
+  });
+});
+
 describe('startServer: данные и строка готовности', () => {
   it('партии из DATA_DIR загружаются до listen', async () => {
     const seed = new RealGameService({ store: new GameStore(dir), engine: createFakeEngine(), bus: new EventBus() });

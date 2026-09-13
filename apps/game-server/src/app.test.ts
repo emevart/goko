@@ -56,6 +56,7 @@ type MakeOptions = {
   delayMs?: number;
   engine?: Engine;
   inFlight?: InFlight;
+  engineKey?: string;
 };
 
 async function make(opts: MakeOptions = {}) {
@@ -81,6 +82,7 @@ async function make(opts: MakeOptions = {}) {
     heartbeatMs: opts.heartbeatMs === 'default' ? undefined : (opts.heartbeatMs ?? 5_000),
     closing: opts.closing,
     inFlight: opts.inFlight,
+    engineKey: opts.engineKey,
     log: (line) => logs.push(line),
   });
   // Клиент протокола поверх app.request: без сети.
@@ -809,6 +811,29 @@ describe('createApp: пакет 12b — пределы, сессии, серия
     const line = logs.find((l) => l.startsWith('[X] game-server:')) ?? '';
     expect(line).toContain('at key [скрыто] secret [скрыто] api [скрыто]');
     for (const secret of [KEY, LK.apiSecret, LK.apiKey]) expect(line).not.toContain(secret);
+  });
+
+  it('ключ движка тоже вырезается из лога; пустой ключ (FAKE_ENGINE) текст не портит', async () => {
+    const engineKey = 'engine-key-in-stack';
+    const { app, service, logs } = await make({ engineKey });
+    vi.spyOn(service, 'list').mockImplementation(() => {
+      const e = new Error('boom');
+      e.stack = `Error: boom at engine ${engineKey} with prefix ${engineKey}x`;
+      throw e;
+    });
+    expect((await app.request('/api/games', { headers: { 'x-app-key': KEY } })).status).toBe(500);
+    const line = logs.find((l) => l.startsWith('[X] game-server:')) ?? '';
+    expect(line).toContain('at engine [скрыто] with prefix [скрыто]x');
+    expect(line).not.toContain(engineKey);
+
+    const fake = await make({ engineKey: '' });
+    vi.spyOn(fake.service, 'list').mockImplementation(() => {
+      const e = new Error('boom');
+      e.stack = 'Error: boom at plain text';
+      throw e;
+    });
+    expect((await fake.app.request('/api/games', { headers: { 'x-app-key': KEY } })).status).toBe(500);
+    expect(fake.logs.find((l) => l.startsWith('[X] game-server:'))).toBe('[X] game-server: Error: boom at plain text');
   });
 
   it('медленный клиент: очередь потока больше SSE_QUEUE_LIMIT — поток закрывается, подписка снимается', async () => {

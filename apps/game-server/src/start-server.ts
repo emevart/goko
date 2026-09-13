@@ -198,6 +198,7 @@ export async function startServer(deps: StartDeps = {}): Promise<StartedServer |
     rooms,
     closing: closing.signal,
     inFlight,
+    engineKey: config.engineKey,
     log,
   });
 

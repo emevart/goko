@@ -39,6 +39,8 @@ export type AppDeps = {
   closing?: AbortSignal;
   // Текущие запросы (кроме потоков SSE): остановка рвёт соединения только когда их не осталось.
   inFlight?: InFlight;
+  // Ключ go-engine: в лог не попадает, как и прочие секреты. Пустой при FAKE_ENGINE.
+  engineKey?: string;
   log?: (line: string) => void;
 };
 
@@ -107,7 +109,7 @@ export function createApp(deps: AppDeps): Hono {
   const appKeyDigest = digest(deps.appKey);
   // Известные секреты вырезаются из текста чужих исключений перед записью в лог.
   // Длинные первыми: ключ может оказаться частью секрета.
-  const secrets = [deps.appKey, deps.livekit.apiKey, deps.livekit.apiSecret].filter((s) => s !== '').sort((a, b) => b.length - a.length);
+  const secrets = [deps.appKey, deps.livekit.apiKey, deps.livekit.apiSecret, deps.engineKey ?? ''].filter((s) => s !== '').sort((a, b) => b.length - a.length);
   const redact = (text: string) => secrets.reduce((acc, secret) => acc.split(secret).join('[скрыто]'), text);
   const fail = (c: Context, code: ErrorCode, message: string, details?: Record<string, unknown>) =>
     c.json({ error: { code, message, ...(details ? { details } : {}) } }, ERROR_STATUS[code] as ContentfulStatusCode);
