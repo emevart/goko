@@ -52,7 +52,7 @@ updated: YYYY-MM-DD
 | [0002](0002-strict-request-schemas.md) | Схемы запросов строгие, схемы ответов и событий нет | 2026-09-08 | living |
 | [0003](0003-gamestate-board-invariant.md) | Длина доски — инвариант схемы `GameState` | 2026-09-08 | living |
 | [0004](0004-move-for-human.md) | Агент ходит за человека только по прямой просьбе и вслух | 2026-09-08 | living |
-| [0005](0005-v1-human-vs-engine-only.md) | В v1 только человек против движка; два места `engine` отклоняются | 2026-09-13 | living |
+| [0005](0005-v1-human-vs-engine-only.md) | В v1 отклоняются движок против движка и `external`; человек против человека принимается | 2026-09-13 | living |
 | [0006](0006-background-retry-series.md) | Серия повторов фоновой задачи 5/10/20/40/60 с и код `retries_exhausted` | 2026-09-13 | living |
 | [0007](0007-error-language-and-sanitization.md) | `message` по-английски, текст человеку — `humanText` по коду; санитизация границы движка | 2026-09-13 | living |
 | [0008](0008-session-extension.md) | Сессию продлевают пинги SSE и события её канала | 2026-09-13 | living |
