@@ -8,11 +8,14 @@
     "doctor": "node scripts/doctor.mjs",
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "check": "npm run typecheck && npm test"
+    "check": "npm run typecheck && npm test",
+    "smoke": "node scripts/smoke.mjs",
+    "dev": "node scripts/dev.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.19.0",
     "typescript": "^5.9.3",
+    "vite": "^8.2.2",
     "vitest": "^5.0.0"
   }
 }
