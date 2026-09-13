@@ -217,6 +217,8 @@ describe('createApp: маршруты брифа', () => {
     expect((await client.correct(id, { coord: 'C4' })).reply?.coord).toBe('pass');
     expect((await client.analyze(id)).groups.length).toBeGreaterThan(0);
     expect((await client.score(id)).reason).toBe('score');
+    // correct откатил C3 и F6 и поставил C4: в партии ровно C4 и ответ движка, а не четыре хода.
+    expect((await client.getGame(id)).moves.map((m) => m.coord)).toEqual(['C4', 'pass']);
     expect(await client.ascii(id)).toContain('toPlay B');
     expect(await client.sgf(id)).toContain('SZ[9]');
     expect((await client.resign(id, { color: 'B', via: 'voice' })).state.result).toMatchObject({ winner: 'W', reason: 'resign' });
@@ -464,8 +466,10 @@ describe('createApp: SSE, heartbeat и остановка', () => {
     }
     expect(t).toBe(120_000);
     expect(sessions.get(session.id).id).toBe(session.id);
+    // Закрытие потока между пингами срок не продлевает: последний пинг был на 120 с.
+    t += 10_000;
     await reader.cancel();
-    t += 60_001;
+    t = 120_000 + 60_001;
     expect(() => sessions.get(session.id)).toThrow();
   });
 

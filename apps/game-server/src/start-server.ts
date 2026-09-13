@@ -76,7 +76,8 @@ function readConfig(env: Record<string, string | undefined>, root: string): { co
     const raw = optional(name);
     if (raw === undefined) return fallback;
     const value = Number(raw);
-    if (!/^[1-9]\d*$/.test(raw) || !Number.isSafeInteger(value) || value < min || value > max) {
+    // Больше MAX_SAFE_INTEGER отсекает max: у всех переменных он не выше этого числа.
+    if (!/^[1-9]\d*$/.test(raw) || value < min || value > max) {
       errors.push(message);
       return fallback;
     }

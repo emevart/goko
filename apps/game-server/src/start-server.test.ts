@@ -196,6 +196,7 @@ describe('startServer: конфигурация из env', () => {
       say();
       expect(await startServer({ ...deps, env: { ...deps.env, LIVEKIT_URL: value } })).not.toBeNull();
       expect(rec.exits).toEqual([]);
+      expect(rec.roomOptions[0]?.url).toBe(value);
     }
   });
 
@@ -452,17 +453,18 @@ describe('startServer: остановка', () => {
     });
     const log = say();
     const { deps, rec } = harness();
-    await startServer({ ...deps, listen: undefined, env: { ...deps.env, PORT: String(port) } });
+    await startServer({ ...deps, listen: undefined, env: { ...deps.env, PORT: String(port), HOST: 'localhost' } });
     const line = await vi.waitFor(() => {
       const found = log.mock.calls.map((c) => String(c[0])).find((l) => l.startsWith('[OK] game-server'));
       expect(found).toBeDefined();
       return found;
-    });
-    expect(line).toBe(`[OK] game-server на http://127.0.0.1:${port}; партий 0; движок fake`);
-    const health = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(5_000) });
+    }, { timeout: 10_000, interval: 20 }); // разрешение localhost под нагрузкой бывает дольше секунды
+    // Адрес — фактический адрес сокета, а не строка HOST.
+    expect(['127.0.0.1', '::1'].map((address) => `[OK] game-server на http://${address}:${port}; партий 0; движок fake`)).toContain(line);
+    const health = await fetch(`http://localhost:${port}/health`, { signal: AbortSignal.timeout(5_000) });
     expect(await health.json()).toEqual({ ok: true, games: 0, sessions: 0 });
     rec.handlers.get('SIGINT')?.();
     expect(await rec.exited).toBe(0);
-    await expect(fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(5_000) })).rejects.toThrow();
+    await expect(fetch(`http://localhost:${port}/health`, { signal: AbortSignal.timeout(5_000) })).rejects.toThrow();
   });
 });

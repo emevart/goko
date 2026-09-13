@@ -127,6 +127,7 @@ describe('RoomServiceClient из LIVEKIT_URL', () => {
     expect(livekitHttpUrl('ws://127.0.0.1:7880')).toBe('http://127.0.0.1:7880');
     expect(livekitHttpUrl('https://lk.test/')).toBe('https://lk.test/');
     expect(livekitHttpUrl('http://lk.test')).toBe('http://lk.test');
+    expect(livekitHttpUrl('https://proxy.test/?to=ws://x')).toBe('https://proxy.test/?to=ws://x');
   });
 
   it('createRoomService ходит на http(s)-адрес с подписью ключом и правом roomCreate, без сети', async () => {
