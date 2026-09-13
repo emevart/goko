@@ -1170,6 +1170,181 @@ describe('GameService: фоновые задачи, дедлайны и мьют
     expect(service.get(id).status).toBe('playing');
   });
 
+  it('close раньше отказа движка: пауза перед повтором не начинается', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    let fail: ((e: Error) => void) | undefined;
+    let calls = 0;
+    const inner = createFakeEngine();
+    const gated: Engine = {
+      ...inner,
+      genmove: () => {
+        calls++;
+        return new Promise((_, reject) => {
+          fail = reject;
+        });
+      },
+    };
+    // Пауза по умолчанию — 5 с; часы стоят, поэтому начатую паузу не кончило бы ничто.
+    const { service } = await make(gated, { engineRetryMs: undefined });
+    const g = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: false });
+    await service.play(g.state.id, { coord: 'D4', waitForReply: false, via: 'api' });
+    await untilTick(() => fail !== undefined);
+    // Порядок остановки сервера: close приходит, пока запрос к движку в полёте.
+    const closing = track(service.close());
+    await tick();
+    expect(closing.settled).toBe(false);
+    fail?.(new ApiError('engine_unavailable', 'engine is unreachable'));
+    await untilTick(() => closing.settled);
+    expect(calls).toBe(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('close раньше отказа записи снапшота: пауза перед повтором не начинается', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const real = new GameStore(dir);
+    let fail: (() => void) | undefined;
+    const store = gatedStore(real, async (state) => {
+      if (state.moves.length === 2) {
+        await new Promise<void>((r) => {
+          fail = r;
+        });
+        throw new Error('disk is full');
+      }
+    });
+    const { service } = await make(createFakeEngine({ script: ['E5'] }), { store, engineRetryMs: undefined });
+    const g = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: false });
+    await service.play(g.state.id, { coord: 'D4', waitForReply: false, via: 'api' });
+    await untilTick(() => fail !== undefined);
+    const closing = track(service.close());
+    await tick();
+    expect(closing.settled).toBe(false);
+    fail?.();
+    await untilTick(() => closing.settled);
+    expect(vi.getTimerCount()).toBe(0);
+    expect(service.get(g.state.id).moves).toHaveLength(1);
+  });
+
+  it('ожидание ответа после close не ждёт таймаута', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const { service } = await make(createFakeEngine({ script: ['E5'] }), { replyTimeoutMs: undefined });
+    const g = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: false });
+    await service.close();
+    // Часы стоят: ответа движка после close не будет, и ждать его 8 с незачем.
+    const playing = service.play(g.state.id, { coord: 'D4', waitForReply: true, via: 'api' });
+    const state = track(playing);
+    await untilTick(() => state.settled);
+    const res = await playing;
+    expect(res.reply).toBeUndefined();
+    expect(res.move.coord).toBe('D4');
+  });
+
+  it('отказ записи хода движка: ошибка видна, партия не расходится с диском и продолжается сама', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const real = new GameStore(dir);
+    let failures = 1;
+    const store = gatedStore(real, async (state) => {
+      if (state.moves.length === 2 && failures-- > 0) throw new Error('disk is full');
+    });
+    const engine = createFakeEngine({ script: ['E5', 'E5'] });
+    const { service, bus } = await make(engine, { store, engineRetryMs: 1000, replyTimeoutMs: undefined });
+    const g = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: false });
+    const id = g.state.id;
+    const events = record(bus, `game:${id}`);
+
+    // Человек сказал ход и ждёт ответа: отказ записи отпускает его сразу, не через 8 с.
+    const playing = service.play(id, { coord: 'D4', waitForReply: true, via: 'voice' });
+    const playState = track(playing);
+    await untilTick(() => playState.settled);
+    const res = await playing;
+    expect(res.reply).toBeUndefined();
+    expect(events.filter((e) => e.type === 'error')).toEqual([{ type: 'error', code: 'internal', message: 'disk is full' }]);
+
+    // Память и диск на одном и том же состоянии: ход человека есть, ответа движка нет.
+    expect(service.get(id).moves.map((m) => m.coord)).toEqual(['D4']);
+    expect((await real.load())[0]?.moves.map((m) => m.coord)).toEqual(['D4']);
+    expect(service.get(id).pendingEngineMove).toBe(true);
+
+    // Повтор после паузы, без отката и без сдачи: Гоко отвечает сам.
+    await vi.advanceTimersByTimeAsync(999);
+    await tick();
+    expect(engine.calls.genmove).toBe(1);
+    await vi.advanceTimersByTimeAsync(1);
+    await untilTick(() => service.get(id).moves.length === 2);
+    expect(engine.calls.genmove).toBe(2);
+    expect((await real.load())[0]?.moves.map((m) => m.coord)).toEqual(['D4', 'E5']);
+    expect(events.filter((e) => e.type === 'state.updated').at(-1)).toMatchObject({ cause: 'engine', by: 'engine' });
+
+    // Партия идёт дальше обычным ходом человека.
+    const next = await service.play(id, { coord: 'C3', waitForReply: false, via: 'voice' });
+    expect(next.move).toMatchObject({ n: 3, coord: 'C3' });
+    expect(events.filter((e) => e.type === 'error')).toHaveLength(1);
+  });
+
+  it('диск не чинится: каждый повтор — новое событие error, память не уходит вперёд диска', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const real = new GameStore(dir);
+    const store = gatedStore(real, async (state) => {
+      if (state.moves.length === 2) throw new Error('disk is full');
+    });
+    const engine = createFakeEngine();
+    const { service, bus } = await make(engine, { store, engineRetryMs: 1000 });
+    const g = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: false });
+    const id = g.state.id;
+    const events = record(bus, `game:${id}`);
+    await service.play(id, { coord: 'D4', waitForReply: false, via: 'api' });
+    await untilTick(() => events.filter((e) => e.type === 'error').length === 1);
+    await vi.advanceTimersByTimeAsync(1000);
+    await untilTick(() => events.filter((e) => e.type === 'error').length === 2);
+    expect(engine.calls.genmove).toBe(2);
+    expect(service.get(id).moves).toHaveLength(1);
+    expect((await real.load())[0]?.moves).toHaveLength(1);
+    // Остановка во время паузы перед очередным повтором не ждёт её.
+    await service.close();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('отказ записи итога счёта: ошибка видна, счёт повторяется, партия завершается', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const real = new GameStore(dir);
+    let failures = 1;
+    const store = gatedStore(real, async (state) => {
+      if (state.status === 'finished' && failures-- > 0) throw new Error('disk is full');
+    });
+    const engine = createFakeEngine();
+    const { service, bus } = await make(engine, { store, engineRetryMs: 1000 });
+    const g = await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false });
+    const id = g.state.id;
+    const events = record(bus, `game:${id}`);
+    await service.pass(id, { waitForReply: false, via: 'api' });
+    await service.pass(id, { waitForReply: false, via: 'api' });
+    await untilTick(() => events.some((e) => e.type === 'error'));
+    expect(events.find((e) => e.type === 'error')).toMatchObject({ code: 'internal', message: 'disk is full' });
+    expect(service.get(id).status).toBe('playing');
+    expect((await real.load())[0]?.status).toBe('playing');
+    await vi.advanceTimersByTimeAsync(1000);
+    await untilTick(() => service.get(id).status === 'finished');
+    expect(engine.calls.score).toBe(2);
+    expect((await real.load())[0]?.status).toBe('finished');
+  });
+
+  it('отказ записи хода человека: ошибка у вызывающего, состояние не меняется, ход можно повторить', async () => {
+    const real = new GameStore(dir);
+    let failures = 1;
+    const store = gatedStore(real, async (state) => {
+      if (state.moves.length === 1 && failures-- > 0) throw new Error('disk is full');
+    });
+    const { service, bus } = await make(createFakeEngine(), { store });
+    const g = await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false });
+    const id = g.state.id;
+    const events = record(bus, `game:${id}`);
+    await expect(service.play(id, { coord: 'D4', waitForReply: false, via: 'voice' })).rejects.toThrow('disk is full');
+    expect(service.get(id).moves).toEqual([]);
+    expect(events).toEqual([]);
+    const res = await service.play(id, { coord: 'D4', waitForReply: false, via: 'voice' });
+    expect(res.move).toMatchObject({ n: 1, coord: 'D4' });
+    expect((await real.load())[0]?.moves).toHaveLength(1);
+  });
+
   it('счёт не возобновляется, когда пасов осталось меньше двух', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     let calls = 0;

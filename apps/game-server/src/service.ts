@@ -252,8 +252,10 @@ export class GameService {
 
   // ---- внутреннее ----
 
-  // Пауза, прерываемая на close.
+  // Пауза, прерываемая на close. После close пауза не начинается вовсе: close уже обошёл
+  // набор пробуждений, и новую паузу будить было бы некому.
   private sleep(ms: number): Promise<void> {
+    if (this.closed) return Promise.resolve();
     return new Promise<void>((resolve) => {
       const wake = () => {
         clearTimeout(timer);
@@ -339,6 +341,8 @@ export class GameService {
   }
 
   private registerWaiter(id: string, revision: number): Promise<Move | null> {
+    // После close движок не ответит: ожидающий получает null сразу, а не по таймауту.
+    if (this.closed) return Promise.resolve(null);
     return new Promise<Move | null>((resolve) => {
       const list = this.waiters.get(id) ?? [];
       list.push({ revision, resolve });
@@ -399,18 +403,40 @@ export class GameService {
 
   // Фоновую задачу никто не ждёт до close, поэтому её отказ обязан быть перехвачен здесь:
   // иначе отказ записи снапшота (диск полон) уходит в unhandledRejection и убивает процесс.
+  // Перехваченный отказ не должен и оставлять партию без задачи: ход движка ждал бы
+  // вечно, а человек получал бы not_your_turn. Поэтому после события error и паузы задача
+  // ставится заново. Состояние в памяти при этом не расходится с диском: commit публикует
+  // новое состояние только после удачной записи, так что повтор начинается с того, что лежит на диске.
   private startTask(tasks: Map<string, Promise<void>>, id: string, task: Promise<void>): void {
     tasks.set(
       id,
       task
-        .catch((e: unknown) => {
-          const message = e instanceof Error ? e.message : String(e);
-          const code = e instanceof ApiError ? e.code : 'internal';
-          this.deps.log?.(`[X] background engine task for game ${id} failed: ${message}`);
-          this.emitGame(id, { type: 'error', code, message });
-        })
-        .finally(() => tasks.delete(id)),
+        .then(
+          () => false,
+          async (e: unknown) => {
+            const message = e instanceof Error ? e.message : String(e);
+            const code = e instanceof ApiError ? e.code : 'internal';
+            const retryMs = this.deps.engineRetryMs ?? ENGINE_RETRY_MS;
+            this.deps.log?.(`[X] background task for game ${id} failed: ${message}; retrying in ${retryMs} ms`);
+            this.emitGame(id, { type: 'error', code, message });
+            this.releaseWaiters(id);
+            await this.sleep(retryMs);
+            return true;
+          },
+        )
+        .then((retry) => {
+          tasks.delete(id);
+          const state = this.games.get(id);
+          // kick сам не ставит задачу после close и в завершённой партии.
+          if (retry && state) this.kick(state);
+        }),
     );
+  }
+
+  // Ожидающие ответа получают null: клиент увидит replyTimedOut сразу, а не через 8 с.
+  private releaseWaiters(id: string): void {
+    for (const w of this.waiters.get(id) ?? []) w.resolve(null);
+    this.waiters.delete(id);
   }
 
   // Цикл хода движка: думает вне мьютекса, применяет под мьютексом только если ревизия не изменилась.
@@ -459,8 +485,7 @@ export class GameService {
     const retryMs = this.deps.engineRetryMs ?? ENGINE_RETRY_MS;
     this.deps.log?.(`[!] engine: ${message}; retrying in ${retryMs} ms`);
     this.emitGame(id, { type: 'error', code, message });
-    for (const w of this.waiters.get(id) ?? []) w.resolve(null);
-    this.waiters.delete(id);
+    this.releaseWaiters(id);
     await this.sleep(retryMs);
   }
 
