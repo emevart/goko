@@ -29,8 +29,8 @@ describe('текст ошибки для человека', () => {
     expect(humanText('not_your_turn', { reason: 'ko' })).toBe(ERROR_TEXT.not_your_turn);
   });
 
-  it('исчерпанная серия повторов: нейтральный текст, не про движок и не про диск', () => {
-    expect(humanText('retries_exhausted')).toBe('Гоко не может продолжить партию; скажи что-нибудь, и он попробует снова');
+  it('исчерпанная серия повторов: нейтральный текст без просьб, годится и вебу с кнопкой «Повторить», и голосу', () => {
+    expect(humanText('retries_exhausted')).toBe('Гоко не смог сделать ход: движок не отвечает, нужно повторить');
     expect(humanText('engine_gave_up')).toBe(ERROR_TEXT.internal);
   });
 

@@ -21,7 +21,7 @@ export const ERROR_TEXT: Record<ErrorCode, string> = {
   revision_conflict: 'партия уже изменилась, повтори ещё раз',
   engine_busy: 'Гоко думает дольше обычного',
   engine_unavailable: 'Гоко сейчас недоступен',
-  retries_exhausted: 'Гоко не может продолжить партию; скажи что-нибудь, и он попробует снова',
+  retries_exhausted: 'Гоко не смог сделать ход: движок не отвечает, нужно повторить',
   unsupported_controller: 'такое место в партии пока не поддерживается',
   not_found: 'такой партии или сессии нет',
   bad_request: 'запрос не по форме',
