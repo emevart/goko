@@ -1015,9 +1015,23 @@ describe('createApp: счётчик текущих запросов (остан�
     expect(res.status).toBe(200);
     // Ответ ещё не записан в сокет: обрыв соединений сейчас потерял бы его.
     expect(inFlight.size).toBe(1);
+    // Ровно один слушатель: служебный слушатель раннего закрытия снят.
+    expect(getEventListeners(outgoing, 'close')).toHaveLength(1);
     outgoing.emit('close');
     expect(inFlight.size).toBe(0);
     expect(getEventListeners(outgoing, 'close')).toHaveLength(0);
+  });
+
+  it('на сокете Node текстовые ответы (ascii) тоже ждут close: не только JSON', async () => {
+    const inFlight = new InFlight();
+    const { app, client } = await make({ inFlight });
+    const { state } = await client.createGame(HUMAN_ONLY);
+    const outgoing = new EventEmitter();
+    const res = await app.fetch(new Request(`http://app.test/api/games/${state.id}/ascii`, { headers }), { outgoing });
+    expect(res.headers.get('content-type')).toMatch(/^text\/plain/);
+    expect(inFlight.size).toBe(1);
+    outgoing.emit('close');
+    expect(inFlight.size).toBe(0);
   });
 
   it('на сокете Node: соединение закрылось раньше ответа — запрос всё равно выходит из счёта', async () => {
@@ -1049,6 +1063,8 @@ describe('createApp: счётчик текущих запросов (остан�
     const res = await app.fetch(new Request(`http://app.test/api/games/${state.id}/events`, { headers }), { outgoing });
     expect(res.status).toBe(200);
     expect(inFlight.size).toBe(0);
+    // Поток живёт долго: служебный слушатель close на ответе не остаётся.
+    expect(getEventListeners(outgoing, 'close')).toHaveLength(0);
     await res.body?.cancel();
   });
 });
