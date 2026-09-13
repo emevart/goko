@@ -168,8 +168,8 @@ export class GameService {
     for (const seat of [req.black, req.white]) {
       if (seat.controller === 'external') throw new ApiError('unsupported_controller', 'the external seat arrives at stage 2');
     }
-    // v1 — только человек против движка (раздел 4 спеки): партия машины с машиной шла бы без
-    // человека и без предела, а серия повторов перезапускается только действием человека.
+    // D-0005: партия движка против движка шла бы без человека и без потолка ходов — отказ; человек
+    // против человека принимается (движок в ней не работает), место external отклонено выше до стадии 2.
     if (req.black.controller === 'engine' && req.white.controller === 'engine') {
       throw new ApiError('unsupported_controller', 'two engine seats are not supported', { black: 'engine', white: 'engine' });
     }
