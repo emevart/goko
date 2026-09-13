@@ -18,6 +18,9 @@ export class SessionManager {
   private readonly entries = new Map<string, Entry>();
 
   constructor(opts: SessionManagerOptions) {
+    // NaN из опечатки в env молча снял бы лимит (size >= NaN) и TTL (lastSeen < NaN): отказ сразу.
+    if (!Number.isInteger(opts.max) || opts.max < 1) throw new Error(`SessionManager: max должен быть целым >= 1, получено ${opts.max}`);
+    if (!Number.isFinite(opts.ttlMs) || opts.ttlMs <= 0) throw new Error(`SessionManager: ttlMs должен быть конечным > 0, получено ${opts.ttlMs}`);
     this.opts = opts;
   }
 
@@ -73,6 +76,13 @@ export class SessionManager {
     e.session = { ...e.session, currentGameId: gameId };
     e.lastSeen = this.now();
     return e.session;
+  }
+
+  // Освобождает место сразу, не дожидаясь TTL (например, если после create не удалось выдать токен).
+  // true — живая сессия удалена; false — её нет или она уже истекла.
+  remove(id: string): boolean {
+    this.sweep();
+    return this.entries.delete(id);
   }
 
   list(): Session[] {

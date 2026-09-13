@@ -80,6 +80,45 @@ describe('SessionManager', () => {
     expect(m.list().map((s) => s.id)).toEqual([b.id]);
   });
 
+  it('граница продления через touch: touch на 90 -> жива на 190, истекла на 191', () => {
+    let t = 0;
+    const m = new SessionManager({ max: 1, ttlMs: 100, now: () => t });
+    const a = m.create();
+    t = 90;
+    m.touch(a.id);
+    t = 190;
+    expect(m.get(a.id).id).toBe(a.id);
+    t = 191;
+    expect(errorOf(() => m.get(a.id))).toMatchObject({ code: 'not_found' });
+  });
+
+  it('конструктор отклоняет max не целое >= 1 и ttlMs не конечное > 0', () => {
+    for (const max of [Number.NaN, 0, -1, 1.5, Number.POSITIVE_INFINITY]) {
+      expect(() => new SessionManager({ max, ttlMs: 100 })).toThrow('SessionManager: max должен быть целым >= 1');
+    }
+    for (const ttlMs of [Number.NaN, 0, -1, Number.POSITIVE_INFINITY]) {
+      expect(() => new SessionManager({ max: 1, ttlMs })).toThrow('SessionManager: ttlMs должен быть конечным > 0');
+    }
+    expect(() => new SessionManager({ max: 1, ttlMs: 0.5 })).not.toThrow();
+  });
+
+  it('remove освобождает место и возвращает true; неизвестная, повторная и истёкшая -> false', () => {
+    let t = 0;
+    const m = new SessionManager({ max: 2, ttlMs: 100, now: () => t });
+    const a = m.create();
+    const b = m.create();
+    expect(m.remove(a.id)).toBe(true);
+    expect(m.remove(a.id)).toBe(false);
+    expect(m.remove('nope')).toBe(false);
+    expect(errorOf(() => m.get(a.id))).toMatchObject({ code: 'not_found' });
+    expect(m.list().map((s) => s.id)).toEqual([b.id]);
+    const c = m.create();
+    expect(m.list().map((s) => s.id)).toEqual([b.id, c.id]);
+    t = 101;
+    expect(m.remove(b.id)).toBe(false);
+    expect(m.list()).toEqual([]);
+  });
+
   it('touch истёкшей, но не выметенной сессии её не воскрешает', () => {
     let t = 0;
     const m = new SessionManager({ max: 1, ttlMs: 100, now: () => t });
