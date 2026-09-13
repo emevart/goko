@@ -311,6 +311,27 @@ describe('startServer: конфигурация из env', () => {
     expect((await started.app.request('/api/games', { headers: { 'x-app-key': 'wrong' } })).status).toBe(401);
   });
 
+  it('переменные с умолчанием из пробелов — то же, что пустые: умолчания', async () => {
+    say();
+    const { deps, rec } = harness({ initNoop: true });
+    const blank = '  ';
+    const env = { ...BASE_ENV, PORT: blank, HOST: blank, AGENT_NAME: blank, DATA_DIR: blank, MAX_SESSIONS: blank, SESSION_TTL_MS: blank, ENGINE_URL: blank };
+    const started = await startServer({ ...deps, env });
+    if (!started) throw new Error('сервер не запустился');
+    expect(rec.exits).toEqual([]);
+    expect(rec.listens).toEqual([{ port: 8787, hostname: '127.0.0.1' }]);
+    expect(rec.serviceDeps[0]?.store.dir).toBe(path.join(REPO_ROOT, 'data/games'));
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const headers = { 'x-app-key': BASE_ENV.APP_KEY };
+    const first = (await (await started.app.request('/api/sessions', { method: 'POST', headers })).json()) as { livekit: { token: string } };
+    const claims = await new TokenVerifier(BASE_ENV.LIVEKIT_API_KEY, SECRET).verify(first.livekit.token);
+    expect((claims.exp ?? 0) - (claims.nbf ?? 0)).toBe(7200);
+    expect(rec.rooms[0]?.agents[0]?.agentName).toBe('goko');
+    expect((await started.app.request('/api/sessions', { method: 'POST', headers })).status).toBe(200);
+    expect((await started.app.request('/api/sessions', { method: 'POST', headers })).status).toBe(200);
+    expect((await started.app.request('/api/sessions', { method: 'POST', headers })).status).toBe(429);
+  });
+
   it('значения из env: порт, хост, агент, каталог данных, лимит; сессии истекают по SESSION_TTL_MS', async () => {
     say();
     const { deps, rec } = harness();
