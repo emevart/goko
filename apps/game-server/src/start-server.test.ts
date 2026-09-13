@@ -337,7 +337,7 @@ describe('startServer: конфигурация из env', () => {
     const seen: Array<{ url: string; key: string | null }> = [];
     vi.stubGlobal('fetch', async (url: string, init: RequestInit) => {
       seen.push({ url: String(url), key: new Headers(init.headers).get('x-engine-key') });
-      return new Response(JSON.stringify({ move: 'D4', winrateB: 0.5, scoreLeadB: 0, humanPolicyTop: [], ms: 1 }), { status: 200 });
+      return new Response(JSON.stringify({ move: 'D4', winrateB: 0.5, scoreLeadB: 0, humanPolicyTop: [], humanFallback: false, ms: 1 }), { status: 200 });
     });
     for (const [url, expected] of [
       [undefined, 'http://127.0.0.1:8788/v1/genmove'],

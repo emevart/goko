@@ -554,6 +554,13 @@ describe('события', () => {
     expect(() => GameEvent.parse({ type: 'state.updated', state, cause: 'play', by: 'human', via: 'sms' })).toThrow();
   });
 
+  it('state.updated хода движка несёт humanFallback; у остальных полей нет', () => {
+    const engineMove = { type: 'state.updated', state, cause: 'engine', by: 'engine', humanFallback: true };
+    expect(GameEvent.parse(engineMove)).toEqual(engineMove);
+    expect(GameEvent.parse({ type: 'state.updated', state, cause: 'play', by: 'human' })).not.toHaveProperty('humanFallback');
+    expect(() => GameEvent.parse({ ...engineMove, humanFallback: 1 })).toThrow();
+  });
+
   it('вложенные схемы события проверяются через GameEvent', () => {
     expect(() => GameEvent.parse({ type: 'state.updated', state, cause: 'play', by: 'robot' })).toThrow();
     expect(() =>
@@ -618,11 +625,14 @@ describe('движок', () => {
       winrateB: 0.5,
       scoreLeadB: 0.5,
       humanPolicyTop: [{ coord: 'Q16', prob: 0.3 }],
+      humanFallback: false,
       ms: 120,
     };
     expect(EngineGenmoveResponse.parse(genmove)).toEqual(genmove);
     requiresKeys(EngineGenmoveResponse, genmove, Object.keys(genmove));
     expect(() => EngineGenmoveResponse.parse({ ...genmove, humanPolicyTop: [{ coord: 'Q16' }] })).toThrow();
+    // Признак хода из поиска обязателен: ответ без него — старый движок, а не «ход человеческой сети».
+    expect(() => EngineGenmoveResponse.parse({ ...genmove, humanFallback: 'no' })).toThrow();
 
     const info = { coord: 'D4', winrateB: 0.5, scoreLeadB: 1, visits: 20, order: 0 };
     expect(EngineMoveInfo.parse(info)).toEqual(info);

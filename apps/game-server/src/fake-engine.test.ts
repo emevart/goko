@@ -162,6 +162,8 @@ describe('createFakeEngine', () => {
     expect(r.winrateB).toBe(0.5);
     expect(r.scoreLeadB).toBe(0);
     expect(r.humanPolicyTop).toEqual([{ coord: 'E5', prob: 1 }]);
+    // Фейк всегда играет «человеческой сетью»: признак хода из поиска — false.
+    expect(r.humanFallback).toBe(false);
     expect(r.ms).toBe(235);
   });
 

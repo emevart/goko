@@ -319,7 +319,8 @@ export class GameService {
   }
 
   // Фиксирует новое состояние: снапшот, событие, пробуждение ожидающих, запуск движка или счёта.
-  private async commit(next: GameState, cause: StateCause, by: By, via?: Via): Promise<void> {
+  // humanFallback передаёт только ход движка: признак относится к одному ходу, а не к партии.
+  private async commit(next: GameState, cause: StateCause, by: By, via?: Via, humanFallback?: boolean): Promise<void> {
     const prev = this.games.get(next.id);
     // Снапшот пишется до публикации состояния: читатель, увидевший новое состояние
     // (или дождавшийся его опросом), уже не может опередить запись на диск.
@@ -329,7 +330,7 @@ export class GameService {
     // (currentGameId, поток сессии) сразу читает её состояние. При отказе записи события нет.
     const sessionId = this.sessionsByGame.get(next.id);
     if (cause === 'new' && sessionId) this.deps.bus.emit(`session:${sessionId}`, { type: 'session.game', gameId: next.id });
-    this.emitGame(next.id, { type: 'state.updated', state: next, cause, by, ...(via ? { via } : {}) });
+    this.emitGame(next.id, { type: 'state.updated', state: next, cause, by, ...(via ? { via } : {}), ...(humanFallback === undefined ? {} : { humanFallback }) });
     if (next.status === 'finished' && prev?.status !== 'finished' && next.result) this.emitGame(next.id, { type: 'game.finished', result: next.result });
     this.settleWaiters(next, cause, prev);
     this.kick(next);
@@ -477,7 +478,7 @@ export class GameService {
           this.deps.log?.(`[!] the engine suggested an illegal move ${reply.move}: ${e instanceof Error ? e.message : String(e)}; passing instead`);
           next = applyMove(current, color, 'pass', this.now());
         }
-        await this.commit(next.state, 'engine', 'engine');
+        await this.commit(next.state, 'engine', 'engine', undefined, reply.humanFallback);
         return true;
       });
       if (applied) return;

@@ -93,6 +93,24 @@ describe('GameService: партия человек против движка', (
     expect(saved[0]?.moves).toHaveLength(2);
   });
 
+  it('признак humanFallback ответа движка доходит до события хода движка, у хода человека его нет', async () => {
+    const inner = createFakeEngine({ script: ['E5', 'F6'] });
+    const flags = [true, false];
+    const searching: Engine = { ...inner, genmove: async (req) => ({ ...(await inner.genmove(req)), humanFallback: flags.shift() ?? false }) };
+    const { service, bus } = await make(searching);
+    const g = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: true });
+    const events = record(bus, `game:${g.state.id}`);
+    await service.play(g.state.id, { coord: 'D4', waitForReply: true, via: 'voice' });
+    await service.play(g.state.id, { coord: 'C3', waitForReply: true, via: 'voice' });
+    const updates = events.filter((e) => e.type === 'state.updated');
+    expect(updates.map((e) => [e.cause, 'humanFallback' in e ? e.humanFallback : 'нет'])).toEqual([
+      ['play', 'нет'],
+      ['engine', true],
+      ['play', 'нет'],
+      ['engine', false],
+    ]);
+  });
+
   it('движок ходит первым: create ждёт firstMove', async () => {
     const { service } = await make(createFakeEngine({ script: ['C3'] }));
     const created = await service.create({ ...ENGINE_BLACK, ...S9, waitForReply: true });

@@ -5,7 +5,7 @@ import { track } from './test-helpers.ts';
 
 const req = { boardSize: 13, rules: 'chinese' as const, komi: 7.5, moves: [], rank: '10k' as const };
 const scoreReq = { boardSize: 13, rules: 'chinese' as const, komi: 7.5, moves: [] };
-const ok = { move: 'D4', winrateB: 0.5, scoreLeadB: 0, humanPolicyTop: [], ms: 12 };
+const ok = { move: 'D4', winrateB: 0.5, scoreLeadB: 0, humanPolicyTop: [], humanFallback: false, ms: 12 };
 
 // Время в тестах управляемое: и таймаут запроса, и пауза перед повтором — обычные
 // setTimeout внутри клиента, поэтому тесты не спят ни миллисекунды.

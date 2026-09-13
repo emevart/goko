@@ -8,7 +8,8 @@ export type StateCause = z.infer<typeof StateCause>;
 
 export const GameEvent = z.discriminatedUnion('type', [
   z.object({ type: z.literal('session.game'), gameId: z.string() }),
-  z.object({ type: z.literal('state.updated'), state: GameState, cause: StateCause, by: By, via: Via.optional() }),
+  // humanFallback — только у хода движка (cause 'engine'): ход взят из поиска, а не из человеческой сети.
+  z.object({ type: z.literal('state.updated'), state: GameState, cause: StateCause, by: By, via: Via.optional(), humanFallback: z.boolean().optional() }),
   z.object({ type: z.literal('engine.thinking'), color: Color }),
   z.object({ type: z.literal('game.finished'), result: Result }),
   z.object({ type: z.literal('error'), code: z.string(), message: z.string() }),
