@@ -44,7 +44,7 @@ describe('mintToken (D-0001): только roomJoin на комнату сесс
 
   it('ttlSeconds не положительное целое -> отказ, SDK не подставляет свои 6 часов', async () => {
     for (const ttlSeconds of [0, -1, Number.NaN, 1.5, Number.POSITIVE_INFINITY]) {
-      await expect(mintToken({ ...base, ttlSeconds })).rejects.toThrow('mintToken: ttlSeconds должен быть положительным целым');
+      await expect(mintToken({ ...base, ttlSeconds })).rejects.toThrow('mintToken: ttlSeconds must be a positive integer');
     }
     vi.useFakeTimers({ toFake: ['Date'] });
     vi.setSystemTime(new Date('2026-09-07T10:00:00.000Z'));
@@ -58,10 +58,10 @@ describe('mintToken (D-0001): только roomJoin на комнату сесс
     vi.stubEnv('LIVEKIT_API_KEY', envKey);
     vi.stubEnv('LIVEKIT_API_SECRET', envSecret);
     const cases: Array<[Partial<typeof base>, string]> = [
-      [{ apiSecret: '' }, 'mintToken: пустой apiSecret'],
-      [{ apiSecret: '   ' }, 'mintToken: пустой apiSecret'],
-      [{ apiKey: '' }, 'mintToken: пустой apiKey'],
-      [{ identity: '' }, 'mintToken: пустой identity'],
+      [{ apiSecret: '' }, 'mintToken: empty apiSecret'],
+      [{ apiSecret: '   ' }, 'mintToken: empty apiSecret'],
+      [{ apiKey: '' }, 'mintToken: empty apiKey'],
+      [{ identity: '' }, 'mintToken: empty identity'],
     ];
     for (const [patch, message] of cases) {
       const err = await mintToken({ ...base, ...patch }).then(
@@ -153,7 +153,7 @@ describe('RoomServiceClient из LIVEKIT_URL', () => {
   });
 
   it('createRoomService: пустой ключ или секрет — отказ без значений, SDK не берёт их из окружения', () => {
-    expect(() => createRoomService({ url: 'wss://lk.test', apiKey: ' ', apiSecret: SECRET })).toThrow('createRoomService: пустой apiKey');
-    expect(() => createRoomService({ url: 'wss://lk.test', apiKey: KEY, apiSecret: '' })).toThrow('createRoomService: пустой apiSecret');
+    expect(() => createRoomService({ url: 'wss://lk.test', apiKey: ' ', apiSecret: SECRET })).toThrow('createRoomService: empty apiKey');
+    expect(() => createRoomService({ url: 'wss://lk.test', apiKey: KEY, apiSecret: '' })).toThrow('createRoomService: empty apiSecret');
   });
 });

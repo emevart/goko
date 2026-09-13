@@ -19,9 +19,12 @@ export class SessionManager {
 
   constructor(opts: SessionManagerOptions) {
     // NaN из опечатки в env молча снял бы лимит (size >= NaN) и TTL (lastSeen < NaN): отказ сразу.
-    if (!Number.isInteger(opts.max) || opts.max < 1) throw new Error(`SessionManager: max должен быть целым >= 1, получено ${opts.max}`);
-    if (!Number.isFinite(opts.ttlMs) || opts.ttlMs <= 0) throw new Error(`SessionManager: ttlMs должен быть конечным > 0, получено ${opts.ttlMs}`);
-    this.opts = opts;
+    // Текст — для разработчика, по-английски; значение в нём показывает саму опечатку.
+    // Копия, а не ссылка: вызывающий, поменявший свой объект после проверки, обошёл бы её.
+    const copy = { ...opts };
+    if (!Number.isInteger(copy.max) || copy.max < 1) throw new Error(`SessionManager: max must be an integer >= 1, got ${copy.max}`);
+    if (!Number.isFinite(copy.ttlMs) || copy.ttlMs <= 0) throw new Error(`SessionManager: ttlMs must be finite and > 0, got ${copy.ttlMs}`);
+    this.opts = copy;
   }
 
   private now(): number {

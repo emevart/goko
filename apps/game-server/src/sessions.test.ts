@@ -92,14 +92,37 @@ describe('SessionManager', () => {
     expect(errorOf(() => m.get(a.id))).toMatchObject({ code: 'not_found' });
   });
 
-  it('конструктор отклоняет max не целое >= 1 и ttlMs не конечное > 0', () => {
+  it('конструктор отклоняет max не целое >= 1 и ttlMs не конечное > 0: текст по-английски, с полученным значением', () => {
+    const messageOf = (opts: { max: number; ttlMs: number }): string => {
+      try {
+        new SessionManager(opts);
+      } catch (e) {
+        return e instanceof Error ? e.message : String(e);
+      }
+      throw new Error('конструктор не бросил');
+    };
     for (const max of [Number.NaN, 0, -1, 1.5, Number.POSITIVE_INFINITY]) {
-      expect(() => new SessionManager({ max, ttlMs: 100 })).toThrow('SessionManager: max должен быть целым >= 1');
+      expect(messageOf({ max, ttlMs: 100 })).toBe(`SessionManager: max must be an integer >= 1, got ${max}`);
     }
     for (const ttlMs of [Number.NaN, 0, -1, Number.POSITIVE_INFINITY]) {
-      expect(() => new SessionManager({ max: 1, ttlMs })).toThrow('SessionManager: ttlMs должен быть конечным > 0');
+      expect(messageOf({ max: 1, ttlMs })).toBe(`SessionManager: ttlMs must be finite and > 0, got ${ttlMs}`);
     }
+    // Опечатка в env видна по значению: NaN, а не «что-то не так».
+    expect(messageOf({ max: Number.NaN, ttlMs: 100 })).toBe('SessionManager: max must be an integer >= 1, got NaN');
     expect(() => new SessionManager({ max: 1, ttlMs: 0.5 })).not.toThrow();
+  });
+
+  it('опции копируются в конструкторе: правка исходного объекта не снимает ни лимит, ни срок', () => {
+    let t = 0;
+    const opts = { max: 1, ttlMs: 100, now: () => t };
+    const m = new SessionManager(opts);
+    const a = m.create();
+    opts.max = Number.NaN;
+    opts.ttlMs = Number.NaN;
+    opts.now = () => 0;
+    expect(errorOf(() => m.create())).toMatchObject({ code: 'limit_reached', details: { max: 1 } });
+    t = 101;
+    expect(errorOf(() => m.get(a.id))).toMatchObject({ code: 'not_found' });
   });
 
   it('remove освобождает место и возвращает true; неизвестная, повторная и истёкшая -> false', () => {

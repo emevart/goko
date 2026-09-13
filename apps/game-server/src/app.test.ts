@@ -268,7 +268,7 @@ describe('createApp: X-App-Key, тела и ошибки', () => {
     }
     expect((await app.request('/api/games', { headers: { 'x-app-key': KEY } })).status).toBe(200);
     const sessions = new SessionManager({ max: 1, ttlMs: 1000 });
-    expect(() => createApp({ service, sessions, bus: new EventBus(), appKey: '', livekit: LK, rooms: fakeRooms() })).toThrow('createApp: пустой appKey');
+    expect(() => createApp({ service, sessions, bus: new EventBus(), appKey: '', livekit: LK, rooms: fakeRooms() })).toThrow('createApp: empty appKey');
   });
 
   it('без ключа закрыты все маршруты /api, включая неизвестные и потоки', async () => {
@@ -401,7 +401,7 @@ describe('createApp: сессии и LiveKit', () => {
     // Пустой apiKey (createApp без проверки конфигурации): текст исключения доходит как есть.
     const empty = await make({ livekit: { apiKey: '' } });
     await expect(empty.client.createSession()).rejects.toMatchObject({ code: 'internal' });
-    expect(empty.logs.find((l) => l.startsWith('[X] game-server: сессия'))).toMatch(/не создана: mintToken: пустой apiKey$/);
+    expect(empty.logs.find((l) => l.startsWith('[X] game-server: сессия'))).toMatch(/не создана: mintToken: empty apiKey$/);
   });
 
   it('новая партия в неизвестной сессии — not_found; поток неизвестной сессии и партии — not_found', async () => {

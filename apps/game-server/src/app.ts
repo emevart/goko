@@ -68,7 +68,8 @@ async function parseBody<S extends z.ZodType>(c: Context, schema: S): Promise<z.
 }
 
 export function createApp(deps: AppDeps): Hono {
-  if (deps.appKey === '') throw new Error('createApp: пустой appKey');
+  // Ошибка программиста (конфигурация проверяется при старте): текст по-английски.
+  if (deps.appKey === '') throw new Error('createApp: empty appKey');
   const app = new Hono();
   const { service, sessions, bus } = deps;
   const heartbeatMs = deps.heartbeatMs ?? DEFAULT_HEARTBEAT_MS;

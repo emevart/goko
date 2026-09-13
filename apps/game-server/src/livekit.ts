@@ -3,7 +3,7 @@
 // и без roomConfig. Токен с roomCreate дал бы любому, кто открыл веб, неограниченное число платных агентов.
 // Ключ и секрет приходят только аргументами. SDK на пустой строке молча берёт LIVEKIT_API_KEY и
 // LIVEKIT_API_SECRET из process.env, поэтому пустые значения отклоняем сами. Тексты ошибок называют
-// только поле, значений не содержат.
+// только поле, значений не содержат. Это ошибки программиста: текст по-английски.
 import { AccessToken, RoomAgentDispatch, RoomServiceClient } from 'livekit-server-sdk';
 
 export type MintTokenOptions = {
@@ -21,7 +21,7 @@ export const ROOM_EMPTY_TIMEOUT_SECONDS = 300;
 export const ROOM_SERVICE_TIMEOUT_SECONDS = 10;
 
 function requireNonEmpty(where: string, value: string, field: string): void {
-  if (value.trim() === '') throw new Error(`${where}: пустой ${field}`);
+  if (value.trim() === '') throw new Error(`${where}: empty ${field}`);
 }
 
 export async function mintToken(opts: MintTokenOptions): Promise<string> {
@@ -30,7 +30,7 @@ export async function mintToken(opts: MintTokenOptions): Promise<string> {
   requireNonEmpty('mintToken', opts.identity, 'identity');
   const ttl = opts.ttlSeconds;
   // 0 и NaN SDK заменил бы своими 6 часами (options.ttl || '6h').
-  if (!Number.isInteger(ttl) || ttl <= 0) throw new Error('mintToken: ttlSeconds должен быть положительным целым');
+  if (!Number.isInteger(ttl) || ttl <= 0) throw new Error('mintToken: ttlSeconds must be a positive integer');
   const at = new AccessToken(opts.apiKey, opts.apiSecret, { identity: opts.identity, ttl });
   at.addGrant({ roomJoin: true, room: opts.room, canPublish: true, canSubscribe: true, canPublishData: true });
   return at.toJwt();
