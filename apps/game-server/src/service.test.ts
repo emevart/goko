@@ -1139,6 +1139,10 @@ describe('GameService: фоновые задачи, дедлайны и мьют
     release?.();
     await closing;
     expect(scored).toBe(true);
+    // Счёт досчитан уже после close: итог к закрытому сервису не применяется, как и ход движка.
+    // После рестарта init снова поставит счёт по двум пасам.
+    expect(service.get(id).status).toBe('playing');
+    expect(service.get(id).result).toBeUndefined();
   });
 
   // Счёт с воротами на каждом вызове: тест сам отпускает вызовы по одному.
