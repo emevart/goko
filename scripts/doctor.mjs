@@ -38,7 +38,7 @@ export function readDotEnv(file) {
 export const REQUIRED_ENV = {
   // Без этих пяти голосовой спайк не запускается: agent.ts, chat.mjs, token.mjs.
   spike: ['LIVEKIT_URL', 'LIVEKIT_API_KEY', 'LIVEKIT_API_SECRET', 'OPENAI_API_KEY', 'WEB_HOST'],
-  // ENGINE_KEY читает apps/go-engine/src/main.ts: без него go-engine выходит с кодом 2.
+  // ENGINE_KEY читает apps/go-engine/src/start-engine.ts: без него go-engine выходит с кодом 2.
   engine: ['ENGINE_KEY'],
   // Понадобится game-server'у; сейчас его никто не читает.
   later: ['APP_KEY'],
@@ -100,7 +100,7 @@ function main() {
   else if (!existsSync(kb)) fail(`KATAGO_BIN указывает на несуществующий файл`);
   else ok('KATAGO_BIN найден');
 
-  // Обе сети движка: имена переменных те же, что читает apps/go-engine/src/main.ts.
+  // Обе сети движка: имена переменных те же, что читает apps/go-engine/src/start-engine.ts.
   // Печатаются только имена переменных и вердикт: значения env не выводятся.
   const models = path.join(root, 'apps/go-engine/models');
   const nets = [
