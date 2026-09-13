@@ -1,5 +1,6 @@
-import { describe, expect, it } from 'vitest';
-import { ApiError, HttpError, createClient } from './index.ts';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { ApiError, ClientTimeoutError, HttpError, createClient } from './index.ts';
+import { CLIENT_TIMEOUTS } from './client.ts';
 import { fakeFetch } from './test-helpers.ts';
 
 const state = {
@@ -56,7 +57,7 @@ describe('createClient', () => {
   it('ascii и sgf — текст, events — разобранные события', async () => {
     const f = fakeFetch((call) => {
       if (call.url.endsWith('/ascii')) return new Response(' 1  .  .', { headers: { 'content-type': 'text/plain' } });
-      const body = `event: state.updated\ndata: ${JSON.stringify({ type: 'state.updated', state, cause: 'sync', by: 'system' })}\n\nevent: engine.thinking\ndata: {"type":"engine.thinking","color":"W"}\n\n`;
+      const body = `event: state.updated\ndata: ${JSON.stringify({ type: 'state.updated', state, cause: 'sync', by: 'system' })}\n\nevent: engine.thinking\ndata: {"type":"engine.thinking","gameId":"g1","color":"W"}\n\n`;
       return new Response(body, { headers: { 'content-type': 'text/event-stream' } });
     });
     const client = createClient({ baseUrl: 'http://api.test', appKey: 'k', fetch: f.fetch });
@@ -155,7 +156,7 @@ function sseResponse(body: string): Response {
 }
 
 describe('events', () => {
-  const oneEvent = 'event: engine.thinking\ndata: {"type":"engine.thinking","color":"W"}\n\n';
+  const oneEvent = 'event: engine.thinking\ndata: {"type":"engine.thinking","gameId":"g1","color":"W"}\n\n';
 
   it('путь сессии, ключ приложения, accept и signal', async () => {
     const f = fakeFetch(() => sseResponse(oneEvent));
@@ -262,5 +263,203 @@ describe('fakeFetch', () => {
   it('пустой список обработчиков — внятная ошибка', async () => {
     const f = fakeFetch([]);
     await expect(f.fetch('u1')).rejects.toThrow('fakeFetch: no handlers provided');
+  });
+});
+
+// Ограничение по времени (B3): у каждой операции свой потолок, внешний signal отменяет вызов.
+// Время ненастоящее: fake timers только для setTimeout/clearTimeout, ожидания через setImmediate.
+const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
+
+// fetch, который никогда не отвечает сам, но реагирует на signal, как настоящий.
+function hangingFetch(): { fetch: typeof globalThis.fetch; signals: (AbortSignal | undefined)[] } {
+  const signals: (AbortSignal | undefined)[] = [];
+  const fetchFn = (_input: string | URL | Request, init?: RequestInit) =>
+    new Promise<Response>((_resolve, reject) => {
+      const signal = init?.signal ?? undefined;
+      signals.push(signal);
+      signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
+    });
+  return { fetch: fetchFn as unknown as typeof globalThis.fetch, signals };
+}
+
+type Settled = { done: boolean; value?: unknown };
+
+// Подписка на исход сразу при вызове: отказ во время перемотки таймеров не становится необработанным.
+function capture(promise: Promise<unknown>): Settled {
+  const out: Settled = { done: false };
+  const settle = (value: unknown): void => {
+    out.done = true;
+    out.value = value;
+  };
+  promise.then(settle, settle);
+  return out;
+}
+
+// Ждёт исхода не дольше заданного числа оборотов цикла событий.
+async function settleWithin(out: Settled, ticks = 20): Promise<Settled> {
+  for (let i = 0; i < ticks && !out.done; i++) await tick();
+  return out;
+}
+
+type TimedRoute = {
+  name: string;
+  op: keyof typeof CLIENT_TIMEOUTS;
+  run: (c: ReturnType<typeof createClient>, signal?: AbortSignal) => Promise<unknown>;
+};
+
+const timedRoutes: TimedRoute[] = [
+  { name: 'createSession', op: 'create_session', run: (c, signal) => c.createSession({ signal }) },
+  { name: 'newGame', op: 'session_new_game', run: (c, signal) => c.newGame('s1', seats, { signal }) },
+  { name: 'createGame', op: 'create_game', run: (c, signal) => c.createGame(seats, { signal }) },
+  { name: 'getGame', op: 'get_game', run: (c, signal) => c.getGame('g1', { signal }) },
+  { name: 'listGames', op: 'list_games', run: (c, signal) => c.listGames({ signal }) },
+  { name: 'play', op: 'play', run: (c, signal) => c.play('g1', { coord: 'D4' }, { signal }) },
+  { name: 'pass', op: 'pass', run: (c, signal) => c.pass('g1', {}, { signal }) },
+  { name: 'resign', op: 'resign', run: (c, signal) => c.resign('g1', { color: 'B' }, { signal }) },
+  { name: 'undo', op: 'undo', run: (c, signal) => c.undo('g1', {}, { signal }) },
+  { name: 'correct', op: 'correct_last_move', run: (c, signal) => c.correct('g1', { coord: 'D4' }, { signal }) },
+  { name: 'setRank', op: 'set_rank', run: (c, signal) => c.setRank('g1', { color: 'W', rank: '10k' }, { signal }) },
+  { name: 'analyze', op: 'analyze', run: (c, signal) => c.analyze('g1', {}, { signal }) },
+  { name: 'score', op: 'score', run: (c, signal) => c.score('g1', { signal }) },
+  { name: 'ascii', op: 'render', run: (c, signal) => c.ascii('g1', { signal }) },
+  { name: 'sgf', op: 'sgf', run: (c, signal) => c.sgf('g1', { signal }) },
+];
+
+describe('таймауты клиента', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('умолчания: play, pass, correct и новая партия 15 с, analyze 15 с, score 25 с, остальные 5 с', () => {
+    expect(CLIENT_TIMEOUTS).toEqual({
+      create_session: 5_000,
+      session_new_game: 15_000,
+      create_game: 15_000,
+      get_game: 5_000,
+      list_games: 5_000,
+      play: 15_000,
+      pass: 15_000,
+      resign: 5_000,
+      undo: 5_000,
+      correct_last_move: 15_000,
+      set_rank: 5_000,
+      analyze: 15_000,
+      score: 25_000,
+      render: 5_000,
+      sgf: 5_000,
+    });
+    expect(timedRoutes.map((r) => r.op).sort()).toEqual(Object.keys(CLIENT_TIMEOUTS).sort());
+  });
+
+  it.each(timedRoutes)('$name: без ответа — ClientTimeoutError ровно по своему умолчанию', async ({ op, run }) => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const f = hangingFetch();
+    const client = createClient({ baseUrl: 'http://api.test', appKey: 'k', fetch: f.fetch });
+    const pending = capture(run(client));
+    const ms = CLIENT_TIMEOUTS[op];
+    await vi.advanceTimersByTimeAsync(ms - 1);
+    expect((await settleWithin(pending, 5)).done).toBe(false);
+    expect(f.signals[0]?.aborted).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    const out = await settleWithin(pending);
+    expect(out.done).toBe(true);
+    expect(out.value).toBeInstanceOf(ClientTimeoutError);
+    expect(out.value).toMatchObject({ name: 'ClientTimeoutError', code: 'client_timeout', operation: op, timeoutMs: ms });
+    // Сигнал fetch тоже отменён: соединение не висит после таймаута.
+    expect(f.signals[0]?.aborted).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('timeoutMs из опций переопределяет умолчание только своей операции', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const f = hangingFetch();
+    const client = createClient({ baseUrl: 'http://api.test', appKey: 'k', fetch: f.fetch, timeoutMs: { get_game: 100 } });
+    const game = capture(client.getGame('g1'));
+    const list = capture(client.listGames());
+    await vi.advanceTimersByTimeAsync(100);
+    expect((await settleWithin(game)).value).toMatchObject({ code: 'client_timeout', operation: 'get_game', timeoutMs: 100 });
+    expect((await settleWithin(list, 5)).done).toBe(false);
+    await vi.advanceTimersByTimeAsync(4_900);
+    expect((await settleWithin(list)).value).toMatchObject({ code: 'client_timeout', operation: 'list_games', timeoutMs: 5_000 });
+  });
+
+  it('таймаут покрывает и чтение тела ответа', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    // Заголовки пришли сразу, тело не приходит никогда и на signal не реагирует.
+    const f = fakeFetch(() => new Response(new ReadableStream({ start() {} }), { status: 200 }));
+    const client = createClient({ baseUrl: 'http://api.test', appKey: 'k', fetch: f.fetch, timeoutMs: { get_game: 50, render: 50 } });
+    const game = capture(client.getGame('g1'));
+    const ascii = capture(client.ascii('g1'));
+    await vi.advanceTimersByTimeAsync(50);
+    expect((await settleWithin(game)).value).toMatchObject({ code: 'client_timeout', operation: 'get_game' });
+    expect((await settleWithin(ascii)).value).toMatchObject({ code: 'client_timeout', operation: 'render' });
+  });
+
+  it('таймаут покрывает чтение тела ошибки', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const f = fakeFetch(() => new Response(new ReadableStream({ start() {} }), { status: 500 }));
+    const client = createClient({ baseUrl: 'http://api.test', appKey: 'k', fetch: f.fetch, timeoutMs: { get_game: 50 } });
+    const game = capture(client.getGame('g1'));
+    await vi.advanceTimersByTimeAsync(50);
+    expect((await settleWithin(game)).value).toMatchObject({ code: 'client_timeout', operation: 'get_game' });
+  });
+
+  it('внешний signal: отмена отличима от таймаута и приходит с причиной сигнала', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const f = hangingFetch();
+    const client = createClient({ baseUrl: 'http://api.test', appKey: 'k', fetch: f.fetch });
+    const ac = new AbortController();
+    const pending = capture(client.play('g1', { coord: 'D4' }, { signal: ac.signal }));
+    await tick();
+    const reason = new Error('user left');
+    ac.abort(reason);
+    const out = await settleWithin(pending);
+    expect(out.done).toBe(true);
+    expect(out.value).toBe(reason);
+    expect(out.value).not.toBeInstanceOf(ClientTimeoutError);
+    expect(f.signals[0]?.aborted).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('внешний signal отменяет и чтение тела, которое на signal не реагирует', async () => {
+    const f = fakeFetch(() => new Response(new ReadableStream({ start() {} }), { status: 200 }));
+    const client = createClient({ baseUrl: 'http://api.test', appKey: 'k', fetch: f.fetch });
+    const ac = new AbortController();
+    const pending = capture(client.getGame('g1', { signal: ac.signal }));
+    await tick();
+    ac.abort();
+    const out = await settleWithin(pending);
+    expect(out.done).toBe(true);
+    expect((out.value as Error).name).toBe('AbortError');
+  });
+
+  it('уже отменённый signal: fetch не вызывается', async () => {
+    const f = hangingFetch();
+    const client = createClient({ baseUrl: 'http://api.test', appKey: 'k', fetch: f.fetch });
+    const ac = new AbortController();
+    ac.abort();
+    const out = await settleWithin(capture(client.getGame('g1', { signal: ac.signal })));
+    expect(out.done).toBe(true);
+    expect((out.value as Error).name).toBe('AbortError');
+    expect(f.signals).toHaveLength(0);
+  });
+
+  it('ответ до дедлайна снимает таймер', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const f = fakeFetch(() => Response.json(state));
+    const client = createClient({ baseUrl: 'http://api.test', appKey: 'k', fetch: f.fetch });
+    expect((await client.getGame('g1')).id).toBe('g1');
+    expect(vi.getTimerCount()).toBe(0);
+    const failing = fakeFetch(() => Response.json({ error: { code: 'not_found', message: 'no game' } }, { status: 404 }));
+    const clientFailing = createClient({ baseUrl: 'http://api.test', appKey: 'k', fetch: failing.fetch });
+    await expect(clientFailing.getGame('g1')).rejects.toBeInstanceOf(ApiError);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('ClientTimeoutError: английское сообщение для разработчика, код client_timeout', () => {
+    const err = new ClientTimeoutError('score', 25_000);
+    expect(err).toBeInstanceOf(Error);
+    expect(err.message).toBe('client timeout: score did not finish in 25000 ms');
+    expect(err.code).toBe('client_timeout');
   });
 });

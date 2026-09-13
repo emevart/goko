@@ -10,11 +10,11 @@ describe('EventBus', () => {
     bus.subscribe('game:g2', () => {
       throw new Error('wrong channel');
     });
-    bus.emit('game:g1', { type: 'engine.thinking', color: 'W' });
-    expect(got).toEqual([{ type: 'engine.thinking', color: 'W' }]);
+    bus.emit('game:g1', { type: 'engine.thinking', gameId: 'g1', color: 'W' });
+    expect(got).toEqual([{ type: 'engine.thinking', gameId: 'g1', color: 'W' }]);
     expect(bus.count('game:g1')).toBe(1);
     off();
-    bus.emit('game:g1', { type: 'engine.thinking', color: 'B' });
+    bus.emit('game:g1', { type: 'engine.thinking', gameId: 'g1', color: 'B' });
     expect(got).toHaveLength(1);
     expect(bus.count('game:g1')).toBe(0);
   });

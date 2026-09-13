@@ -26,9 +26,16 @@ export const ERROR_TEXT: Record<ErrorCode, string> = {
   not_found: 'такой партии или сессии нет',
   bad_request: 'запрос не по форме',
   limit_reached: 'сейчас слишком много активных сессий',
+  rate_limited: 'слишком много запросов, подожди немного',
+  too_many_games: 'сейчас идёт слишком много партий, попробуй позже',
   unauthorized: 'нет доступа',
   internal: 'на сервере что-то сломалось',
 };
+
+// Коды, которые рождает клиент, а не сервер: в ERROR_CODES их нет.
+export const CLIENT_ERROR_TEXT = {
+  client_timeout: 'сервер не отвечает',
+} as const;
 
 // Своё свойство, а не цепочка прототипов: код события — произвольная строка ('constructor').
 const own = <T extends object>(table: T, key: unknown): key is keyof T => typeof key === 'string' && Object.hasOwn(table, key);
@@ -36,5 +43,6 @@ const own = <T extends object>(table: T, key: unknown): key is keyof T => typeof
 // code — строка, потому что код события error в схеме не перечисление: незнакомый код даёт текст internal.
 export function humanText(code: string, details?: Record<string, unknown>): string {
   if (code === 'illegal_move' && own(ILLEGAL_REASON_TEXT, details?.reason)) return ILLEGAL_REASON_TEXT[details.reason];
+  if (own(CLIENT_ERROR_TEXT, code)) return CLIENT_ERROR_TEXT[code];
   return own(ERROR_TEXT, code) ? ERROR_TEXT[code] : ERROR_TEXT.internal;
 }

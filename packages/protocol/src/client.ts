@@ -1,6 +1,6 @@
 // Типизированный клиент game-server. Им пользуются voice-agent, web, mcp-server и scripts/.
 import type { z } from 'zod';
-import { HttpError, apiErrorFromBody } from './errors.ts';
+import { ClientTimeoutError, HttpError, apiErrorFromBody } from './errors.ts';
 import { GameEvent } from './events.ts';
 import { GameState, Result } from './game.ts';
 import {
@@ -22,11 +22,38 @@ import {
 } from './ops.ts';
 import { parseSseStream } from './sse.ts';
 
+// Потолок ожидания ответа по операциям (раздел 5 спеки), в миллисекундах. Операции, которые
+// ждут ответ движка (play, pass, correct_last_move, новая партия), и analyze — 15 с: выше 8 с
+// ожидания хода и 10 с бюджета analyze на сервере; score — 25 с при бюджете сервера 20 с.
+export const CLIENT_TIMEOUTS = {
+  create_session: 5_000,
+  session_new_game: 15_000,
+  create_game: 15_000,
+  get_game: 5_000,
+  list_games: 5_000,
+  play: 15_000,
+  pass: 15_000,
+  resign: 5_000,
+  undo: 5_000,
+  correct_last_move: 15_000,
+  set_rank: 5_000,
+  analyze: 15_000,
+  score: 25_000,
+  render: 5_000,
+  sgf: 5_000,
+} as const satisfies Record<string, number>;
+export type ClientOperation = keyof typeof CLIENT_TIMEOUTS;
+
 export type ClientOptions = {
   baseUrl: string; // https://<WEB_HOST> или http://127.0.0.1:8787
   appKey: string;
   fetch?: typeof globalThis.fetch;
+  // Переопределение потолка отдельных операций; остальные берут CLIENT_TIMEOUTS.
+  timeoutMs?: Partial<Record<ClientOperation, number>>;
 };
+
+// Отмена вызова снаружи: исключение — причина сигнала (по умолчанию AbortError), не ClientTimeoutError.
+export type CallOptions = { signal?: AbortSignal };
 
 export type EventsTarget = { sessionId: string } | { gameId: string };
 
@@ -40,33 +67,74 @@ export function createClient(opts: ClientOptions) {
   const base = opts.baseUrl.replace(/\/+$/, '');
   const enc = encodeURIComponent;
 
-  async function call<T extends z.ZodType>(method: 'GET' | 'POST', path: string, schema: T, body?: unknown): Promise<z.output<T>> {
-    const res = await fetchFn(`${base}${path}`, {
-      method,
-      headers: { 'content-type': 'application/json', 'x-app-key': opts.appKey },
-      body: JSON.stringify(body),
+  // Вызов целиком (заголовки и чтение тела) ограничен потолком операции и внешним сигналом.
+  // Гонка с промисом отмены, а не только signal в fetch: тело, которое не приходит и на signal
+  // не реагирует, иначе держало бы вызов вечно.
+  async function bounded<T>(op: ClientOperation, callOpts: CallOptions | undefined, work: (signal: AbortSignal) => Promise<T>): Promise<T> {
+    const external = callOpts?.signal;
+    external?.throwIfAborted();
+    const ms = opts.timeoutMs?.[op] ?? CLIENT_TIMEOUTS[op];
+    const timeoutError = new ClientTimeoutError(op, ms);
+    const timer = new AbortController();
+    const signal = external ? AbortSignal.any([external, timer.signal]) : timer.signal;
+    let onAbort = (): void => {};
+    const aborted = new Promise<never>((_resolve, reject) => {
+      onAbort = () => reject(timer.signal.aborted ? timeoutError : signal.reason);
+      signal.addEventListener('abort', onAbort, { once: true });
     });
-    if (!res.ok) throw await toError(res);
-    // Успешный ответ, который не разобрался, — тоже HttpError: у клиента ровно два класса
-    // ошибок (ApiError и HttpError), голый SyntaxError или ZodError наружу не выпускаем.
-    const raw = await res.text();
-    let json: unknown;
+    const handle = setTimeout(() => timer.abort(timeoutError), ms);
     try {
-      json = JSON.parse(raw);
-    } catch (cause) {
-      throw new HttpError(res.status, raw, { cause });
+      return await Promise.race([work(signal), aborted]);
+    } catch (e) {
+      if (timer.signal.aborted) throw timeoutError;
+      if (external?.aborted) throw external.reason;
+      throw e;
+    } finally {
+      clearTimeout(handle);
+      signal.removeEventListener('abort', onAbort);
     }
-    const parsed = schema.safeParse(json);
-    if (!parsed.success) throw new HttpError(res.status, raw, { cause: parsed.error });
-    return parsed.data;
   }
 
-  async function text(path: string): Promise<string> {
-    const res = await fetchFn(`${base}${path}`, { headers: { 'x-app-key': opts.appKey } });
-    if (!res.ok) throw await toError(res);
-    return res.text();
+  function call<T extends z.ZodType>(
+    op: ClientOperation,
+    method: 'GET' | 'POST',
+    path: string,
+    schema: T,
+    body: unknown,
+    callOpts: CallOptions | undefined,
+  ): Promise<z.output<T>> {
+    return bounded(op, callOpts, async (signal) => {
+      const res = await fetchFn(`${base}${path}`, {
+        method,
+        headers: { 'content-type': 'application/json', 'x-app-key': opts.appKey },
+        body: JSON.stringify(body),
+        signal,
+      });
+      if (!res.ok) throw await toError(res);
+      // Успешный ответ, который не разобрался, — тоже HttpError: у клиента классы ошибок
+      // ApiError, HttpError и ClientTimeoutError, голый SyntaxError или ZodError наружу не выпускаем.
+      const raw = await res.text();
+      let json: unknown;
+      try {
+        json = JSON.parse(raw);
+      } catch (cause) {
+        throw new HttpError(res.status, raw, { cause });
+      }
+      const parsed = schema.safeParse(json);
+      if (!parsed.success) throw new HttpError(res.status, raw, { cause: parsed.error });
+      return parsed.data;
+    });
   }
 
+  function text(op: ClientOperation, path: string, callOpts: CallOptions | undefined): Promise<string> {
+    return bounded(op, callOpts, async (signal) => {
+      const res = await fetchFn(`${base}${path}`, { headers: { 'x-app-key': opts.appKey }, signal });
+      if (!res.ok) throw await toError(res);
+      return res.text();
+    });
+  }
+
+  // Поток событий без потолка: он живёт, пока его не закроет signal или сервер.
   // onUnknownEvent — необязательный крючок для вызывающего: событие не по схеме иначе
   // отбрасывается молча, и расхождение версий сервера и клиента остаётся невидимым.
   async function* events(
@@ -92,21 +160,23 @@ export function createClient(opts: ClientOptions) {
   }
 
   return {
-    createSession: () => call('POST', '/api/sessions', CreateSessionResponse, {}),
-    newGame: (sessionId: string, req: NewGameRequest) => call('POST', `/api/sessions/${enc(sessionId)}/games`, NewGameResponse, req),
-    createGame: (req: NewGameRequest) => call('POST', '/api/games', NewGameResponse, req),
-    getGame: (id: string) => call('GET', `/api/games/${enc(id)}`, GameState),
-    listGames: () => call('GET', '/api/games', ListGamesResponse),
-    play: (id: string, req: PlayRequest) => call('POST', `/api/games/${enc(id)}/play`, PlayResponse, req),
-    pass: (id: string, req: PassRequest = {}) => call('POST', `/api/games/${enc(id)}/pass`, PlayResponse, req),
-    resign: (id: string, req: ResignRequest) => call('POST', `/api/games/${enc(id)}/resign`, StateResponse, req),
-    undo: (id: string, req: UndoRequest = {}) => call('POST', `/api/games/${enc(id)}/undo`, UndoResponse, req),
-    correct: (id: string, req: CorrectRequest) => call('POST', `/api/games/${enc(id)}/correct`, PlayResponse, req),
-    setRank: (id: string, req: SetRankRequest) => call('POST', `/api/games/${enc(id)}/rank`, StateResponse, req),
-    analyze: (id: string, req: AnalyzeRequest = {}) => call('POST', `/api/games/${enc(id)}/analyze`, Analysis, req),
-    score: (id: string) => call('POST', `/api/games/${enc(id)}/score`, Result, {}),
-    ascii: (id: string) => text(`/api/games/${enc(id)}/ascii`),
-    sgf: (id: string) => text(`/api/games/${enc(id)}/sgf`),
+    createSession: (o?: CallOptions) => call('create_session', 'POST', '/api/sessions', CreateSessionResponse, {}, o),
+    newGame: (sessionId: string, req: NewGameRequest, o?: CallOptions) =>
+      call('session_new_game', 'POST', `/api/sessions/${enc(sessionId)}/games`, NewGameResponse, req, o),
+    createGame: (req: NewGameRequest, o?: CallOptions) => call('create_game', 'POST', '/api/games', NewGameResponse, req, o),
+    getGame: (id: string, o?: CallOptions) => call('get_game', 'GET', `/api/games/${enc(id)}`, GameState, undefined, o),
+    listGames: (o?: CallOptions) => call('list_games', 'GET', '/api/games', ListGamesResponse, undefined, o),
+    play: (id: string, req: PlayRequest, o?: CallOptions) => call('play', 'POST', `/api/games/${enc(id)}/play`, PlayResponse, req, o),
+    pass: (id: string, req: PassRequest = {}, o?: CallOptions) => call('pass', 'POST', `/api/games/${enc(id)}/pass`, PlayResponse, req, o),
+    resign: (id: string, req: ResignRequest, o?: CallOptions) => call('resign', 'POST', `/api/games/${enc(id)}/resign`, StateResponse, req, o),
+    undo: (id: string, req: UndoRequest = {}, o?: CallOptions) => call('undo', 'POST', `/api/games/${enc(id)}/undo`, UndoResponse, req, o),
+    correct: (id: string, req: CorrectRequest, o?: CallOptions) =>
+      call('correct_last_move', 'POST', `/api/games/${enc(id)}/correct`, PlayResponse, req, o),
+    setRank: (id: string, req: SetRankRequest, o?: CallOptions) => call('set_rank', 'POST', `/api/games/${enc(id)}/rank`, StateResponse, req, o),
+    analyze: (id: string, req: AnalyzeRequest = {}, o?: CallOptions) => call('analyze', 'POST', `/api/games/${enc(id)}/analyze`, Analysis, req, o),
+    score: (id: string, o?: CallOptions) => call('score', 'POST', `/api/games/${enc(id)}/score`, Result, {}, o),
+    ascii: (id: string, o?: CallOptions) => text('render', `/api/games/${enc(id)}/ascii`, o),
+    sgf: (id: string, o?: CallOptions) => text('sgf', `/api/games/${enc(id)}/sgf`, o),
     events,
   };
 }

@@ -4,10 +4,17 @@ import { z } from 'zod';
 export const BoardSize = z.union([z.literal(9), z.literal(13), z.literal(19)]);
 export type BoardSize = z.infer<typeof BoardSize>;
 
+// Коми только полуцелое в [0.5, 13.5]: ничьей нет, итог счёта всегда с победителем.
+export const Komi = z
+  .number()
+  .min(0.5)
+  .max(13.5)
+  .refine((k) => Number.isInteger(k - 0.5), { message: 'komi must be a half-integer' });
+
 export const GameSettings = z.object({
   boardSize: BoardSize.default(13),
   rules: z.literal('chinese').default('chinese'),
-  komi: z.number().default(7.5),
+  komi: Komi.default(7.5),
 });
 export type GameSettings = z.infer<typeof GameSettings>;
 

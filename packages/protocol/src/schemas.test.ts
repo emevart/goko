@@ -31,6 +31,7 @@ import {
   GameState,
   GameStatus,
   GameSummary,
+  Komi,
   Move,
   RANKS,
   Rank,
@@ -92,6 +93,20 @@ describe('схемы партии', () => {
     expect(() => GameSettings.parse({ boardSize: 12 })).toThrow();
     expect(() => GameSettings.parse({ rules: 'japanese' })).toThrow();
     expect(() => GameSettings.parse({ komi: '7.5' })).toThrow();
+  });
+
+  it('коми только полуцелое в [0.5, 13.5]: ничьей нет', () => {
+    for (const komi of [0.5, 6.5, 7.5, 13.5]) expect(Komi.parse(komi), String(komi)).toBe(komi);
+    for (const komi of [0, 7, 14, 13.75, 7.25, -0.5, 14.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(() => Komi.parse(komi), String(komi)).toThrow();
+    }
+    // Через внешние схемы: настройки партии, запрос новой партии, запрос движку.
+    expect(() => GameSettings.parse({ komi: 7 })).toThrow();
+    expect(() => GameState.parse({ ...state, settings: { ...state.settings, komi: 0 } })).toThrow();
+    const seats = { black: { controller: 'human' }, white: { controller: 'engine' } };
+    expect(() => NewGameRequest.parse({ ...seats, settings: { komi: 6 } })).toThrow();
+    expect(() => NewGameRequest.parse({ ...seats, settings: { komi: 14.5 } })).toThrow();
+    expect(() => EnginePositionRequest.parse({ boardSize: 13, rules: 'chinese', komi: 7, moves: [] })).toThrow();
   });
 
   it('BoardSize — только 9, 13, 19', () => {
@@ -246,6 +261,9 @@ describe('операции', () => {
     expect(PlayRequest.parse({ coord: 'D4' })).toEqual({ coord: 'D4', waitForReply: true, via: 'api' });
     expect(() => PlayRequest.parse({})).toThrow();
     expect(() => PlayRequest.parse({ coord: '' })).toThrow();
+    // Координата не длиннее восьми символов: 'pass' и 'T19' влезают, мусор нет.
+    expect(PlayRequest.parse({ coord: 'A'.repeat(8) }).coord).toBe('AAAAAAAA');
+    expect(() => PlayRequest.parse({ coord: 'A'.repeat(9) })).toThrow();
     expect(
       PlayRequest.parse({ coord: 'D4', color: 'W', expectedRevision: 3, waitForReply: false, via: 'voice' }),
     ).toEqual({ coord: 'D4', color: 'W', expectedRevision: 3, waitForReply: false, via: 'voice' });
@@ -333,6 +351,9 @@ describe('операции', () => {
 
     expect(CorrectRequest.parse({ coord: 'D4' })).toEqual({ coord: 'D4', waitForReply: true, via: 'api' });
     expect(() => CorrectRequest.parse({})).toThrow();
+    expect(() => CorrectRequest.parse({ coord: '' })).toThrow();
+    expect(CorrectRequest.parse({ coord: 'A'.repeat(8) }).coord).toBe('AAAAAAAA');
+    expect(() => CorrectRequest.parse({ coord: 'A'.repeat(9) })).toThrow();
     expect(() => CorrectRequest.parse({ coord: 'D4', via: 'sms' })).toThrow();
 
     expect(SetRankRequest.parse({ color: 'W', rank: '3d' })).toEqual({ color: 'W', rank: '3d' });
@@ -406,8 +427,8 @@ describe('операции', () => {
 });
 
 describe('ошибки', () => {
-  it('ровно пятнадцать кодов', () => {
-    expect(ERROR_CODES).toHaveLength(15);
+  it('ровно семнадцать кодов', () => {
+    expect(ERROR_CODES).toHaveLength(17);
     expect([...ERROR_CODES].sort()).toEqual(
       [
         'bad_request',
@@ -421,8 +442,10 @@ describe('ошибки', () => {
         'not_found',
         'not_your_turn',
         'nothing_to_undo',
+        'rate_limited',
         'retries_exhausted',
         'revision_conflict',
+        'too_many_games',
         'unauthorized',
         'unsupported_controller',
       ].sort(),
@@ -442,12 +465,14 @@ describe('ошибки', () => {
       nothing_to_undo: 409,
       revision_conflict: 409,
       limit_reached: 429,
+      rate_limited: 429,
+      too_many_games: 429,
       internal: 500,
       engine_busy: 503,
       engine_unavailable: 503,
       retries_exhausted: 503,
     });
-    expect(Object.keys(ERROR_STATUS)).toHaveLength(15);
+    expect(Object.keys(ERROR_STATUS)).toHaveLength(17);
     for (const code of ERROR_CODES) expect(ERROR_STATUS[code], code).toBeGreaterThanOrEqual(400);
   });
 
@@ -524,7 +549,7 @@ describe('ошибки', () => {
 
 describe('события', () => {
   it('discriminated union по type', () => {
-    expect(GameEvent.parse({ type: 'engine.thinking', color: 'W' })).toEqual({ type: 'engine.thinking', color: 'W' });
+    expect(GameEvent.parse({ type: 'engine.thinking', gameId: 'g1', color: 'W' })).toEqual({ type: 'engine.thinking', gameId: 'g1', color: 'W' });
     expect(GameEvent.parse({ type: 'state.updated', state, cause: 'sync', by: 'system' }).type).toBe('state.updated');
     expect(() => GameEvent.parse({ type: 'state.updated', state, cause: 'tap', by: 'human' })).toThrow();
     expect(() => GameEvent.parse({ type: 'nope' })).toThrow();
@@ -552,12 +577,16 @@ describe('события', () => {
     expect(GameEvent.parse(finished)).toEqual(finished);
     expect(() => GameEvent.parse({ type: 'game.finished' })).toThrow();
 
-    const err = { type: 'error', code: 'engine_busy', message: 'занят' };
+    // engine.thinking и error несут gameId: по нему клиент сверяет событие с текущей партией.
+    const err = { type: 'error', gameId: 'g1', code: 'engine_busy', message: 'busy' };
     expect(GameEvent.parse(err)).toEqual(err);
-    expect(() => GameEvent.parse({ type: 'error', code: 'engine_busy' })).toThrow();
+    expect(() => GameEvent.parse({ type: 'error', gameId: 'g1', code: 'engine_busy' })).toThrow();
+    expect(() => GameEvent.parse({ type: 'error', code: 'engine_busy', message: 'busy' })).toThrow();
 
+    expect(GameEvent.parse({ type: 'engine.thinking', gameId: 'g1', color: 'B' })).toEqual({ type: 'engine.thinking', gameId: 'g1', color: 'B' });
     expect(() => GameEvent.parse({ type: 'engine.thinking' })).toThrow();
-    expect(() => GameEvent.parse({ type: 'engine.thinking', color: 'X' })).toThrow();
+    expect(() => GameEvent.parse({ type: 'engine.thinking', color: 'W' })).toThrow();
+    expect(() => GameEvent.parse({ type: 'engine.thinking', gameId: 'g1', color: 'X' })).toThrow();
     expect(() => GameEvent.parse({ type: 'state.updated', state, cause: 'play' })).toThrow();
     expect(() => GameEvent.parse({ type: 'state.updated', cause: 'play', by: 'human' })).toThrow();
     expect(() => GameEvent.parse({ type: 'state.updated', state, cause: 'play', by: 'human', via: 'sms' })).toThrow();

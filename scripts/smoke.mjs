@@ -446,7 +446,7 @@ async function slowClientShutdown({ port, ok, warn, fail, check }) {
     socket.pause(); // дальше клиент не читает: буферы сокета заполняются, запись сервера встаёт
     if (!check(opened, 'медленный клиент: поток открыт, клиент перестал читать')) return;
 
-    for (let i = 0; i < EVENTS; i++) bus.emit(`game:${state.id}`, { type: 'error', code: 'internal', message: PAD });
+    for (let i = 0; i < EVENTS; i++) bus.emit(`game:${state.id}`, { type: 'error', gameId: state.id, code: 'internal', message: PAD });
     const emittedBytes = EVENTS * PAD.length;
     await sleep(500);
 

@@ -795,7 +795,7 @@ describe('GameService: фоновые задачи, дедлайны и мьют
     const events = record(bus, `game:${g.state.id}`);
     await service.play(g.state.id, { coord: 'D4', waitForReply: false, via: 'api' });
     await untilTick(() => events.some((e) => e.type === 'error'));
-    expect(events.find((e) => e.type === 'error')).toEqual({ type: 'error', code: 'internal', message: 'internal server error' });
+    expect(events.find((e) => e.type === 'error')).toEqual({ type: 'error', gameId: g.state.id, code: 'internal', message: 'internal server error' });
     // Партия осталась на последнем удачно записанном состоянии.
     expect(service.get(g.state.id).moves).toHaveLength(1);
     await closeWithin(service);
@@ -814,7 +814,7 @@ describe('GameService: фоновые задачи, дедлайны и мьют
     const sessionEvents = record(bus, 'session:s1');
     await service.play(g.state.id, { coord: 'D4', waitForReply: false, via: 'api' });
     await untilTick(() => gameEvents.some((e) => e.type === 'error'));
-    const expected = { type: 'error', code: 'internal', message: 'internal server error' };
+    const expected = { type: 'error', gameId: g.state.id, code: 'internal', message: 'internal server error' };
     expect(gameEvents.filter((e) => e.type === 'error')).toEqual([expected]);
     expect(sessionEvents.filter((e) => e.type === 'error')).toEqual([expected]);
     expect(JSON.stringify([...gameEvents, ...sessionEvents])).not.toContain('abc.json');
@@ -839,7 +839,7 @@ describe('GameService: фоновые задачи, дедлайны и мьют
     const events = record(bus, `game:${g.state.id}`);
     await service.play(g.state.id, { coord: 'D4', waitForReply: false, via: 'api' });
     await untilTick(() => events.some((e) => e.type === 'error'));
-    expect(events.find((e) => e.type === 'error')).toEqual({ type: 'error', code: 'engine_unavailable', message: 'engine is unavailable' });
+    expect(events.find((e) => e.type === 'error')).toEqual({ type: 'error', gameId: g.state.id, code: 'engine_unavailable', message: 'engine is unavailable' });
     expect(lines.some((l) => l.includes('ECONNREFUSED 10.0.0.7:8788'))).toBe(true);
     await vi.advanceTimersByTimeAsync(20);
     await untilTick(() => service.get(g.state.id).moves.length === 2);
@@ -1545,7 +1545,7 @@ describe('GameService: фоновые задачи, дедлайны и мьют
     await untilTick(() => playState.settled);
     const res = await playing;
     expect(res.reply).toBeUndefined();
-    expect(events.filter((e) => e.type === 'error')).toEqual([{ type: 'error', code: 'internal', message: 'internal server error' }]);
+    expect(events.filter((e) => e.type === 'error')).toEqual([{ type: 'error', gameId: id, code: 'internal', message: 'internal server error' }]);
 
     // Память и диск на одном и том же состоянии: ход человека есть, ответа движка нет.
     expect(service.get(id).moves.map((m) => m.coord)).toEqual(['D4']);
@@ -1606,7 +1606,7 @@ describe('GameService: фоновые задачи, дедлайны и мьют
     await service.pass(id, { waitForReply: false, via: 'api' });
     await service.pass(id, { waitForReply: false, via: 'api' });
     await untilTick(() => events.some((e) => e.type === 'error'));
-    expect(events.find((e) => e.type === 'error')).toEqual({ type: 'error', code: 'internal', message: 'internal server error' });
+    expect(events.find((e) => e.type === 'error')).toEqual({ type: 'error', gameId: id, code: 'internal', message: 'internal server error' });
     expect(service.get(id).status).toBe('playing');
     expect((await real.load())[0]?.status).toBe('playing');
     await vi.advanceTimersByTimeAsync(1000);
@@ -1637,7 +1637,7 @@ describe('GameService: фоновые задачи, дедлайны и мьют
     const settled = track(playing);
     await untilTick(() => settled.settled);
     expect((await playing).replyTimedOut).toBe(true);
-    expect(events.filter((e) => e.type === 'error')).toEqual([{ type: 'error', code: 'internal', message: 'internal server error' }]);
+    expect(events.filter((e) => e.type === 'error')).toEqual([{ type: 'error', gameId: id, code: 'internal', message: 'internal server error' }]);
     await vi.advanceTimersByTimeAsync(1000);
     await untilTick(() => service.get(id).moves.length === 2);
     expect(service.get(id).moves.map((m) => m.coord)).toEqual(['D4', 'E5']);
@@ -1825,8 +1825,8 @@ describe('GameService: серия повторов фоновой задачи',
     }
     await untilTick(() => errorsOf(events).length === 6);
     const errors = errorsOf(events);
-    expect(errors.slice(0, 5)).toEqual(new Array(5).fill({ type: 'error', code: 'engine_unavailable', message: 'engine is unreachable' }));
-    expect(errors[5]).toEqual({ type: 'error', code: 'retries_exhausted', message: RETRIES_EXHAUSTED_MESSAGE });
+    expect(errors.slice(0, 5)).toEqual(new Array(5).fill({ type: 'error', gameId: id, code: 'engine_unavailable', message: 'engine is unreachable' }));
+    expect(errors[5]).toEqual({ type: 'error', gameId: id, code: 'retries_exhausted', message: RETRIES_EXHAUSTED_MESSAGE });
     expect(RETRIES_EXHAUSTED_MESSAGE).toMatch(/^[\x20-\x7e]+$/);
     expect(logs.filter((l) => l.includes('gave up'))).toHaveLength(1);
     // Пауз больше нет, и часы, сдвинутые на десять минут, не поднимают движок.
@@ -2044,7 +2044,7 @@ describe('GameService: серия повторов фоновой задачи',
     await untilTick(() => f.calls.length === 1);
     await vi.advanceTimersByTimeAsync(1);
     await untilTick(() => errorsOf(events).length === 1);
-    expect(errorsOf(events)).toEqual([{ type: 'error', code: 'engine_unavailable', message: 'engine is unreachable' }]);
+    expect(errorsOf(events)).toEqual([{ type: 'error', gameId: g.state.id, code: 'engine_unavailable', message: 'engine is unreachable' }]);
     expect(logs.filter((l) => l.startsWith('[!] engine:') && l.includes(leak))).toHaveLength(1);
   });
 

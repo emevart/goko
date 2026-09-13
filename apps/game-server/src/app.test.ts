@@ -600,13 +600,13 @@ describe('createApp: SSE, heartbeat и остановка', () => {
     const reader = streamOf(res);
     await readUntil(reader, (t) => t.includes('"cause":"sync"'));
     for (let i = 0; i < 20; i++) {
-      bus.emit(`game:${state.id}`, { type: 'engine.thinking', color: i % 2 === 0 ? 'B' : 'W' });
+      bus.emit(`game:${state.id}`, { type: 'engine.thinking', gameId: state.id, color: i % 2 === 0 ? 'B' : 'W' });
       await readUntil(reader, (t) => t.includes('engine.thinking'));
     }
     await untilTick(() => vi.getTimerCount() === 1, 50);
     expect(vi.getTimerCount()).toBe(1);
     await vi.advanceTimersByTimeAsync(9_999);
-    bus.emit(`game:${state.id}`, { type: 'engine.thinking', color: 'B' });
+    bus.emit(`game:${state.id}`, { type: 'engine.thinking', gameId: state.id, color: 'B' });
     const beforePing = await readUntil(reader, (t) => t.includes('engine.thinking'));
     expect(beforePing).not.toContain(': ping');
     await vi.advanceTimersByTimeAsync(10_000);
@@ -746,7 +746,7 @@ describe('createApp: пакет 12b — пределы, сессии, серия
     const reader = streamOf(await app.request(`/api/sessions/${session.id}/events`, { headers: { 'x-app-key': KEY } }));
     await untilTick(() => bus.count(`session:${session.id}`) === 2);
     t = 60_001;
-    bus.emit(`session:${session.id}`, { type: 'engine.thinking', color: 'B' });
+    bus.emit(`session:${session.id}`, { type: 'engine.thinking', gameId: 'g1', color: 'B' });
     const { done, value } = await reader.read();
     expect({ done, text: value ? decoder.decode(value) : '' }).toEqual({ done: true, text: '' });
     await untilTick(() => bus.count(`session:${session.id}`) === 0);
@@ -818,9 +818,9 @@ describe('createApp: пакет 12b — пределы, сессии, серия
     await readUntil(reader, (t) => t.includes('"cause":"sync"'));
     const channel = `game:${state.id}`;
     // Без чтения: очередь растёт синхронно, цикл потока между emit не успевает её разобрать.
-    for (let i = 0; i < SSE_QUEUE_LIMIT; i++) bus.emit(channel, { type: 'engine.thinking', color: 'B' });
+    for (let i = 0; i < SSE_QUEUE_LIMIT; i++) bus.emit(channel, { type: 'engine.thinking', gameId: state.id, color: 'B' });
     expect(bus.count(channel)).toBe(1);
-    bus.emit(channel, { type: 'engine.thinking', color: 'W' });
+    bus.emit(channel, { type: 'engine.thinking', gameId: state.id, color: 'W' });
     expect(bus.count(channel)).toBe(0);
     // Поток доходит до конца, не написав всей очереди.
     let text = '';
@@ -841,10 +841,10 @@ describe('createApp: пакет 12b — пределы, сессии, серия
     // Тело не читается ни разу: запись в поток стоит на обратном давлении.
     const res = await app.request(`/api/games/${state.id}/events`, { headers: { 'x-app-key': KEY } });
     // Сначала несколько событий, чтобы цикл встал в записи, потом поток сверх предела.
-    for (let i = 0; i < 5; i++) bus.emit(channel, { type: 'engine.thinking', color: 'B' });
+    for (let i = 0; i < 5; i++) bus.emit(channel, { type: 'engine.thinking', gameId: state.id, color: 'B' });
     await turns(20);
     expect(getEventListeners(closing.signal, 'abort')).toHaveLength(1);
-    for (let i = 0; i <= SSE_QUEUE_LIMIT; i++) bus.emit(channel, { type: 'engine.thinking', color: 'B' });
+    for (let i = 0; i <= SSE_QUEUE_LIMIT; i++) bus.emit(channel, { type: 'engine.thinking', gameId: state.id, color: 'B' });
     expect(bus.count(channel)).toBe(0);
     // Цикл потока снимает слушатель сигнала остановки только на выходе: значит, запись не держит его.
     await untilTick(() => getEventListeners(closing.signal, 'abort').length === 0);
@@ -859,7 +859,7 @@ describe('createApp: пакет 12b — пределы, сессии, серия
     const channel = `game:${state.id}`;
     const res = await app.request(`/api/games/${state.id}/events`, { headers: { 'x-app-key': KEY } });
     // Несколько событий: запись встаёт на обратном давлении, очередь ниже предела.
-    for (let i = 0; i < 5; i++) bus.emit(channel, { type: 'engine.thinking', color: 'B' });
+    for (let i = 0; i < 5; i++) bus.emit(channel, { type: 'engine.thinking', gameId: state.id, color: 'B' });
     await turns(20);
     expect(getEventListeners(closing.signal, 'abort')).toHaveLength(1);
     closing.abort();

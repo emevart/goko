@@ -85,8 +85,8 @@ type Waiter = { revision: number; resolve: (move: Move | null) => void };
 // ApiError уходит как есть: его message пишется в коде сервера по-английски и без путей, а
 // текст чужого исключения (клиент движка) лежит в cause и попадает только в лог.
 // Сырое исключение (fs, fetch) несёт путь или адрес, поэтому наружу — код и общий текст.
-function publicError(e: unknown, code: ErrorCode, message: string): GameEvent {
-  return e instanceof ApiError ? { type: 'error', code: e.code, message: e.message } : { type: 'error', code, message };
+function publicError(gameId: string, e: unknown, code: ErrorCode, message: string): GameEvent {
+  return e instanceof ApiError ? { type: 'error', gameId, code: e.code, message: e.message } : { type: 'error', gameId, code, message };
 }
 
 export class GameService {
@@ -557,7 +557,7 @@ export class GameService {
       if (!state || state.status !== 'playing' || !state.pendingEngineMove) return;
       const color = state.toPlay;
       const rank = state.seats[color].rank ?? DEFAULT_RANK;
-      this.emitGame(id, { type: 'engine.thinking', color });
+      this.emitGame(id, { type: 'engine.thinking', gameId: id, color });
       let reply: Awaited<ReturnType<Engine['genmove']>>;
       try {
         reply = await this.deps.engine.genmove({ ...this.engineRequest(state), rank, maxVisits: GENMOVE_VISITS });
@@ -604,13 +604,13 @@ export class GameService {
       this.failures.delete(id);
       this.gaveUp.add(id);
       this.log(`${logLine(detail)}; gave up after ${delays.length} retries`);
-      this.emitGame(id, { type: 'error', code: 'retries_exhausted', message: RETRIES_EXHAUSTED_MESSAGE });
+      this.emitGame(id, { type: 'error', gameId: id, code: 'retries_exhausted', message: RETRIES_EXHAUSTED_MESSAGE });
       this.releaseWaiters(id);
       return false;
     }
     this.failures.set(id, count);
     this.log(`${logLine(detail)}; retrying in ${retryMs} ms`);
-    this.emitGame(id, publicError(e, code, message));
+    this.emitGame(id, publicError(id, e, code, message));
     this.releaseWaiters(id);
     await this.sleep(retryMs);
     return true;

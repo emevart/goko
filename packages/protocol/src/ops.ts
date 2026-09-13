@@ -5,7 +5,7 @@
 // Схемы ответов и событий остаются нестрогими: старый клиент должен переживать
 // добавление полей на сервере.
 import { z } from 'zod';
-import { BoardSize, Color, GameState, GameSummary, Move, Rank, Seat, Session, Via } from './game.ts';
+import { BoardSize, Color, GameState, GameSummary, Komi, Move, Rank, Seat, Session, Via } from './game.ts';
 
 // settings описаны явно как optional, а не GameSettings.partial(): в zod 4 partial() сохраняет default,
 // и тогда клиент не смог бы отличить «не прислали» от «прислали 13».
@@ -13,7 +13,7 @@ export const NewGameRequest = z.strictObject({
   black: Seat,
   white: Seat,
   settings: z
-    .strictObject({ boardSize: BoardSize.optional(), rules: z.literal('chinese').optional(), komi: z.number().optional() })
+    .strictObject({ boardSize: BoardSize.optional(), rules: z.literal('chinese').optional(), komi: Komi.optional() })
     .optional(),
   waitForReply: z.boolean().default(true),
 });
@@ -27,7 +27,7 @@ export const NewGameResponse = z.object({
 export type NewGameResponse = z.infer<typeof NewGameResponse>;
 
 export const PlayRequest = z.strictObject({
-  coord: z.string().min(1),
+  coord: z.string().min(1).max(8),
   color: Color.optional(),
   expectedRevision: z.number().int().optional(),
   waitForReply: z.boolean().default(true),
@@ -59,7 +59,7 @@ export const UndoResponse = z.object({ state: GameState, removed: z.array(Move) 
 export type UndoResponse = z.infer<typeof UndoResponse>;
 
 export const CorrectRequest = z.strictObject({
-  coord: z.string().min(1),
+  coord: z.string().min(1).max(8),
   waitForReply: z.boolean().default(true),
   via: Via.default('api'),
 });

@@ -16,6 +16,10 @@ export const ERROR_CODES = [
   'not_found',
   'bad_request',
   'limit_reached',
+  // Лимит частоты запросов с одного адреса (D-0012); details.retryAfterSeconds и заголовок Retry-After.
+  'rate_limited',
+  // Слишком много незавершённых партий на сервере (D-0012); details.max.
+  'too_many_games',
   'unauthorized',
   'internal',
 ] as const;
@@ -33,6 +37,8 @@ export const ERROR_STATUS: Record<ErrorCode, number> = {
   nothing_to_undo: 409,
   revision_conflict: 409,
   limit_reached: 429,
+  rate_limited: 429,
+  too_many_games: 429,
   internal: 500,
   engine_busy: 503,
   engine_unavailable: 503,
@@ -77,6 +83,21 @@ export function apiErrorFromBody(body: string, status: number): ApiError | null 
     // не JSON: null, дальше по статусу
   }
   return null;
+}
+
+// Сервер не ответил за отведённое операции время (клиент, раздел 5 спеки). Код не из ERROR_CODES:
+// сервер его не отдаёт, его рождает клиент; текст для человека — humanText('client_timeout').
+export class ClientTimeoutError extends Error {
+  readonly code = 'client_timeout';
+  readonly operation: string;
+  readonly timeoutMs: number;
+
+  constructor(operation: string, timeoutMs: number) {
+    super(`client timeout: ${operation} did not finish in ${timeoutMs} ms`);
+    this.name = 'ClientTimeoutError';
+    this.operation = operation;
+    this.timeoutMs = timeoutMs;
+  }
 }
 
 // Ответ не по протоколу (прокси, падение): статус и сырое тело.

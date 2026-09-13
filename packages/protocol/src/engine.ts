@@ -1,6 +1,6 @@
 // Внутренний протокол game-server -> go-engine (раздел 8 спеки). Всё с точки зрения чёрных.
 import { z } from 'zod';
-import { Color, Rank } from './game.ts';
+import { Color, Komi, Rank } from './game.ts';
 
 export const EngineMove = z.tuple([Color, z.string()]);
 export type EngineMove = z.infer<typeof EngineMove>;
@@ -10,7 +10,7 @@ export type EngineMove = z.infer<typeof EngineMove>;
 export const EnginePositionRequest = z.strictObject({
   boardSize: z.number().int().min(5).max(19),
   rules: z.literal('chinese'),
-  komi: z.number(),
+  komi: Komi,
   moves: z.array(EngineMove),
 });
 export type EnginePositionRequest = z.infer<typeof EnginePositionRequest>;
