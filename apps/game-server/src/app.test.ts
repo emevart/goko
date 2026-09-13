@@ -910,9 +910,10 @@ describe('createApp: круг правок 1 пакета 12b', () => {
     const { state } = await client.createGame(HUMAN_ONLY);
     for (const route of ['analyze', 'score']) {
       const res = await app.request(`/api/games/${state.id}/${route}`, { method: 'POST', headers: { 'x-app-key': KEY, 'content-type': 'application/json' }, body: '{}' });
-      expect(res.status, route).toBe(400);
+      // bad_request go-engine — дефект нашей стороны: наружу internal, код go-engine только в тексте.
+      expect(res.status, route).toBe(500);
       const text = await res.text();
-      expect(JSON.parse(text), route).toEqual({ error: { code: 'bad_request', message: 'engine error: bad_request' } });
+      expect(JSON.parse(text), route).toEqual({ error: { code: 'internal', message: 'engine error: bad_request' } });
       expect(text).not.toContain('/opt');
     }
     // В лог — через redact, как и прочие чужие тексты.

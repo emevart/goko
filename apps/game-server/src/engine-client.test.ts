@@ -109,7 +109,7 @@ describe('createEngineClient', () => {
   it('4xx не повторяется и отдаётся как ApiError', async () => {
     const f = fakeFetch([() => Response.json({ error: { code: 'bad_request', message: 'схема' } }, { status: 400 })]);
     const engine = createEngineClient({ baseUrl: 'http://engine.test', engineKey: 'ek', fetch: f.fetch, retryDelayMs: 1 });
-    const failing = expect(engine.score(scoreReq)).rejects.toMatchObject({ code: 'bad_request' });
+    const failing = expect(engine.score(scoreReq)).rejects.toMatchObject({ name: 'ApiError', code: 'internal' });
     await drain();
     await failing;
     expect(f.calls).toHaveLength(1);
@@ -282,7 +282,7 @@ describe('createEngineClient', () => {
     await expect(garbage.genmove(req)).rejects.toMatchObject({ code: 'engine_unavailable' });
     expect(vi.getTimerCount()).toBe(0);
     const refused = createEngineClient({ baseUrl: 'http://engine.test', engineKey: 'ek', fetch: fakeFetch([() => Response.json({ error: { code: 'bad_request', message: 'схема' } }, { status: 400 })]).fetch });
-    await expect(refused.genmove(req)).rejects.toMatchObject({ code: 'bad_request' });
+    await expect(refused.genmove(req)).rejects.toMatchObject({ code: 'internal' });
     expect(vi.getTimerCount()).toBe(0);
   });
 
@@ -320,7 +320,7 @@ describe('createEngineClient', () => {
       leaks(err);
     });
 
-    it('go-engine ответил ошибкой по протоколу: код сохраняется, message и details чужие не проходят', async () => {
+    it('go-engine ответил ошибкой по протоколу: message и details чужие не проходят', async () => {
       const body = { error: { code: 'engine_busy', message: `KataGo failed: ${LEAK}`, details: { model: '/opt/katago/model.bin.gz' } } };
       const f = fakeFetch([() => Response.json(body, { status: 503 })]);
       const engine = createEngineClient({ baseUrl: 'http://engine.test', engineKey: 'ek', fetch: f.fetch, retryDelayMs: 1 });
@@ -333,10 +333,36 @@ describe('createEngineClient', () => {
       leaks(err);
       const refused = createEngineClient({ baseUrl: 'http://engine.test', engineKey: 'ek', fetch: fakeFetch([() => Response.json({ error: { code: 'bad_request', message: LEAK } }, { status: 400 })]).fetch });
       const err400 = await refused.analyze({ ...req }).catch((e: unknown) => e);
-      expect(err400).toMatchObject({ code: 'bad_request', message: 'engine error: bad_request' });
+      expect(err400).toMatchObject({ code: 'internal', message: 'engine error: bad_request' });
       leaks(err400);
     });
   });
+
+  // Наружу как свои проходят только занятость и недоступность движка: на них у агента есть реплика
+  // и они стоят повтора. unauthorized, bad_request и internal go-engine — ошибка нашей стороны
+  // (ключ, схема, отказ KataGo), и в публичном API это internal: чужой 401 или 400 выглядел бы как
+  // ошибка вызывающего. Код go-engine остаётся в message, исходная ошибка — в cause.
+  const engineCodes: [code: string, status: number, outCode: string, outStatus: number, calls: number][] = [
+    ['engine_busy', 503, 'engine_busy', 503, 2],
+    ['engine_unavailable', 503, 'engine_unavailable', 503, 2],
+    ['unauthorized', 401, 'internal', 500, 1],
+    ['bad_request', 400, 'internal', 500, 1],
+    ['internal', 500, 'internal', 500, 2],
+  ];
+  for (const [code, status, outCode, outStatus, calls] of engineCodes) {
+    it(`код go-engine ${code} (${status}) наружу как ${outCode}`, async () => {
+      const body = { error: { code, message: 'secret text' } };
+      const f = fakeFetch([() => Response.json(body, { status })]);
+      const engine = createEngineClient({ baseUrl: 'http://engine.test', engineKey: 'ek', fetch: f.fetch, retryDelayMs: 1 });
+      const p = engine.genmove(req).catch((e: unknown) => e);
+      await drain();
+      const err = await p;
+      expect(err).toMatchObject({ name: 'ApiError', code: outCode, status: outStatus, message: `engine error: ${code}` });
+      expect((err as Error & { details?: unknown }).details).toBeUndefined();
+      expect((err as Error).cause).toMatchObject({ code, message: 'secret text' });
+      expect(f.calls).toHaveLength(calls);
+    });
+  }
 
   it('константы по умолчанию: таймауты 10/15/30 с, пауза перед повтором 200 мс', () => {
     expect(ENGINE_TIMEOUTS).toEqual({ genmove: 10_000, analyze: 15_000, score: 30_000 });

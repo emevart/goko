@@ -7,6 +7,7 @@ import {
   type EngineGenmoveRequest,
   EngineGenmoveResponse,
   type EngineScoreRequest,
+  type ErrorCode,
   EngineScoreResponse,
   apiErrorFromBody,
 } from '@goko/protocol';
@@ -27,6 +28,9 @@ export type EngineClientOptions = {
 
 export const ENGINE_TIMEOUTS = { genmove: 10_000, analyze: 15_000, score: 30_000 };
 export const ENGINE_RETRY_DELAY_MS = 200;
+
+// Коды go-engine, которые проходят в публичный API как свои; остальные становятся internal.
+const PASSED_ENGINE_CODES: ReadonlySet<ErrorCode> = new Set<ErrorCode>(['engine_busy', 'engine_unavailable']);
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
@@ -90,10 +94,15 @@ export function createEngineClient(opts: EngineClientOptions): Engine {
       }
       const text = await res.text().catch(() => '');
       if (controller.signal.aborted) throw timedOut();
-      // Ошибка go-engine по протоколу: код сохраняется, а message и details go-engine берёт из
-      // чужого исключения (путь к модели, текст KataGo), поэтому наружу только код, исходное — в cause.
+      // Ошибка go-engine по протоколу. message и details go-engine берёт из чужого исключения (путь
+      // к модели, текст KataGo), поэтому наружу только код в фиксированном тексте, исходное — в cause.
+      // Своим кодом проходят лишь занятость и недоступность движка. unauthorized, bad_request и
+      // internal go-engine — дефект нашей стороны (ключ, схема, отказ KataGo): для публичного API это
+      // internal, иначе чужой 401 или 400 выглядел бы ошибкой вызывающего.
       const parsed = apiErrorFromBody(text, res.status);
-      const api = parsed ? new ApiError(parsed.code, `engine error: ${parsed.code}`, undefined, { cause: parsed }) : new ApiError('engine_unavailable', `engine responded with ${res.status}`);
+      const api = parsed
+        ? new ApiError(PASSED_ENGINE_CODES.has(parsed.code) ? parsed.code : 'internal', `engine error: ${parsed.code}`, undefined, { cause: parsed })
+        : new ApiError('engine_unavailable', `engine responded with ${res.status}`);
       // Повторяем только 5xx: 4xx повторять бессмысленно, запрос не изменится.
       throw new AttemptError(res.status >= 500, api);
     } finally {
