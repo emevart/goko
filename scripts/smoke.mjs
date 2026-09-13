@@ -16,7 +16,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createClient } from '@goko/protocol';
-import { STOP_CEILING_MS, loadRootEnv, startLogged, stopWithCeiling, withoutEmpty } from './processes.mjs';
+import { STOP_CEILING_MS, hasExited, isWindows, loadRootEnv, startLogged, stopWithCeiling, withoutEmpty } from './processes.mjs';
 
 export const SMOKE_APP_KEY = 'smoke';
 
@@ -64,6 +64,14 @@ export function goEngineEnv(parentEnv, { port, engineKey }) {
   return { ...env, ENGINE_KEY: engineKey, ENGINE_PORT: String(port), ENGINE_HOST: '127.0.0.1' };
 }
 
+// Таймаут одного запроса /health. Сервис на петле отвечает за миллисекунды, а порт до готовности закрыт
+// (отказ соединения сразу), поэтому 3 с — с запасом на загруженную машину и меньше самого короткого
+// потолка waitHealth (10 с): зависшая попытка не съедает весь срок ожидания.
+export const HEALTH_REQUEST_MS = 3_000;
+// Таймаут одного запроса клиента smoke. Больше самого долгого бюджета вызова в game-server (клиент
+// go-engine — до 30 с, ход ждёт ответ 8 с, score — 15 с) и меньше потолка settled (60 с).
+export const CLIENT_REQUEST_MS = 45_000;
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function waitFor(pred, ms, step = 200) {
@@ -75,19 +83,60 @@ async function waitFor(pred, ms, step = 200) {
   return false;
 }
 
-async function waitHealth(url, ms, pred = () => true) {
-  return waitFor(
-    async () => {
-      try {
-        const res = await fetch(url);
-        return res.ok && pred(await res.json());
-      } catch {
-        return false;
-      }
-    },
-    ms,
-    300,
-  );
+/**
+ * Ждёт /health не дольше ms. gone — процесс сервиса уже вышел: тогда ждать нечего, сразу false
+ * (иначе с --real и ошибкой конфигурации go-engine это 310 с пустого опроса после строки [X]).
+ * Остальные параметры — швы для теста: запрос, таймаут запроса, часы и сон.
+ * @param {string} url
+ * @param {number} ms
+ * @param {{
+ *   pred?: (body: unknown) => boolean,
+ *   gone?: () => boolean,
+ *   fetchImpl?: (url: string, init?: RequestInit) => Promise<Response>,
+ *   timeoutSignal?: (ms: number) => AbortSignal,
+ *   now?: () => number,
+ *   sleep?: (ms: number) => Promise<unknown>,
+ *   step?: number,
+ * }} [opts]
+ */
+export async function waitHealth(url, ms, opts = {}) {
+  const { pred = () => true, gone = () => false, fetchImpl = fetch, timeoutSignal = (t) => AbortSignal.timeout(t), now = Date.now, sleep: nap = sleep, step = 300 } = opts;
+  const t0 = now();
+  while (now() - t0 < ms) {
+    if (gone()) return false;
+    try {
+      const res = await fetchImpl(url, { signal: timeoutSignal(HEALTH_REQUEST_MS) });
+      if (res.ok && pred(await res.json())) return true;
+    } catch {
+      // порт ещё закрыт или запрос не уложился в HEALTH_REQUEST_MS — следующая попытка
+    }
+    if (gone()) return false;
+    await nap(step);
+  }
+  return false;
+}
+
+/**
+ * fetch с таймаутом на каждый запрос. Запрос со своим сигналом (поток SSE) не трогаем: поток длится
+ * дольше любого таймаута и ограничен AbortController вызывающего.
+ * @param {number} ms
+ * @param {(url: string | URL | Request, init?: RequestInit) => Promise<Response>} [base]
+ * @param {(ms: number) => AbortSignal} [timeoutSignal]
+ * @returns {typeof fetch}
+ */
+export function timedFetch(ms, base = fetch, timeoutSignal = (t) => AbortSignal.timeout(t)) {
+  return (url, init) => (init?.signal ? base(url, init) : base(url, { ...init, signal: timeoutSignal(ms) }));
+}
+
+/**
+ * Опции запуска ребёнка smoke. На POSIX ребёнок — лидер своей группы: killTree шлёт сигнал группе, и
+ * KataGo не остаётся сиротой после go-engine. На Windows дерево гасит taskkill /T.
+ * @param {string} root
+ * @param {Record<string, string>} env
+ * @param {boolean} [windows]
+ */
+export function smokeStartOptions(root, env, windows = isWindows) {
+  return { cwd: root, env, prefix: '  ', detached: !windows };
 }
 
 // Ошибка операции: проверяем code, status и details, а не текст — message английский и для разработчика.
@@ -126,11 +175,12 @@ async function main() {
   };
 
   function start(name, args, env) {
-    const child = startLogged(name, process.execPath, args, { cwd: root, env, prefix: '  ' });
+    const child = startLogged(name, process.execPath, args, smokeStartOptions(root, env));
     child.on('exit', (code) => {
       if (!stopping) fail(`${name} завершился с кодом ${code}`);
     });
     children.push({ name, child });
+    return child;
   }
 
   // Детям — мягкий SIGTERM (на Windows его нет: дерево гасится силой), ожидание с потолком, затем силой.
@@ -143,18 +193,28 @@ async function main() {
     }
   }
 
+  // Ctrl+C во время smoke: дети в своих группах (POSIX, detached) или в скрытых консолях (Windows) сигнала
+  // терминала не получают. Гасим их сами, а не оставляем сиротами на портах smoke. Повторный сигнал — выход сразу.
+  for (const signal of /** @type {const} */ (['SIGINT', 'SIGTERM'])) {
+    process.once(signal, () => {
+      if (stopping) return;
+      fail(`smoke: прерван сигналом ${signal}, останавливаю процессы`);
+      void stopAll().finally(() => process.exit(1));
+    });
+  }
+
   const dataDir = await mkdtemp(path.join(tmpdir(), 'goko-smoke-'));
   try {
     if (real) {
       if (!process.env.KATAGO_BIN?.trim()) throw new Error('--real: нужна переменная KATAGO_BIN в .env');
-      start('go-engine', ['apps/go-engine/src/main.ts'], goEngineEnv(process.env, { port: ENGINE_PORT, engineKey }));
+      const engine = start('go-engine', ['apps/go-engine/src/main.ts'], goEngineEnv(process.env, { port: ENGINE_PORT, engineKey }));
       // Прогрев KataGo до открытия порта: первый запуск на машине тюнит OpenCL, потолок go-engine — 300 с.
-      if (!check(await waitHealth(`http://127.0.0.1:${ENGINE_PORT}/health`, 310_000, (h) => h.ok === true), 'go-engine: /health ok (KataGo прогрет)')) throw new Error('движок не поднялся');
+      if (!check(await waitHealth(`http://127.0.0.1:${ENGINE_PORT}/health`, 310_000, { pred: (h) => h?.ok === true, gone: () => hasExited(engine) }), 'go-engine: /health ok (KataGo прогрет)')) throw new Error('движок не поднялся');
     }
-    start('game-server', ['apps/game-server/src/main.ts'], gameServerEnv(process.env, { port: PORT, dataDir, real, engineUrl: `http://127.0.0.1:${ENGINE_PORT}`, engineKey }));
-    if (!check(await waitHealth(`http://127.0.0.1:${PORT}/health`, 30_000), `game-server: /health на :${PORT} (движок ${real ? 'KataGo' : 'fake'})`)) throw new Error('game-server не поднялся');
+    const server = start('game-server', ['apps/game-server/src/main.ts'], gameServerEnv(process.env, { port: PORT, dataDir, real, engineUrl: `http://127.0.0.1:${ENGINE_PORT}`, engineKey }));
+    if (!check(await waitHealth(`http://127.0.0.1:${PORT}/health`, 30_000, { gone: () => hasExited(server) }), `game-server: /health на :${PORT} (движок ${real ? 'KataGo' : 'fake'})`)) throw new Error('game-server не поднялся');
 
-    const client = createClient({ baseUrl: `http://127.0.0.1:${PORT}`, appKey: SMOKE_APP_KEY });
+    const client = createClient({ baseUrl: `http://127.0.0.1:${PORT}`, appKey: SMOKE_APP_KEY, fetch: timedFetch(CLIENT_REQUEST_MS) });
     const seats = { black: { controller: 'human' }, white: { controller: 'engine', rank: '10k' } };
     // Если ответ движка не уложился в 8 с (replyTimedOut), дожидаемся его по состоянию.
     const settled = async (id, res) => {
@@ -255,8 +315,8 @@ async function main() {
     check((await client.listGames()).games.length === 2, 'list_games: две партии');
 
     // --- остановка сервера при медленном клиенте SSE на настоящем TCP ---
-    // Только по флагу: на текущем коде шаг упирается в дедлайн SHUTDOWN_MS (25 с реального ожидания) и
-    // падает — server.close ждёт соединение с застрявшей записью. Находка записана в docs/NOW.md «Открыто».
+    // Только по флагу: шаг поднимает второй сервер и гоняет ~58 МБ через сокет. Регрессия здесь — выход по
+    // дедлайну SHUTDOWN_MS (25 с реального ожидания) с кодом 1: остановка снова ждёт застрявшее соединение.
     if (slowSse) await slowClientShutdown({ port: SLOW_PORT, ok, warn, fail, check });
   } catch (e) {
     fail(`сценарий прерван: ${e instanceof Error ? e.message : String(e)}`);
@@ -301,7 +361,7 @@ async function slowClientShutdown({ port, ok, warn, fail, check }) {
     });
     if (!check(started !== null && bus !== null && (await waitHealth(`http://127.0.0.1:${port}/health`, 10_000)), `медленный клиент: game-server в процессе на :${port}`)) return;
 
-    const client = createClient({ baseUrl: `http://127.0.0.1:${port}`, appKey: SMOKE_APP_KEY });
+    const client = createClient({ baseUrl: `http://127.0.0.1:${port}`, appKey: SMOKE_APP_KEY, fetch: timedFetch(CLIENT_REQUEST_MS) });
     const { state } = await client.createGame({ black: { controller: 'human' }, white: { controller: 'engine' } });
 
     let received = 0;
