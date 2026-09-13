@@ -10,7 +10,7 @@ import type { RoomCreator } from './livekit.ts';
 import { EventBus } from './events.ts';
 import { createFakeEngine } from './fake-engine.ts';
 import { GameStore } from './store.ts';
-import { type Listen, SHUTDOWN_MS, type StartDeps, createListen, startServer } from './start-server.ts';
+import { INIT_EXIT_CODE, type Listen, SHUTDOWN_MS, type StartDeps, createListen, startServer } from './start-server.ts';
 
 const SECRET = 'secret-of-at-least-32-characters-long';
 const REPO_ROOT = path.resolve(import.meta.dirname, '../../..');
@@ -57,6 +57,8 @@ type HarnessOptions = {
   holdServerClose?: boolean;
   holdServiceClose?: boolean;
   initNoop?: boolean;
+  // service.init отклоняется этой ошибкой.
+  initFails?: Error;
   // service.close отклоняется (после настоящего закрытия).
   serviceCloseFails?: boolean;
   // createRoom отклоняется.
@@ -130,6 +132,7 @@ function harness(opts: HarnessOptions = {}): { deps: StartDeps; rec: Recorder } 
       const service = new RealGameService(serviceDeps);
       opened.push(service);
       if (opts.initNoop) vi.spyOn(service, 'init').mockResolvedValue(undefined);
+      if (opts.initFails) vi.spyOn(service, 'init').mockRejectedValue(opts.initFails);
       const close = service.close.bind(service);
       vi.spyOn(service, 'close').mockImplementation(async () => {
         // Удержание заводится до первого await: тест может отпустить его сразу после события.
@@ -137,7 +140,7 @@ function harness(opts: HarnessOptions = {}): { deps: StartDeps; rec: Recorder } 
         rec.events.push('service.close');
         await close();
         await hold;
-        if (opts.serviceCloseFails) throw new Error('store: flush failed');
+        if (opts.serviceCloseFails) throw Object.assign(new Error('store: flush failed'), { code: 'EIO' });
       });
       return service;
     },
@@ -593,4 +596,81 @@ describe('startServer: остановка', () => {
     expect(await rec.exited).toBe(0);
     await expect(fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(5_000) })).rejects.toThrow();
   }, 20_000);
+});
+
+describe('startServer: пакет 12b — ENGINE_URL, отказ init, отказ close', () => {
+  it('ENGINE_URL не http(s) или не адрес — [X] без значения, код 2, сервис не создаётся', async () => {
+    const real = { FAKE_ENGINE: undefined, ENGINE_KEY: 'engine-key-value' };
+    for (const value of ['engine.test:9000', 'ftp://engine.test', 'ws://engine.test', 'http//engine.test', 'https://']) {
+      const { deps, rec } = harness();
+      expect(await startServer({ ...deps, env: { ...deps.env, ...real, ENGINE_URL: value } })).toBeNull();
+      expect(rec.exits).toEqual([2]);
+      expect(rec.logs).toEqual(['[X] game-server: ENGINE_URL должна быть адресом http:// или https://']);
+      expect(rec.serviceDeps).toEqual([]);
+      expect(rec.events).toEqual(['exit 2']);
+    }
+    for (const value of ['http://engine.test:9000', 'https://engine.test', 'HTTP://127.0.0.1:8788']) {
+      say();
+      const { deps, rec } = harness({ initNoop: true });
+      expect(await startServer({ ...deps, env: { ...deps.env, ...real, ENGINE_URL: value } })).not.toBeNull();
+      expect(rec.exits).toEqual([]);
+    }
+  });
+
+  it('ENGINE_URL не проверяется при FAKE_ENGINE=1: движок не используется', async () => {
+    say();
+    const { deps, rec } = harness({ initNoop: true });
+    expect(await startServer({ ...deps, env: { ...deps.env, ENGINE_URL: 'not a url' } })).not.toBeNull();
+    expect(rec.exits).toEqual([]);
+  });
+
+  it('ошибка ENGINE_URL печатается вместе с прочими ошибками конфигурации', async () => {
+    const { deps, rec } = harness();
+    expect(await startServer({ ...deps, env: { ...deps.env, FAKE_ENGINE: undefined, ENGINE_URL: 'x', PORT: '0' } })).toBeNull();
+    expect(rec.logs).toEqual([
+      '[X] game-server: нужна переменная ENGINE_KEY (см. infra/.env.example)',
+      '[X] game-server: ENGINE_URL должна быть адресом http:// или https://',
+      '[X] game-server: PORT должна быть целым числом от 1 до 65535',
+    ]);
+  });
+
+  it('отказ service.init — [X] с кодом ошибки без пути, выход INIT_EXIT_CODE, ничего не слушает', async () => {
+    const log = say();
+    const error = Object.assign(new Error(`EACCES: permission denied, scandir '${'/data-dir-value'}'`), { code: 'EACCES' });
+    const { deps, rec } = harness({ initFails: error });
+    expect(await startServer({ ...deps, env: { ...deps.env, DATA_DIR: '/data-dir-value' } })).toBeNull();
+    expect(rec.logs.filter((l) => l.startsWith('[X]'))).toEqual(['[X] game-server: не удалось загрузить партии (EACCES)']);
+    expect(rec.exits).toEqual([INIT_EXIT_CODE]);
+    expect(INIT_EXIT_CODE).toBe(1);
+    expect(rec.events).toEqual([`exit ${INIT_EXIT_CODE}`]);
+    expect(rec.roomOptions).toEqual([]);
+    expect(rec.handlers.size).toBe(0);
+    expect(log).not.toHaveBeenCalled();
+    expect(rec.logs.join('\n')).not.toContain('data-dir-value');
+  });
+
+  it('отказ service.init без кода ошибки — [X] «без кода»', async () => {
+    const { deps, rec } = harness({ initFails: new Error('snapshot is broken') });
+    expect(await startServer(deps)).toBeNull();
+    expect(rec.logs.filter((l) => l.startsWith('[X]'))).toEqual(['[X] game-server: не удалось загрузить партии (без кода)']);
+    expect(rec.exits).toEqual([1]);
+  });
+
+  it('отказ service.close — строка [!] с кодом, выход всё равно 0', async () => {
+    say();
+    const { deps, rec } = harness({ serviceCloseFails: true });
+    expect(await startServer(deps)).not.toBeNull();
+    rec.handlers.get('SIGTERM')?.();
+    expect(await rec.exited).toBe(0);
+    expect(rec.logs.filter((l) => !l.includes('FAKE_ENGINE'))).toEqual(['[!] game-server: service.close завершился ошибкой (EIO)']);
+  });
+
+  it('штатная остановка — без строки [!]', async () => {
+    say();
+    const { deps, rec } = harness();
+    expect(await startServer(deps)).not.toBeNull();
+    rec.handlers.get('SIGTERM')?.();
+    expect(await rec.exited).toBe(0);
+    expect(rec.logs.filter((l) => l.startsWith('[!]') || l.startsWith('[X]'))).toEqual(['[!] game-server: FAKE_ENGINE=1, ходы случайные, KataGo не используется']);
+  });
 });

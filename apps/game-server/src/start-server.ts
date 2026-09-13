@@ -42,6 +42,8 @@ export type StartDeps = {
 export type StartedServer = { app: Hono; service: GameService; sessions: SessionManager };
 
 export const CONFIG_EXIT_CODE = 2;
+// Партии не загрузились (нет прав на DATA_DIR, диск): не конфигурация env, а отказ данных.
+export const INIT_EXIT_CODE = 1;
 // service.close ждёт текущий запрос к движку (genmove 10 с и один повтор, около 20 с).
 // Дольше остановка не ждёт: снапшоты уже на диске, выход без ожидания данных не теряет.
 export const SHUTDOWN_MS = 25_000;
@@ -103,7 +105,10 @@ function readConfig(env: Record<string, string | undefined>, root: string): { co
   const apiSecret = need('LIVEKIT_API_SECRET');
   const fake = env.FAKE_ENGINE === '1';
   const engineKey = fake ? '' : need('ENGINE_KEY');
-  if (url !== '' && !isLivekitUrl(url)) errors.push('LIVEKIT_URL должна быть адресом ws://, wss://, http:// или https://');
+  // Адрес движка проверяется только когда движок настоящий: при FAKE_ENGINE=1 он не используется.
+  const engineUrl = optional('ENGINE_URL') ?? DEFAULT_ENGINE_URL;
+  if (!fake && !isUrl(engineUrl, ['http:', 'https:'])) errors.push('ENGINE_URL должна быть адресом http:// или https://');
+  if (url !== '' && !isUrl(url, ['ws:', 'wss:', 'http:', 'https:'])) errors.push('LIVEKIT_URL должна быть адресом ws://, wss://, http:// или https://');
   const maxSessions = integer('MAX_SESSIONS', 3, 1, Number.MAX_SAFE_INTEGER, 'MAX_SESSIONS должна быть целым числом от 1');
   // Меньше секунды нельзя: TTL токена — целые секунды TTL сессии, и 0 секунд токен не выдать.
   const sessionTtlMs = integer('SESSION_TTL_MS', 2 * 3600 * 1000, 1000, Number.MAX_SAFE_INTEGER, 'SESSION_TTL_MS должна быть целым числом от 1000');
@@ -114,7 +119,7 @@ function readConfig(env: Record<string, string | undefined>, root: string): { co
       appKey,
       livekit: { url, apiKey, apiSecret, agentName: optional('AGENT_NAME') ?? 'goko' },
       fake,
-      engineUrl: optional('ENGINE_URL') ?? DEFAULT_ENGINE_URL,
+      engineUrl,
       engineKey,
       dataDir: optional('DATA_DIR') ?? path.join(root, 'data/games'),
       maxSessions,
@@ -126,12 +131,18 @@ function readConfig(env: Record<string, string | undefined>, root: string): { co
   };
 }
 
-function isLivekitUrl(value: string): boolean {
+function isUrl(value: string, protocols: string[]): boolean {
   try {
-    return ['ws:', 'wss:', 'http:', 'https:'].includes(new URL(value).protocol);
+    return protocols.includes(new URL(value).protocol);
   } catch {
     return false;
   }
+}
+
+// Код ошибки Node (EACCES, EADDRINUSE) без текста: текст несёт пути и адреса из env.
+function errorCode(e: unknown): string {
+  const code = e instanceof Error ? (e as NodeJS.ErrnoException).code : undefined;
+  return typeof code === 'string' && code !== '' ? code : 'без кода';
 }
 
 export async function startServer(deps: StartDeps = {}): Promise<StartedServer | null> {
@@ -156,7 +167,14 @@ export async function startServer(deps: StartDeps = {}): Promise<StartedServer |
 
   const bus = new EventBus();
   const service = createService({ store: new GameStore(config.dataDir), engine, bus, log });
-  await service.init();
+  try {
+    await service.init();
+  } catch (e) {
+    // Только код: текст ошибки fs содержит путь из DATA_DIR.
+    log(`[X] game-server: не удалось загрузить партии (${errorCode(e)})`);
+    exit(INIT_EXIT_CODE);
+    return null;
+  }
   const sessions = new SessionManager({ max: config.maxSessions, ttlMs: config.sessionTtlMs });
   const rooms = createRooms({ url: config.livekit.url, apiKey: config.livekit.apiKey, apiSecret: config.livekit.apiSecret });
   const closing = new AbortController();
@@ -191,8 +209,10 @@ export async function startServer(deps: StartDeps = {}): Promise<StartedServer |
       }, SHUTDOWN_MS);
       const current = server;
       const serverClosed = new Promise<void>((resolve) => (current ? current.close(resolve) : resolve()));
-      void Promise.allSettled([serverClosed, service.close()]).then(() => {
+      void Promise.allSettled([serverClosed, service.close()]).then(([, serviceClosed]) => {
         clearTimeout(deadline);
+        // Выход всё равно 0: снапшоты пишутся до публикации состояния, но оператор должен видеть отказ.
+        if (serviceClosed.status === 'rejected') log(`[!] game-server: service.close завершился ошибкой (${errorCode(serviceClosed.reason)})`);
         exit(0);
       });
     });
@@ -211,8 +231,7 @@ export async function startServer(deps: StartDeps = {}): Promise<StartedServer |
     },
     (error) => {
       // Только код: текст ошибки Node содержит адрес из HOST.
-      const code = (error as NodeJS.ErrnoException).code;
-      log(`[X] game-server: ${ready ? 'ошибка сокета сервера' : 'не удалось слушать порт'} (${code ?? 'без кода'})`);
+      log(`[X] game-server: ${ready ? 'ошибка сокета сервера' : 'не удалось слушать порт'} (${errorCode(error)})`);
       exit(1);
     },
   );
