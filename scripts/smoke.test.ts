@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { STOP_CEILING_MS, withoutEmpty } from './processes.mjs';
-import { CLIENT_REQUEST_MS, HEALTH_REQUEST_MS, LIVEKIT_STUB, SMOKE_APP_KEY, gameServerEnv, goEngineEnv, smokeStartOptions, timedFetch, waitHealth } from './smoke.mjs';
+import { CLIENT_REQUEST_MS, HEALTH_REQUEST_MS, LIVEKIT_STUB, SMOKE_APP_KEY, gameServerEnv, goEngineEnv, smokeClient, smokeStartOptions, startChild, timedFetch, waitChildHealth, waitHealth } from './smoke.mjs';
 
 // Родительское окружение «как после .env»: настоящие ключи LiveKit и OpenAI и чужие настройки сервера.
 const parent = {
@@ -123,13 +123,12 @@ describe('smoke: ожидание /health', () => {
     expect(c.sleeps).toEqual([300]); // один сон между попытками, после выхода — ни одного
   });
 
-  it('настоящий ребёнок с кодом 3: прерывание по hasExited без таймеров', async () => {
+  it('waitChildHealth: настоящий ребёнок с кодом 3 — ожидание прерывается по его выходу, без таймеров', async () => {
     const { spawn } = await import('node:child_process');
     const { hasExited } = await import('./processes.mjs');
     const child = spawn(process.execPath, ['-e', 'process.exit(3)'], { stdio: 'ignore' });
     let calls = 0;
-    const result = await waitHealth('http://h/health', 310_000, {
-      gone: () => hasExited(child),
+    const result = await waitChildHealth(child, 'http://h/health', 310_000, {
       fetchImpl: async () => {
         calls++;
         throw new TypeError('fetch failed');
@@ -140,6 +139,21 @@ describe('smoke: ожидание /health', () => {
     expect(result).toBe(false);
     expect(child.exitCode).toBe(3);
     expect(calls).toBeGreaterThanOrEqual(1);
+  });
+
+  it('waitChildHealth: вышедший по сигналу ребёнок — ни одного запроса; живой — опрос и pred', async () => {
+    let calls = 0;
+    const fetchImpl = async () => {
+      calls++;
+      return okResponse({ ok: false });
+    };
+    const c = clock();
+    expect(await waitChildHealth({ exitCode: null, signalCode: 'SIGKILL' }, 'http://h/health', 30_000, { fetchImpl, now: c.now, sleep: c.sleep })).toBe(false);
+    expect(calls).toBe(0);
+    const d = clock();
+    const alive = { exitCode: null, signalCode: null };
+    expect(await waitChildHealth(alive, 'http://h/health', 600, { pred: (h) => (h as { ok?: boolean }).ok === true, fetchImpl, now: d.now, sleep: d.sleep })).toBe(false);
+    expect(calls).toBe(2);
   });
 
   it('здоровый ответ с нужным телом — true; не то тело — опрос до потолка', async () => {
@@ -245,5 +259,29 @@ describe('smoke: опции запуска детей', () => {
 
   it('Windows: не detached (там дерево гасит taskkill /T)', () => {
     expect(smokeStartOptions('/repo', { A: '1' }, true)).toEqual({ cwd: '/repo', env: { A: '1' }, prefix: '  ', detached: false });
+  });
+});
+
+describe('smoke: клиент и запуск детей', () => {
+  it('smokeClient: ключ smoke и таймаут на каждый запрос операции', async () => {
+    const seen: Array<{ url: string; init?: RequestInit }> = [];
+    const client = smokeClient('http://127.0.0.1:18787/', async (url, init) => {
+      seen.push({ url: String(url), init });
+      return okResponse({ games: [] });
+    });
+    await client.listGames();
+    expect(seen[0]?.url).toBe('http://127.0.0.1:18787/api/games');
+    expect(seen[0]?.init?.signal).toBeInstanceOf(AbortSignal);
+    expect(seen[0]?.init?.headers).toMatchObject({ 'x-app-key': SMOKE_APP_KEY });
+  });
+
+  it('startChild: node с опциями smokeStartOptions', () => {
+    const calls: unknown[][] = [];
+    const child = startChild('game-server', ['apps/game-server/src/main.ts'], '/repo', { A: '1' }, (...args: unknown[]) => {
+      calls.push(args);
+      return { pid: 7 };
+    });
+    expect(child).toEqual({ pid: 7 });
+    expect(calls).toEqual([['game-server', process.execPath, ['apps/game-server/src/main.ts'], smokeStartOptions('/repo', { A: '1' })]]);
   });
 });

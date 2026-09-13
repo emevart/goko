@@ -129,6 +129,26 @@ export function timedFetch(ms, base = fetch, timeoutSignal = (t) => AbortSignal.
 }
 
 /**
+ * Ожидание /health процесса-ребёнка: прерывается, как только он вышел.
+ * @param {{ exitCode: number | null, signalCode: string | null }} child
+ * @param {string} url
+ * @param {number} ms
+ * @param {Parameters<typeof waitHealth>[2]} [opts]
+ */
+export function waitChildHealth(child, url, ms, opts = {}) {
+  return waitHealth(url, ms, { ...opts, gone: () => hasExited(child) });
+}
+
+/**
+ * Клиент smoke: ключ smoke и таймаут CLIENT_REQUEST_MS на каждый запрос. base — шов для теста.
+ * @param {string} baseUrl
+ * @param {(url: string | URL | Request, init?: RequestInit) => Promise<Response>} [base]
+ */
+export function smokeClient(baseUrl, base = fetch) {
+  return createClient({ baseUrl, appKey: SMOKE_APP_KEY, fetch: timedFetch(CLIENT_REQUEST_MS, base) });
+}
+
+/**
  * Опции запуска ребёнка smoke. На POSIX ребёнок — лидер своей группы: killTree шлёт сигнал группе, и
  * KataGo не остаётся сиротой после go-engine. На Windows дерево гасит taskkill /T.
  * @param {string} root
@@ -137,6 +157,18 @@ export function timedFetch(ms, base = fetch, timeoutSignal = (t) => AbortSignal.
  */
 export function smokeStartOptions(root, env, windows = isWindows) {
   return { cwd: root, env, prefix: '  ', detached: !windows };
+}
+
+/**
+ * Запуск ребёнка smoke: node с опциями smokeStartOptions. start — шов для теста.
+ * @param {string} name
+ * @param {string[]} args
+ * @param {string} root
+ * @param {Record<string, string>} env
+ * @param {Function} [start]
+ */
+export function startChild(name, args, root, env, start = startLogged) {
+  return start(name, process.execPath, args, smokeStartOptions(root, env));
 }
 
 // Ошибка операции: проверяем code, status и details, а не текст — message английский и для разработчика.
@@ -175,7 +207,7 @@ async function main() {
   };
 
   function start(name, args, env) {
-    const child = startLogged(name, process.execPath, args, smokeStartOptions(root, env));
+    const child = startChild(name, args, root, env);
     child.on('exit', (code) => {
       if (!stopping) fail(`${name} завершился с кодом ${code}`);
     });
@@ -209,12 +241,12 @@ async function main() {
       if (!process.env.KATAGO_BIN?.trim()) throw new Error('--real: нужна переменная KATAGO_BIN в .env');
       const engine = start('go-engine', ['apps/go-engine/src/main.ts'], goEngineEnv(process.env, { port: ENGINE_PORT, engineKey }));
       // Прогрев KataGo до открытия порта: первый запуск на машине тюнит OpenCL, потолок go-engine — 300 с.
-      if (!check(await waitHealth(`http://127.0.0.1:${ENGINE_PORT}/health`, 310_000, { pred: (h) => h?.ok === true, gone: () => hasExited(engine) }), 'go-engine: /health ok (KataGo прогрет)')) throw new Error('движок не поднялся');
+      if (!check(await waitChildHealth(engine, `http://127.0.0.1:${ENGINE_PORT}/health`, 310_000, { pred: (h) => h?.ok === true }), 'go-engine: /health ok (KataGo прогрет)')) throw new Error('движок не поднялся');
     }
     const server = start('game-server', ['apps/game-server/src/main.ts'], gameServerEnv(process.env, { port: PORT, dataDir, real, engineUrl: `http://127.0.0.1:${ENGINE_PORT}`, engineKey }));
-    if (!check(await waitHealth(`http://127.0.0.1:${PORT}/health`, 30_000, { gone: () => hasExited(server) }), `game-server: /health на :${PORT} (движок ${real ? 'KataGo' : 'fake'})`)) throw new Error('game-server не поднялся');
+    if (!check(await waitChildHealth(server, `http://127.0.0.1:${PORT}/health`, 30_000), `game-server: /health на :${PORT} (движок ${real ? 'KataGo' : 'fake'})`)) throw new Error('game-server не поднялся');
 
-    const client = createClient({ baseUrl: `http://127.0.0.1:${PORT}`, appKey: SMOKE_APP_KEY, fetch: timedFetch(CLIENT_REQUEST_MS) });
+    const client = smokeClient(`http://127.0.0.1:${PORT}`);
     const seats = { black: { controller: 'human' }, white: { controller: 'engine', rank: '10k' } };
     // Если ответ движка не уложился в 8 с (replyTimedOut), дожидаемся его по состоянию.
     const settled = async (id, res) => {
@@ -361,7 +393,7 @@ async function slowClientShutdown({ port, ok, warn, fail, check }) {
     });
     if (!check(started !== null && bus !== null && (await waitHealth(`http://127.0.0.1:${port}/health`, 10_000)), `медленный клиент: game-server в процессе на :${port}`)) return;
 
-    const client = createClient({ baseUrl: `http://127.0.0.1:${port}`, appKey: SMOKE_APP_KEY, fetch: timedFetch(CLIENT_REQUEST_MS) });
+    const client = smokeClient(`http://127.0.0.1:${port}`);
     const { state } = await client.createGame({ black: { controller: 'human' }, white: { controller: 'engine' } });
 
     let received = 0;
