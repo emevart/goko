@@ -68,9 +68,11 @@ export function goEngineEnv(parentEnv, { port, engineKey }) {
 // (отказ соединения сразу), поэтому 3 с — с запасом на загруженную машину и меньше самого короткого
 // потолка waitHealth (10 с): зависшая попытка не съедает весь срок ожидания.
 export const HEALTH_REQUEST_MS = 3_000;
-// Таймаут одного запроса клиента smoke. Больше самого долгого бюджета вызова в game-server (клиент
-// go-engine — до 30 с, ход ждёт ответ 8 с, score — 15 с) и меньше потолка settled (60 с).
+// Таймаут одного запроса клиента smoke — страховка поверх таймаутов клиента протокола (самый долгий —
+// score, 25 с) и бюджетов game-server (score — 20 с, D-0010); меньше потолка settled (60 с).
 export const CLIENT_REQUEST_MS = 45_000;
+// Шаг опроса состояния партии: 40 запросов в минуту оставляют запас под лимитом 60 в минуту на адрес (D-0012).
+export const GAME_POLL_MS = 1_500;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -195,13 +197,27 @@ export function smokeFinisher({ stopAll, dataDir, fail, warn, failures, log = (l
   /** @type {Promise<void> | null} */
   let finishing = null;
   let signalled = false;
+  // Каталог данных удаляется и выход происходит при любом исключении по пути: отказ stopAll — это
+  // ошибка smoke, а исключение в fail или log не должно оставить временный каталог и живой процесс.
   const finish = () =>
     (finishing ??= (async () => {
-      await stopAll();
-      await rmImpl(dataDir, { recursive: true, force: true }).catch(() => {});
-      const failed = failures();
-      log(failed ? `[X] smoke: ошибок ${failed}` : '[OK] smoke: все шаги прошли');
-      exit(failed ? 1 : 0);
+      let code = 1;
+      try {
+        try {
+          await stopAll();
+        } catch (e) {
+          fail(`smoke: остановка процессов завершилась ошибкой (${e instanceof Error ? e.message : String(e)})`);
+        } finally {
+          await Promise.resolve()
+            .then(() => rmImpl(dataDir, { recursive: true, force: true }))
+            .catch(() => {});
+        }
+        const failed = failures();
+        log(failed ? `[X] smoke: ошибок ${failed}` : '[OK] smoke: все шаги прошли');
+        code = failed ? 1 : 0;
+      } finally {
+        exit(code);
+      }
     })());
   for (const signal of /** @type {const} */ (['SIGINT', 'SIGTERM'])) {
     signals.on(signal, () => {
@@ -211,7 +227,8 @@ export function smokeFinisher({ stopAll, dataDir, fail, warn, failures, log = (l
       }
       signalled = true;
       fail(`smoke: прерван сигналом ${signal}, останавливаю процессы`);
-      void finish();
+      // Выход с кодом 1 уже случился в finally; отклонение здесь некому показать.
+      finish().catch(() => {});
     });
   }
   return finish;
@@ -295,7 +312,7 @@ async function main() {
       const done = await waitFor(async () => {
         state = await client.getGame(id);
         return !state.pendingEngineMove;
-      }, 60_000);
+      }, 60_000, GAME_POLL_MS);
       if (!done) throw new Error('движок так и не ответил');
       return state;
     };
@@ -366,7 +383,7 @@ async function main() {
     const engineReply = s.moves[1];
     check(engineReply !== undefined, `пас сыгран, ответ Гоко ${engineReply?.coord}`);
     if (engineReply?.coord === 'pass') {
-      const finished = await waitFor(async () => (await client.getGame(id2)).status === 'finished', 60_000);
+      const finished = await waitFor(async () => (await client.getGame(id2)).status === 'finished', 60_000, GAME_POLL_MS);
       const final = await client.getGame(id2);
       check(finished && final.result?.reason === 'score', `два паса -> автосчёт: ${final.result?.winner}+${final.result?.margin}`);
       check(await waitFor(() => events.some((e) => e.type === 'game.finished'), 3000, 50), 'SSE: пришло game.finished');

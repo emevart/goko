@@ -5,7 +5,9 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { STOP_CEILING_MS, withoutEmpty } from './processes.mjs';
-import { CLIENT_REQUEST_MS, HEALTH_REQUEST_MS, LIVEKIT_STUB, SMOKE_APP_KEY, gameServerEnv, goEngineEnv, smokeClient, smokeFinisher, smokeStartOptions, startChild, timedFetch, waitChildHealth, waitHealth } from './smoke.mjs';
+import { CLIENT_TIMEOUTS } from '@goko/protocol';
+import { API_RATE } from '../apps/game-server/src/rate-limit.ts';
+import { CLIENT_REQUEST_MS, GAME_POLL_MS, HEALTH_REQUEST_MS, LIVEKIT_STUB, SMOKE_APP_KEY, gameServerEnv, goEngineEnv, smokeClient, smokeFinisher, smokeStartOptions, startChild, timedFetch, waitChildHealth, waitHealth } from './smoke.mjs';
 
 // Родительское окружение «как после .env»: настоящие ключи LiveKit и OpenAI и чужие настройки сервера.
 const parent = {
@@ -217,9 +219,13 @@ describe('smoke: ожидание /health', () => {
   it('таймауты запросов: меньше потолков ожидания и больше бюджетов сервера', () => {
     // Самый короткий потолок waitHealth — 10 с (сервер медленного клиента).
     expect(HEALTH_REQUEST_MS).toBeLessThan(10_000);
-    // settled ждёт движок до 60 с; самый долгий бюджет вызова в game-server — клиент go-engine, 30 с.
+    // settled ждёт движок до 60 с; клиент протокола сам обрывает операцию раньше (самая долгая — score).
     expect(CLIENT_REQUEST_MS).toBeLessThan(60_000);
-    expect(CLIENT_REQUEST_MS).toBeGreaterThan(30_000);
+    expect(CLIENT_REQUEST_MS).toBeGreaterThan(Math.max(...Object.values(CLIENT_TIMEOUTS)));
+  });
+
+  it('опрос состояния партии укладывается в лимит частоты game-server с запасом на прочие запросы', () => {
+    expect(Math.ceil(API_RATE.windowMs / GAME_POLL_MS)).toBeLessThanOrEqual((API_RATE.limit * 2) / 3);
   });
 });
 
@@ -304,7 +310,14 @@ describe('smoke: клиент и запуск детей', () => {
 
 describe('smoke: завершение по концу сценария и по сигналу', () => {
   // Остановка детей, которую тест отпускает сам; счётчик вызовов — чтобы видеть, что она одна.
-  function harness(opts: { rmImpl?: (dir: string, o: { recursive: boolean; force: boolean }) => Promise<unknown>; dataDir?: string } = {}) {
+  type HarnessOptions = {
+    rmImpl?: (dir: string, o: { recursive: boolean; force: boolean }) => Promise<unknown>;
+    dataDir?: string;
+    stopAll?: () => Promise<void>;
+    log?: (line: string) => void;
+    fail?: (msg: string) => void;
+  };
+  function harness(opts: HarnessOptions = {}) {
     const events: string[] = [];
     const fails: string[] = [];
     const warns: string[] = [];
@@ -320,6 +333,7 @@ describe('smoke: завершение по концу сценария и по �
       stopAll: () => {
         stops++;
         events.push('stopAll');
+        if (opts.stopAll) return opts.stopAll();
         return new Promise<void>((resolve) => {
           release = () => {
             events.push('stopped');
@@ -331,13 +345,17 @@ describe('smoke: завершение по концу сценария и по �
       fail: (msg: string) => {
         fails.push(msg);
         events.push(`[X] ${msg}`);
+        opts.fail?.(msg);
       },
       warn: (msg: string) => {
         warns.push(msg);
         events.push(`[!] ${msg}`);
       },
       failures: () => fails.length,
-      log: (line: string) => events.push(line),
+      log: (line: string) => {
+        events.push(line);
+        opts.log?.(line);
+      },
       exit: (code: number) => {
         exits.push(code);
         events.push(`exit ${code}`);
@@ -408,6 +426,66 @@ describe('smoke: завершение по концу сценария и по �
     await h.finish();
     expect(h.stops()).toBe(1);
     expect(h.exits).toEqual([1]);
+  });
+
+  it('отказ stopAll — ошибка: [X] с причиной, dataDir удалён, итог [X] и код 1', async () => {
+    for (const stopAll of [() => Promise.reject(new Error('taskkill failed')), () => { throw new Error('taskkill failed'); }]) {
+      const h = harness({ stopAll });
+      await h.finish();
+      expect(h.events).toEqual([
+        'stopAll',
+        '[X] smoke: остановка процессов завершилась ошибкой (taskkill failed)',
+        'rm /tmp/goko-smoke-test {"recursive":true,"force":true}',
+        '[X] smoke: ошибок 1',
+        'exit 1',
+      ]);
+    }
+  });
+
+  it('исключение в итоговой строке: dataDir всё равно удалён и выход 1; finish отклоняется этой ошибкой', async () => {
+    const boom = new Error('EPIPE');
+    const h = harness({
+      log: () => {
+        throw boom;
+      },
+    });
+    const done = h.finish();
+    h.release();
+    await expect(done).rejects.toBe(boom);
+    expect(h.events).toEqual(['stopAll', 'stopped', 'rm /tmp/goko-smoke-test {"recursive":true,"force":true}', '[OK] smoke: все шаги прошли', 'exit 1']);
+  });
+
+  it('исключение в fail после отказа stopAll: dataDir удалён и выход 1', async () => {
+    const boom = new Error('stdout closed');
+    const h = harness({
+      stopAll: () => Promise.reject(new Error('stuck')),
+      fail: () => {
+        throw boom;
+      },
+    });
+    await expect(h.finish()).rejects.toBe(boom);
+    expect(h.events.filter((e) => e.startsWith('rm ') || e.startsWith('exit'))).toEqual(['rm /tmp/goko-smoke-test {"recursive":true,"force":true}', 'exit 1']);
+  });
+
+  it('по сигналу исключение в итоговой строке не становится необработанным отклонением', async () => {
+    const h = harness({
+      log: () => {
+        throw new Error('EPIPE');
+      },
+    });
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      h.signals.emit('SIGINT');
+      h.release();
+      expect(await h.exited).toBe(1);
+      // Отклонение, если бы оно было, всплыло бы через оборот очереди событий.
+      for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
   });
 
   it('отказ удаления dataDir не мешает итогу и коду выхода', async () => {
