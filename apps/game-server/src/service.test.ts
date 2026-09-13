@@ -727,10 +727,52 @@ describe('GameService: фоновые задачи, дедлайны и мьют
     const events = record(bus, `game:${g.state.id}`);
     await service.play(g.state.id, { coord: 'D4', waitForReply: false, via: 'api' });
     await untilTick(() => events.some((e) => e.type === 'error'));
-    expect(events.find((e) => e.type === 'error')).toMatchObject({ code: 'internal', message: 'disk is full' });
+    expect(events.find((e) => e.type === 'error')).toEqual({ type: 'error', code: 'internal', message: 'internal server error' });
     // Партия осталась на последнем удачно записанном состоянии.
     expect(service.get(g.state.id).moves).toHaveLength(1);
     await service.close();
+  });
+
+  it('сырое исключение фоновой задачи: наружу код и общий текст, путь к снапшоту только в лог', async () => {
+    const real = new GameStore(dir);
+    const secretPath = path.join(dir, 'abc.json.4242.tmp');
+    const store = gatedStore(real, async (state) => {
+      if (state.moves.length === 2) throw Object.assign(new Error(`ENOSPC: no space left on device, open '${secretPath}'`), { code: 'ENOSPC' });
+    });
+    const lines: string[] = [];
+    const { service, bus } = await make(createFakeEngine({ script: ['E5'] }), { store, log: (l: string) => lines.push(l) });
+    const g = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: false }, { sessionId: 's1' });
+    const gameEvents = record(bus, `game:${g.state.id}`);
+    const sessionEvents = record(bus, 'session:s1');
+    await service.play(g.state.id, { coord: 'D4', waitForReply: false, via: 'api' });
+    await untilTick(() => gameEvents.some((e) => e.type === 'error'));
+    const expected = { type: 'error', code: 'internal', message: 'internal server error' };
+    expect(gameEvents.filter((e) => e.type === 'error')).toEqual([expected]);
+    expect(sessionEvents.filter((e) => e.type === 'error')).toEqual([expected]);
+    expect(JSON.stringify([...gameEvents, ...sessionEvents])).not.toContain('abc.json');
+    expect(lines.some((l) => l.startsWith('[X]') && l.includes(secretPath))).toBe(true);
+    await service.close();
+  });
+
+  it('сырое исключение движка: наружу engine_unavailable и общий текст, подробности в лог', async () => {
+    let fail = 1;
+    const inner = createFakeEngine({ script: ['E5'] });
+    const flaky: Engine = {
+      ...inner,
+      genmove: async (req) => {
+        if (fail-- > 0) throw new Error('connect ECONNREFUSED 10.0.0.7:8788');
+        return inner.genmove(req);
+      },
+    };
+    const lines: string[] = [];
+    const { service, bus } = await make(flaky, { log: (l: string) => lines.push(l) });
+    const g = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: false });
+    const events = record(bus, `game:${g.state.id}`);
+    await service.play(g.state.id, { coord: 'D4', waitForReply: false, via: 'api' });
+    await untilTick(() => events.some((e) => e.type === 'error'));
+    expect(events.find((e) => e.type === 'error')).toEqual({ type: 'error', code: 'engine_unavailable', message: 'engine is unavailable' });
+    expect(lines.some((l) => l.includes('ECONNREFUSED 10.0.0.7:8788'))).toBe(true);
+    await untilTick(() => service.get(g.state.id).moves.length === 2);
   });
 
   it('код ApiError из фоновой задачи попадает в событие error как есть', async () => {
@@ -1350,7 +1392,7 @@ describe('GameService: фоновые задачи, дедлайны и мьют
     await untilTick(() => playState.settled);
     const res = await playing;
     expect(res.reply).toBeUndefined();
-    expect(events.filter((e) => e.type === 'error')).toEqual([{ type: 'error', code: 'internal', message: 'disk is full' }]);
+    expect(events.filter((e) => e.type === 'error')).toEqual([{ type: 'error', code: 'internal', message: 'internal server error' }]);
 
     // Память и диск на одном и том же состоянии: ход человека есть, ответа движка нет.
     expect(service.get(id).moves.map((m) => m.coord)).toEqual(['D4']);
@@ -1411,7 +1453,7 @@ describe('GameService: фоновые задачи, дедлайны и мьют
     await service.pass(id, { waitForReply: false, via: 'api' });
     await service.pass(id, { waitForReply: false, via: 'api' });
     await untilTick(() => events.some((e) => e.type === 'error'));
-    expect(events.find((e) => e.type === 'error')).toMatchObject({ code: 'internal', message: 'disk is full' });
+    expect(events.find((e) => e.type === 'error')).toEqual({ type: 'error', code: 'internal', message: 'internal server error' });
     expect(service.get(id).status).toBe('playing');
     expect((await real.load())[0]?.status).toBe('playing');
     await vi.advanceTimersByTimeAsync(1000);

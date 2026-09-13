@@ -1,6 +1,5 @@
 // Чистые переходы состояния партии (раздел 4 спеки). Позиция — функция от moves (go-core.replay).
 import {
-  type IllegalReason,
   IllegalMoveError,
   InvalidCoordError,
   type Position,
@@ -41,17 +40,6 @@ export function positionOf(state: GameState): Position {
   return replay(state.settings.boardSize, state.moves);
 }
 
-export function illegalMessage(reason: IllegalReason): string {
-  switch (reason) {
-    case 'occupied':
-      return 'точка занята';
-    case 'ko':
-      return 'ко: сразу забрать нельзя';
-    case 'suicide':
-      return 'самоубийство: у камня не будет дыханий';
-  }
-}
-
 function normalizeCoord(coord: string, size: number): string {
   try {
     const p = parseCoord(coord, size);
@@ -71,7 +59,8 @@ export function applyMove(state: GameState, color: Color, coord: string, at: str
   try {
     played = play(positionOf(state), color, normalized);
   } catch (e) {
-    if (e instanceof IllegalMoveError) throw new ApiError('illegal_move', illegalMessage(e.reason), { reason: e.reason, coord: e.coord });
+    // Текст для человека клиент строит по reason (humanText в протоколе), message — для разработчика.
+    if (e instanceof IllegalMoveError) throw new ApiError('illegal_move', `illegal move ${e.coord}: ${e.reason}`, { reason: e.reason, coord: e.coord });
     throw e;
   }
   const move: Move = { n: state.moves.length + 1, color, coord: normalized, captured: played.captured, at };

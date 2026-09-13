@@ -114,7 +114,8 @@ describe('applyMove', () => {
     expect(errorOf(() => applyMove(s, 'W', 'D4', T))).toMatchObject({ code: 'not_your_turn', status: 409 });
     expect(errorOf(() => applyMove(s, 'B', 'I4', T))).toMatchObject({ code: 'invalid_coord', status: 400 });
     const s1 = applyMove(s, 'B', 'D4', T).state;
-    expect(errorOf(() => applyMove(s1, 'W', 'D4', T))).toMatchObject({ code: 'illegal_move', details: { reason: 'occupied', coord: 'D4' } });
+    // message — английский текст для разработчика; русскую фразу клиент строит по reason (humanText).
+    expect(errorOf(() => applyMove(s1, 'W', 'D4', T))).toMatchObject({ code: 'illegal_move', message: 'illegal move D4: occupied', details: { reason: 'occupied', coord: 'D4' } });
     const done = resign(s1, 'W');
     expect(errorOf(() => applyMove(done, 'B', 'E5', T))).toMatchObject({ code: 'game_finished', status: 409 });
   });

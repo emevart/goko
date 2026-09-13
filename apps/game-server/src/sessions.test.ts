@@ -13,7 +13,7 @@ describe('SessionManager', () => {
     expect(a.room).toBe(roomName(a.id));
     expect(a.currentGameId).toBeNull();
     m.create();
-    expect(errorOf(() => m.create())).toMatchObject({ code: 'limit_reached', status: 429 });
+    expect(errorOf(() => m.create())).toMatchObject({ code: 'limit_reached', status: 429, message: 'limit of 2 active sessions reached' });
     expect(m.list()).toHaveLength(2);
   });
 
@@ -35,7 +35,7 @@ describe('SessionManager', () => {
     const a = m.create();
     expect(m.setGame(a.id, 'g1').currentGameId).toBe('g1');
     expect(m.get(a.id).currentGameId).toBe('g1');
-    expect(errorOf(() => m.get('nope'))).toMatchObject({ code: 'not_found', status: 404 });
+    expect(errorOf(() => m.get('nope'))).toMatchObject({ code: 'not_found', status: 404, message: 'session nope does not exist' });
   });
 
   it('setGame неизвестной -> not_found, touch неизвестной — без ошибки', () => {

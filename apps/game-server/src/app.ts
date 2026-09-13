@@ -48,7 +48,7 @@ async function body(c: Context): Promise<unknown> {
   try {
     return JSON.parse(text);
   } catch {
-    throw new ApiError('bad_request', 'тело запроса не JSON');
+    throw new ApiError('bad_request', 'request body is not JSON');
   }
 }
 
@@ -69,18 +69,18 @@ export function createApp(deps: AppDeps): Hono {
   app.get('/health', (c) => c.json({ ok: true, games: service.list().length, sessions: sessions.list().length }));
 
   app.use('/api/*', async (c, next) => {
-    if (!timingSafeEqual(digest(c.req.header('x-app-key') ?? ''), appKeyDigest)) return fail(c, 'unauthorized', 'нет или неверный X-App-Key');
+    if (!timingSafeEqual(digest(c.req.header('x-app-key') ?? ''), appKeyDigest)) return fail(c, 'unauthorized', 'missing or invalid X-App-Key');
     await next();
   });
 
   app.onError((err, c) => {
     if (err instanceof ApiError) return c.json(err.toBody(), err.status as ContentfulStatusCode);
-    if (err instanceof ZodError) return fail(c, 'bad_request', 'тело запроса не по схеме', { issues: err.issues });
+    if (err instanceof ZodError) return fail(c, 'bad_request', 'request body does not match the schema', { issues: err.issues });
     deps.log?.(`[X] game-server: ${err.stack ?? err.message}`);
-    return fail(c, 'internal', 'внутренняя ошибка сервера');
+    return fail(c, 'internal', 'internal server error');
   });
 
-  app.notFound((c) => fail(c, 'not_found', `нет маршрута ${c.req.method} ${c.req.path}`));
+  app.notFound((c) => fail(c, 'not_found', `no route ${c.req.method} ${c.req.path}`));
 
   // Поток SSE: initial уходит первым, дальше события канала, между ними heartbeat-комментарии.
   // Подписка и слушатели отмены ставятся до первой записи: запись ждёт, пока клиент прочитает,
@@ -184,7 +184,7 @@ export function createApp(deps: AppDeps): Hono {
     } catch (e) {
       sessions.remove(session.id);
       deps.log?.(`[X] game-server: сессия ${session.id} не создана: ${redact(e instanceof Error ? e.message : String(e))}`);
-      throw new ApiError('internal', 'не удалось подготовить комнату LiveKit для сессии');
+      throw new ApiError('internal', 'could not prepare the LiveKit room for the session');
     }
     watch(session.id);
     return c.json({ session, livekit: { url: deps.livekit.url, token } });

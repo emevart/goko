@@ -263,7 +263,7 @@ describe('createApp: X-App-Key, тела и ошибки', () => {
       expect(res.status).toBe(401);
       const text = await res.text();
       expect(text).not.toContain(KEY);
-      expect(JSON.parse(text)).toEqual({ error: { code: 'unauthorized', message: 'нет или неверный X-App-Key' } });
+      expect(JSON.parse(text)).toEqual({ error: { code: 'unauthorized', message: 'missing or invalid X-App-Key' } });
     }
     expect((await app.request('/api/games', { headers: { 'x-app-key': KEY } })).status).toBe(200);
     const sessions = new SessionManager({ max: 1, ttlMs: 1000 });
@@ -294,7 +294,7 @@ describe('createApp: X-App-Key, тела и ошибки', () => {
 
     const broken = await app.request(`/api/games/${state.id}/play`, { method: 'POST', headers, body: '{"coord": "D4"' });
     expect(broken.status).toBe(400);
-    expect(((await broken.json()) as { error: unknown }).error).toMatchObject({ code: 'bad_request', message: 'тело запроса не JSON' });
+    expect(((await broken.json()) as { error: unknown }).error).toMatchObject({ code: 'bad_request', message: 'request body is not JSON' });
     expect((await client.getGame(state.id)).moves).toHaveLength(0);
   });
 
@@ -305,12 +305,12 @@ describe('createApp: X-App-Key, тела и ошибки', () => {
     expect(res.status).toBe(400);
     const body = (await res.json()) as { error: { code: string; message: string; details: { issues: unknown[] } } };
     expect(body.error.code).toBe('bad_request');
-    expect(body.error.message).toBe('тело запроса не по схеме');
+    expect(body.error.message).toBe('request body does not match the schema');
     expect(body.error.details.issues.length).toBeGreaterThan(0);
 
     const missing = await app.request('/api/nope', { headers });
     expect(missing.status).toBe(404);
-    expect(await missing.json()).toEqual({ error: { code: 'not_found', message: 'нет маршрута GET /api/nope' } });
+    expect(await missing.json()).toEqual({ error: { code: 'not_found', message: 'no route GET /api/nope' } });
   });
 
   it('непредвиденная ошибка — 500 internal без подробностей наружу, подробности в лог', async () => {
@@ -321,8 +321,33 @@ describe('createApp: X-App-Key, тела и ошибки', () => {
     const res = await app.request('/api/games', { headers: { 'x-app-key': KEY } });
     expect(res.status).toBe(500);
     // Тело сверяется целиком: ни стека, ни пути, ни details.
-    expect(await res.json()).toEqual({ error: { code: 'internal', message: 'внутренняя ошибка сервера' } });
+    expect(await res.json()).toEqual({ error: { code: 'internal', message: 'internal server error' } });
     expect(logs.some((l) => l.startsWith('[X] game-server:') && l.includes('disk exploded'))).toBe(true);
+  });
+
+  it('message ошибок по-английски на всех путях приложения и сервиса', async () => {
+    const { app, client, service } = await make({ script: ['E5'] });
+    const { state } = await client.createGame(HUMAN_BLACK);
+    await client.play(state.id, { coord: 'D4' });
+    const headers = { 'x-app-key': KEY, 'content-type': 'application/json' };
+    const failures = [
+      errorOf(client.play(state.id, { coord: 'E5' })),
+      errorOf(client.play(state.id, { coord: 'I5' })),
+      errorOf(client.play(state.id, { coord: 'C3', expectedRevision: 0 })),
+      errorOf(client.getGame('nope')),
+      errorOf(client.newGame('nope', HUMAN_ONLY)),
+      errorOf(client.createGame({ black: { controller: 'external' }, white: { controller: 'human' } } as never)),
+    ];
+    const bodies = [
+      await (await app.request('/api/games', { headers: { 'x-app-key': 'wrong' } })).json(),
+      await (await app.request(`/api/games/${state.id}/play`, { method: 'POST', headers, body: '{' })).json(),
+      await (await app.request('/api/games', { method: 'POST', headers, body: '{"black":1}' })).json(),
+      await (await app.request('/api/nope', { headers })).json(),
+    ] as Array<{ error: { message: string } }>;
+    const messages = [...(await Promise.all(failures)).map((e) => e.message), ...bodies.map((b) => b.error.message)];
+    expect(messages).toHaveLength(10);
+    for (const message of messages) expect(message).toMatch(/^[ -~]+$/);
+    await service.close();
   });
 
   it('ascii — text/plain, sgf — application/x-go-sgf', async () => {
@@ -343,7 +368,7 @@ describe('createApp: сессии и LiveKit', () => {
     const rooms = fakeRooms(new Error(`twirp: unauthenticated key=${LK.apiKey} secret=${LK.apiSecret} app=${KEY}`));
     const { client, sessions, logs } = await make({ maxSessions: 1, rooms });
     const err = await errorOf(client.createSession());
-    expect(err).toMatchObject({ code: 'internal', status: 500, message: 'не удалось подготовить комнату LiveKit для сессии' });
+    expect(err).toMatchObject({ code: 'internal', status: 500, message: 'could not prepare the LiveKit room for the session' });
     expect(JSON.stringify(err)).not.toContain(LK.apiSecret);
     expect(rooms.calls).toHaveLength(1);
     expect(sessions.list()).toEqual([]);

@@ -48,13 +48,13 @@ export class SessionManager {
 
   private require(id: string): Entry {
     const e = this.alive(id);
-    if (!e) throw new ApiError('not_found', `сессии ${id} нет`);
+    if (!e) throw new ApiError('not_found', `session ${id} does not exist`);
     return e;
   }
 
   create(): Session {
     this.sweep();
-    if (this.entries.size >= this.opts.max) throw new ApiError('limit_reached', `уже ${this.opts.max} активных сессий`, { max: this.opts.max });
+    if (this.entries.size >= this.opts.max) throw new ApiError('limit_reached', `limit of ${this.opts.max} active sessions reached`, { max: this.opts.max });
     const id = newId();
     const now = this.now();
     const session: Session = { id, room: roomName(id), currentGameId: null, createdAt: new Date(now).toISOString() };

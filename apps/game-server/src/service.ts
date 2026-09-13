@@ -9,6 +9,7 @@ import {
   type By,
   type Color,
   CorrectRequest,
+  type ErrorCode,
   type GameEvent,
   GameSettings,
   type GameState,
@@ -57,6 +58,10 @@ export const ENGINE_RETRY_MS = 5000;
 export const SCORE_BUDGET_MS = 15_000;
 export const ANALYZE_BUDGET_MS = 10_000;
 export const DEFAULT_RANK = '10k' as const;
+// Тексты события error для сырых исключений: наружу только код и общий английский текст,
+// подробности (путь к снапшоту, адрес движка) — только в лог.
+export const INTERNAL_MESSAGE = 'internal server error';
+export const ENGINE_UNAVAILABLE_MESSAGE = 'engine is unavailable';
 
 export type GameServiceDeps = {
   store: GameStore;
@@ -72,6 +77,12 @@ export type GameServiceDeps = {
 
 // Ожидающий ответа движка на состояние с ревизией revision.
 type Waiter = { revision: number; resolve: (move: Move | null) => void };
+
+// ApiError уходит как есть: его message пишется в коде сервера по-английски и без путей.
+// Сырое исключение (fs, fetch) несёт путь или адрес, поэтому наружу — код и общий текст.
+function publicError(e: unknown, code: ErrorCode, message: string): GameEvent {
+  return e instanceof ApiError ? { type: 'error', code: e.code, message: e.message } : { type: 'error', code, message };
+}
 
 export class GameService {
   private readonly deps: GameServiceDeps;
@@ -415,10 +426,9 @@ export class GameService {
         await task;
       } catch (e) {
         const message = e instanceof Error ? e.message : String(e);
-        const code = e instanceof ApiError ? e.code : 'internal';
         const retryMs = this.deps.engineRetryMs ?? ENGINE_RETRY_MS;
         this.deps.log?.(`[X] background task for game ${id} failed: ${message}; retrying in ${retryMs} ms`);
-        this.emitGame(id, { type: 'error', code, message });
+        this.emitGame(id, publicError(e, 'internal', INTERNAL_MESSAGE));
         this.releaseWaiters(id);
         await this.sleep(retryMs);
       } finally {
@@ -488,10 +498,9 @@ export class GameService {
   // Движок недоступен: событие error, ожидающие получают null (клиент увидит replyTimedOut), пауза, повтор.
   private async onEngineFailure(id: string, e: unknown): Promise<void> {
     const message = e instanceof Error ? e.message : String(e);
-    const code = e instanceof ApiError ? e.code : 'engine_unavailable';
     const retryMs = this.deps.engineRetryMs ?? ENGINE_RETRY_MS;
     this.deps.log?.(`[!] engine: ${message}; retrying in ${retryMs} ms`);
-    this.emitGame(id, { type: 'error', code, message });
+    this.emitGame(id, publicError(e, 'engine_unavailable', ENGINE_UNAVAILABLE_MESSAGE));
     this.releaseWaiters(id);
     await this.sleep(retryMs);
   }
