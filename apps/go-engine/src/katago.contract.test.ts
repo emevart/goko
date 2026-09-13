@@ -17,7 +17,7 @@ const KEY = 'contract';
 const headers = { 'content-type': 'application/json', 'x-engine-key': KEY };
 const base = { boardSize: 13, rules: 'chinese', komi: 7.5 };
 
-type GenmoveShape = { move: string; humanPolicyTop: { coord: string; prob: number }[] };
+type GenmoveShape = { move: string; humanPolicyTop: { coord: string; prob: number }[]; humanFallback: boolean };
 type AnalyzeShape = { winrateB: number; scoreLeadB: number; ownership: number[] };
 type ScoreShape = { areaB: number; areaW: number; winner: string; margin: number; dead: string[] };
 
@@ -56,6 +56,8 @@ describe.skipIf(!BIN)('KataGo contract', () => {
     expect(r.move).not.toBe('pass');
     expect(parseCoord(r.move, 13)).not.toBe('pass');
     expect(r.humanPolicyTop.length).toBeGreaterThan(0);
+    // Обе сети на месте: ход выбран человеческой политикой, а не лучшим ходом поиска.
+    expect(r.humanFallback).toBe(false);
   }, 60_000);
 
   it('genmove в середине партии легален по go-core', async () => {
@@ -72,6 +74,7 @@ describe.skipIf(!BIN)('KataGo contract', () => {
       moves.map(([color, coord]) => ({ color: color as 'B' | 'W', coord })),
     );
     expect(() => play(pos, 'W', r.move)).not.toThrow();
+    expect(r.humanFallback).toBe(false);
   }, 60_000);
 
   it('score известной позиции: стены 7/8 -> B+5.5', async () => {
