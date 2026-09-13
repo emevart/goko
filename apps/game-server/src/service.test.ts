@@ -44,6 +44,13 @@ async function make(engine: Engine, extra: Partial<ConstructorParameters<typeof 
   return { service, bus, store };
 }
 
+// Снапшоты в памяти: для тестов, которые ждут фоновый коммит по оборотам очереди. Настоящая запись
+// на диск идёт в пуле потоков и под нагрузкой длится дольше любого разумного числа оборотов.
+function memoryStore(): GameStore & { saved: GameState[] } {
+  const saved: GameState[] = [];
+  return { saved, load: async () => [], save: async (state: GameState) => void saved.push(state) } as unknown as GameStore & { saved: GameState[] };
+}
+
 function record(bus: EventBus, channel: string): GameEvent[] {
   const out: GameEvent[] = [];
   bus.subscribe(channel, (e) => out.push(e));
@@ -532,13 +539,12 @@ describe('GameService: партия человек против движка', (
     // до 500 мс настоящего времени, а конец партии ждал по числу оборотов очереди: под нагрузкой
     // запись на диск шла дольше, чем крутились обороты, и тест падал. Без ввода-вывода и таймеров
     // вся цепочка (пас, ответ движка, счёт, три коммита) — только микрозадачи.
-    const saved: GameState[] = [];
-    const store = { load: async () => [], save: async (state: GameState) => void saved.push(state) } as unknown as GameStore;
+    const store = memoryStore();
     const { service } = await make(createFakeEngine(), { store });
     const g = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: false });
     await service.pass(g.state.id, { waitForReply: false, via: 'api' });
     await untilTick(() => service.get(g.state.id).status === 'finished', 50);
-    expect(saved.map((st) => st.status)).toEqual(['playing', 'playing', 'playing', 'finished']);
+    expect(store.saved.map((st) => st.status)).toEqual(['playing', 'playing', 'playing', 'finished']);
     expect(service.sgf(g.state.id)).toContain('RE[W+7.5]');
   });
 
@@ -790,13 +796,15 @@ describe('GameService: фоновые задачи, дедлайны и мьют
       },
     };
     const lines: string[] = [];
-    const { service, bus } = await make(flaky, { log: (l: string) => lines.push(l) });
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const { service, bus } = await make(flaky, { store: memoryStore(), log: (l: string) => lines.push(l) });
     const g = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: false });
     const events = record(bus, `game:${g.state.id}`);
     await service.play(g.state.id, { coord: 'D4', waitForReply: false, via: 'api' });
     await untilTick(() => events.some((e) => e.type === 'error'));
     expect(events.find((e) => e.type === 'error')).toEqual({ type: 'error', code: 'engine_unavailable', message: 'engine is unavailable' });
     expect(lines.some((l) => l.includes('ECONNREFUSED 10.0.0.7:8788'))).toBe(true);
+    await vi.advanceTimersByTimeAsync(20);
     await untilTick(() => service.get(g.state.id).moves.length === 2);
   });
 
@@ -1708,7 +1716,7 @@ describe('GameService: серия повторов фоновой задачи',
         return inner.genmove(req);
       },
     };
-    const { service, bus } = await make(flaky, { retryDelaysMs: [10, 1000] });
+    const { service, bus } = await make(flaky, { store: memoryStore(), retryDelaysMs: [10, 1000] });
     const g = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: false });
     const id = g.state.id;
     const events = record(bus, `game:${id}`);
