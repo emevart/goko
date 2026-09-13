@@ -112,10 +112,51 @@ describe('запуск go-engine', () => {
     expect(rec.exits).toEqual([2]);
     await startEngine({ ...deps, env: { KATAGO_BIN: 'katago' } });
     expect(rec.exits).toEqual([2, 2]);
+    await startEngine({ ...deps, env: {} });
+    expect(rec.exits).toEqual([2, 2, 2]);
     expect(rec.logs).toEqual([
-      '[X] go-engine: нужны KATAGO_BIN и ENGINE_KEY (см. infra/.env.example)',
-      '[X] go-engine: нужны KATAGO_BIN и ENGINE_KEY (см. infra/.env.example)',
-    ]); // отказ виден и не печатает значений переменных
+      '[X] go-engine: нужна переменная KATAGO_BIN (см. infra/.env.example)',
+      '[X] go-engine: нужна переменная ENGINE_KEY (см. infra/.env.example)',
+      '[X] go-engine: нужна переменная KATAGO_BIN (см. infra/.env.example)',
+      '[X] go-engine: нужна переменная ENGINE_KEY (см. infra/.env.example)',
+    ]); // отказ виден, называет переменную и не печатает значений
+  });
+
+  it('пустые или из пробелов KATAGO_BIN и ENGINE_KEY — то же, что не заданные: [X] с именем, код 2', async () => {
+    for (const name of ['KATAGO_BIN', 'ENGINE_KEY'] as const) {
+      for (const value of ['', '  ']) {
+        const { deps, rec } = harness(async () => ({ id: 'q1' }));
+        await startEngine({ ...deps, env: { ...deps.env, [name]: value } });
+        expect(rec.events).toEqual(['exit 2']);
+        expect(rec.logs).toEqual([`[X] go-engine: нужна переменная ${name} (см. infra/.env.example)`]);
+      }
+    }
+  });
+
+  it('пустые или из пробелов переменные с умолчанием берут умолчание: как в infra/.env.example', async () => {
+    const base = { KATAGO_BIN: 'katago', ENGINE_KEY: 'k' };
+    const { deps: defDeps, rec: def } = harness(async () => ({ id: 'q1' }));
+    await startEngine({ ...defDeps, env: base });
+    const first = def.options[0];
+    if (!first) throw new Error('движок не создан');
+    // Лог у каждой обвязки свой: сравниваются только пути.
+    const { log: _log, ...defaults } = first;
+    for (const value of ['', '  ']) {
+      for (const name of ['KATAGO_MODEL', 'KATAGO_HUMAN_MODEL', 'KATAGO_CONFIG', 'ENGINE_PORT', 'ENGINE_HOST']) {
+        const { deps, rec } = harness(async () => ({ id: 'q1' }));
+        await startEngine({ ...deps, env: { ...base, [name]: value } });
+        expect(rec.exits).toEqual([]);
+        expect(rec.options[0]).toMatchObject(defaults);
+        expect(rec.ports).toEqual([8788]);
+        expect(rec.hostnames).toEqual(['127.0.0.1']);
+      }
+    }
+  });
+
+  it('заданные пути сетей и конфига уходят в движок как есть', async () => {
+    const { deps, rec } = harness(async () => ({ id: 'q1' }));
+    await startEngine({ ...deps, env: { ...deps.env, KATAGO_MODEL: '/m/main.bin.gz', KATAGO_HUMAN_MODEL: '/m/human.bin.gz', KATAGO_CONFIG: '/c/a.cfg' } });
+    expect(rec.options[0]).toMatchObject({ bin: 'katago', model: '/m/main.bin.gz', humanModel: '/m/human.bin.gz', config: '/c/a.cfg' });
   });
 
   it('сигнал закрывает сервер и останавливает движок', async () => {

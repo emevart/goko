@@ -42,18 +42,25 @@ export async function startEngine(deps: StartDeps = {}): Promise<void> {
   const listen = deps.listen ?? defaultListen;
   const createEngine = deps.createEngine ?? ((options: KataGoOptions) => new KataGo(options));
 
-  const bin = env.KATAGO_BIN;
-  const engineKey = env.ENGINE_KEY;
-  if (!bin || !engineKey) {
-    log('[X] go-engine: нужны KATAGO_BIN и ENGINE_KEY (см. infra/.env.example)');
+  // Пустая или из пробелов переменная — то же, что не заданная: так читается infra/.env.example,
+  // где необязательные переменные перечислены с пустыми значениями (правило то же, что в game-server).
+  const optional = (name: string): string | undefined => {
+    const value = env[name];
+    return value === undefined || value.trim() === '' ? undefined : value;
+  };
+  const bin = optional('KATAGO_BIN');
+  const engineKey = optional('ENGINE_KEY');
+  if (bin === undefined || engineKey === undefined) {
+    if (bin === undefined) log('[X] go-engine: нужна переменная KATAGO_BIN (см. infra/.env.example)');
+    if (engineKey === undefined) log('[X] go-engine: нужна переменная ENGINE_KEY (см. infra/.env.example)');
     exit(2);
     return;
   }
-  const model = env.KATAGO_MODEL ?? path.join(root, 'apps/go-engine/models/kata1-b10c128-s1141046784-d204142634.txt.gz');
-  const humanModel = env.KATAGO_HUMAN_MODEL ?? path.join(root, 'apps/go-engine/models/b18c384nbt-humanv0.bin.gz');
-  const config = env.KATAGO_CONFIG ?? path.join(root, 'apps/go-engine/config/analysis.cfg');
-  const port = Number(env.ENGINE_PORT ?? 8788);
-  const hostname = env.ENGINE_HOST ?? '127.0.0.1';
+  const model = optional('KATAGO_MODEL') ?? path.join(root, 'apps/go-engine/models/kata1-b10c128-s1141046784-d204142634.txt.gz');
+  const humanModel = optional('KATAGO_HUMAN_MODEL') ?? path.join(root, 'apps/go-engine/models/b18c384nbt-humanv0.bin.gz');
+  const config = optional('KATAGO_CONFIG') ?? path.join(root, 'apps/go-engine/config/analysis.cfg');
+  const port = Number(optional('ENGINE_PORT') ?? 8788);
+  const hostname = optional('ENGINE_HOST') ?? '127.0.0.1';
 
   const katago = createEngine({ bin, model, humanModel, config, log });
   katago.start();

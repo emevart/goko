@@ -24,6 +24,7 @@ describe('точка входа go-engine', () => {
     });
     expect(run.error).toBeUndefined();
     expect(run.status).toBe(2);
-    expect(run.stderr).toContain('[X] go-engine: нужны KATAGO_BIN и ENGINE_KEY');
+    expect(run.stderr).toContain('[X] go-engine: нужна переменная KATAGO_BIN');
+    expect(run.stderr).toContain('[X] go-engine: нужна переменная ENGINE_KEY');
   });
 });
