@@ -366,6 +366,17 @@ describe('createApp: сессии и LiveKit', () => {
     expect(sessions.list()).toEqual([]);
   });
 
+  it('лог отказа: ключ внутри секрета не оставляет куски секрета, пустой ключ не портит текст', async () => {
+    // apiKey — подстрока apiSecret: если заменить его первым, в логе останутся части секрета.
+    const overlapping = await make({ rooms: fakeRooms(new Error(`denied ${LK.apiSecret}`)), livekit: { apiKey: 'at-least' } });
+    await expect(overlapping.client.createSession()).rejects.toMatchObject({ code: 'internal' });
+    expect(overlapping.logs.find((l) => l.startsWith('[X] game-server: сессия'))).toMatch(/не создана: denied \[скрыто\]$/);
+    // Пустой apiKey (createApp без проверки конфигурации): текст исключения доходит как есть.
+    const empty = await make({ livekit: { apiKey: '' } });
+    await expect(empty.client.createSession()).rejects.toMatchObject({ code: 'internal' });
+    expect(empty.logs.find((l) => l.startsWith('[X] game-server: сессия'))).toMatch(/не создана: mintToken: пустой apiKey$/);
+  });
+
   it('новая партия в неизвестной сессии — not_found; поток неизвестной сессии и партии — not_found', async () => {
     const { client, app } = await make();
     await expect(client.newGame('nope', HUMAN_ONLY)).rejects.toMatchObject({ code: 'not_found', status: 404 });
