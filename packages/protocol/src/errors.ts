@@ -10,6 +10,8 @@ export const ERROR_CODES = [
   'revision_conflict',
   'engine_busy',
   'engine_unavailable',
+  // Серия повторов фоновой задачи исчерпана (только событие error; партия остаётся playing).
+  'engine_gave_up',
   'unsupported_controller',
   'not_found',
   'bad_request',
@@ -34,6 +36,7 @@ export const ERROR_STATUS: Record<ErrorCode, number> = {
   internal: 500,
   engine_busy: 503,
   engine_unavailable: 503,
+  engine_gave_up: 503,
 };
 
 export const ErrorBody = z.object({

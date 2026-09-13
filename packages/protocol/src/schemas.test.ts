@@ -406,12 +406,13 @@ describe('операции', () => {
 });
 
 describe('ошибки', () => {
-  it('ровно четырнадцать кодов', () => {
-    expect(ERROR_CODES).toHaveLength(14);
+  it('ровно пятнадцать кодов', () => {
+    expect(ERROR_CODES).toHaveLength(15);
     expect([...ERROR_CODES].sort()).toEqual(
       [
         'bad_request',
         'engine_busy',
+        'engine_gave_up',
         'engine_unavailable',
         'game_finished',
         'illegal_move',
@@ -444,8 +445,9 @@ describe('ошибки', () => {
       internal: 500,
       engine_busy: 503,
       engine_unavailable: 503,
+      engine_gave_up: 503,
     });
-    expect(Object.keys(ERROR_STATUS)).toHaveLength(14);
+    expect(Object.keys(ERROR_STATUS)).toHaveLength(15);
     for (const code of ERROR_CODES) expect(ERROR_STATUS[code], code).toBeGreaterThanOrEqual(400);
   });
 
@@ -458,21 +460,21 @@ describe('ошибки', () => {
   });
 
   it('ApiError превращается в тело ответа', () => {
-    const e = new ApiError('illegal_move', 'точка занята', { reason: 'occupied' });
+    const e = new ApiError('illegal_move', 'illegal move E5: occupied', { reason: 'occupied' });
     expect(e.status).toBe(400);
     expect(e.code).toBe('illegal_move');
     expect(e.name).toBe('ApiError');
     expect(e).toBeInstanceOf(Error);
     expect(ErrorBody.parse(e.toBody())).toEqual({
-      error: { code: 'illegal_move', message: 'точка занята', details: { reason: 'occupied' } },
+      error: { code: 'illegal_move', message: 'illegal move E5: occupied', details: { reason: 'occupied' } },
     });
   });
 
   it('ApiError без details не кладёт details в тело', () => {
-    const e = new ApiError('engine_busy', 'движок занят');
+    const e = new ApiError('engine_busy', 'engine is busy');
     expect(e.status).toBe(503);
     expect(e.details).toBeUndefined();
-    expect(e.toBody()).toEqual({ error: { code: 'engine_busy', message: 'движок занят' } });
+    expect(e.toBody()).toEqual({ error: { code: 'engine_busy', message: 'engine is busy' } });
     expect('details' in e.toBody().error).toBe(false);
   });
 
