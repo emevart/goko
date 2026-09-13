@@ -50,16 +50,21 @@ export async function startEngine(deps: StartDeps = {}): Promise<void> {
   };
   const bin = optional('KATAGO_BIN');
   const engineKey = optional('ENGINE_KEY');
-  if (bin === undefined || engineKey === undefined) {
+  // Порт — по правилу PORT game-server: запись целого без знака, ведущего нуля и пробелов, от 1
+  // до 65535. Иначе Number('abc') дал бы NaN, а '0' — случайный порт, и game-server не нашёл бы движок.
+  const rawPort = optional('ENGINE_PORT');
+  const port = rawPort === undefined ? 8788 : Number(rawPort);
+  const badPort = rawPort !== undefined && (!/^[1-9]\d*$/.test(rawPort) || port > 65535);
+  if (bin === undefined || engineKey === undefined || badPort) {
     if (bin === undefined) log('[X] go-engine: нужна переменная KATAGO_BIN (см. infra/.env.example)');
     if (engineKey === undefined) log('[X] go-engine: нужна переменная ENGINE_KEY (см. infra/.env.example)');
+    if (badPort) log('[X] go-engine: ENGINE_PORT должна быть целым числом от 1 до 65535 (см. infra/.env.example)');
     exit(2);
     return;
   }
   const model = optional('KATAGO_MODEL') ?? path.join(root, 'apps/go-engine/models/kata1-b10c128-s1141046784-d204142634.txt.gz');
   const humanModel = optional('KATAGO_HUMAN_MODEL') ?? path.join(root, 'apps/go-engine/models/b18c384nbt-humanv0.bin.gz');
   const config = optional('KATAGO_CONFIG') ?? path.join(root, 'apps/go-engine/config/analysis.cfg');
-  const port = Number(optional('ENGINE_PORT') ?? 8788);
   const hostname = optional('ENGINE_HOST') ?? '127.0.0.1';
 
   const katago = createEngine({ bin, model, humanModel, config, log });

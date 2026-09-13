@@ -1,3 +1,4 @@
+import net from 'node:net';
 import type { Hono } from 'hono';
 import { describe, expect, it, vi } from 'vitest';
 import type { KataGoOptions, KataQuery, KataResponse } from './katago.ts';
@@ -20,6 +21,19 @@ type Recorder = {
   // Резолвится первым вызовом подделанного exit: тест ждёт событие, а не число микрозадач.
   exited: Promise<number>;
 };
+
+// Свободный порт петли: ОС выдаёт эфемерный, сервер сразу закрывается и порт отдаётся тесту.
+function freePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const server = net.createServer();
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      const address = server.address();
+      const port = typeof address === 'object' && address !== null ? address.port : 0;
+      server.close(() => (port > 0 ? resolve(port) : reject(new Error('no ephemeral port'))));
+    });
+  });
+}
 
 function harness(answer: () => Promise<KataResponse>): { deps: StartDeps; rec: Recorder } {
   let onExit: (code: number) => void = () => undefined;
@@ -153,6 +167,38 @@ describe('запуск go-engine', () => {
     }
   });
 
+  it('ENGINE_PORT не целое от 1 до 65535 — [X] с именем переменной, код 2, движок не стартует', async () => {
+    // Правило то же, что у PORT game-server: только запись целого без ведущего нуля и пробелов.
+    for (const value of ['abc', '0', '65536', '-1', '1.5', '8788x', '1e3', '08788', ' 18788 ', '0x10']) {
+      const { deps, rec } = harness(async () => ({ id: 'q1' }));
+      await startEngine({ ...deps, env: { ...deps.env, ENGINE_PORT: value } });
+      expect(rec.events).toEqual(['exit 2']);
+      expect(rec.signals).toEqual([]);
+      // Строка фиксированная: называет переменную и не печатает значение.
+      expect(rec.logs).toEqual(['[X] go-engine: ENGINE_PORT должна быть целым числом от 1 до 65535 (см. infra/.env.example)']);
+    }
+  });
+
+  it('неверный ENGINE_PORT и отсутствующие переменные — все строки [X] разом, код 2', async () => {
+    const { deps, rec } = harness(async () => ({ id: 'q1' }));
+    await startEngine({ ...deps, env: { ENGINE_PORT: 'abc' } });
+    expect(rec.events).toEqual(['exit 2']);
+    expect(rec.logs).toEqual([
+      '[X] go-engine: нужна переменная KATAGO_BIN (см. infra/.env.example)',
+      '[X] go-engine: нужна переменная ENGINE_KEY (см. infra/.env.example)',
+      '[X] go-engine: ENGINE_PORT должна быть целым числом от 1 до 65535 (см. infra/.env.example)',
+    ]);
+  });
+
+  it('ENGINE_PORT на границах 1 и 65535 принимается', async () => {
+    for (const value of ['1', '65535']) {
+      const { deps, rec } = harness(async () => ({ id: 'q1' }));
+      await startEngine({ ...deps, env: { ...deps.env, ENGINE_PORT: value } });
+      expect(rec.exits).toEqual([]);
+      expect(rec.ports).toEqual([Number(value)]);
+    }
+  });
+
   it('заданные пути сетей и конфига уходят в движок как есть', async () => {
     const { deps, rec } = harness(async () => ({ id: 'q1' }));
     await startEngine({ ...deps, env: { ...deps.env, KATAGO_MODEL: '/m/main.bin.gz', KATAGO_HUMAN_MODEL: '/m/human.bin.gz', KATAGO_CONFIG: '/c/a.cfg' } });
@@ -222,19 +268,20 @@ describe('запуск go-engine', () => {
   });
 
   it('боевой listen действительно поднимает сервер и сообщает порт', async () => {
-    // Единственный путь, где участвует настоящий @hono/node-server: порт 0 — эфемерный,
-    // движок подделан, поэтому тест не трогает ни KataGo, ни фиксированный порт спайка.
+    // Единственный путь, где участвует настоящий @hono/node-server: порт свободный, взятый у ОС
+    // (ENGINE_PORT=0 отклоняется), движок подделан, поэтому тест не трогает ни KataGo, ни порт спайка.
+    const port = await freePort();
     const { deps, rec } = harness(async () => ({ id: 'q1' }));
     const say = vi.spyOn(console, 'log').mockImplementation(() => undefined);
     try {
-      await startEngine({ ...deps, listen: undefined, env: { KATAGO_BIN: 'x', ENGINE_KEY: 'k', ENGINE_PORT: '0' } });
+      await startEngine({ ...deps, listen: undefined, env: { KATAGO_BIN: 'x', ENGINE_KEY: 'k', ENGINE_PORT: String(port) } });
       // Готовность сервера приходит событием, а не возвратом startEngine: ждём саму строку.
       const line = await vi.waitFor(() => {
         const found = say.mock.calls.map((c) => String(c[0])).find((l) => l.includes('go-engine на порту'));
         expect(found).toBeDefined();
         return found;
       });
-      expect(line).toMatch(/^\[OK\] go-engine на порту \d+; сети .+ \+ .+$/);
+      expect(line).toBe(`[OK] go-engine на порту ${port}; сети kata1-b10c128-s1141046784-d204142634.txt.gz + b18c384nbt-humanv0.bin.gz`);
     } finally {
       say.mockRestore();
       rec.handlers[0]?.(); // закрываем сервер: иначе процесс теста останется слушать порт
