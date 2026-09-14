@@ -18,12 +18,35 @@ export const SERVER_TARGET_LOAD = 0.7;
 // Поднимая MAX_SESSIONS выше 6, поднять и MAX_JOBS.
 export const MAX_JOBS = 8;
 
-// Порог FULL у самого воркера. Сервер перестаёт давать job раньше (на 0,7), порог 1 только не даёт
-// воркеру по умолчанию production (0,7 от CPU) вмешаться в счёт.
+// Порог FULL у самого воркера сравнивается со значением loadFunc: FULL — при activeJobs = MAX_JOBS.
+// Раньше этого сервер перестаёт давать job сам (на 0,7).
 export const LOAD_THRESHOLD = 1;
+
+// Тёплые процессы job. Без них (умолчание @livekit/agents 1.8 в dev — 0) ProcPool.launchJob кладёт исполнитель
+// в executors и не удаляет, а runningJob исполнителя после выхода процесса не сбрасывается (ipc/proc_pool.ts,
+// ipc/job_proc_executor.ts). activeJobs — исполнители с runningJob (worker.ts), поэтому в dev каждая завершённая
+// job оставалась в счёте: после шестой комнаты за жизнь воркера сервер молча переставал давать ему job.
+// Исполнитель из пула удаляет только procWatchTask тёплого процесса, а он работает при numIdleProcesses > 0.
+// Один тёплый процесс: в dev заодно быстрее вход агента; в start вместо min(CPU, 4) = 2 на cx23 — 1, память VPS
+// экономится, вторая одновременная комната стартует чуть дольше (процесс создаётся на ходу).
+// Явное значение нужно и потому, что cli.runApp пересобирает опции: 0 там заменился бы умолчанием режима.
+export const NUM_IDLE_PROCESSES = 1;
 
 export function jobLoad(activeJobs: number, maxJobs: number = MAX_JOBS): number {
   return Math.min(activeJobs / maxJobs, 1);
+}
+
+// Опции ServerOptions про загрузку и пул процессов; main.ts раскладывает их в ServerOptions, тест проверяет.
+export function workerPoolOptions(): {
+  loadFunc: (server: { activeJobs: readonly unknown[] }) => Promise<number>;
+  loadThreshold: number;
+  numIdleProcesses: number;
+} {
+  return {
+    loadFunc: async (server) => jobLoad(server.activeJobs.length),
+    loadThreshold: LOAD_THRESHOLD,
+    numIdleProcesses: NUM_IDLE_PROCESSES,
+  };
 }
 
 // Сколько job идёт одновременно, когда сервер перестаёт давать новые: первое n с загрузкой не ниже 0,7.

@@ -12,7 +12,7 @@ import { CONFIG_EXIT_CODE, readConfig } from './config.ts';
 import { watchDeparture } from './departure.ts';
 import { createEventSpeaker } from './event-speech.ts';
 import { type WatchHandle, watchSession } from './events.ts';
-import { LOAD_THRESHOLD, jobLoad } from './load.ts';
+import { workerPoolOptions } from './load.ts';
 import { sessionIdOf } from './metadata.ts';
 import { MODE_ATTRIBUTE, MODE_WAIT_MS, type ModeFollower, type ParticipantLike, followMode, waitForMode } from './mode.ts';
 import { GREETING_INSTRUCTIONS } from './prompt.ts';
@@ -171,9 +171,8 @@ cli.runApp(
     agentName,
     drainTimeout: DRAIN_TIMEOUT_MS,
     shutdownProcessTimeout: SHUTDOWN_PROCESS_TIMEOUT_MS,
-    // Загрузка по числу job, а не по CPU машины (load.ts, D-0013): иначе всплеск CPU в момент создания комнаты
-    // оставлял её без агента навсегда.
-    loadFunc: async (server) => jobLoad(server.activeJobs.length),
-    loadThreshold: LOAD_THRESHOLD,
+    // Загрузка по числу job, а не по CPU машины: иначе всплеск CPU в момент создания комнаты оставлял её без агента
+    // навсегда. Один тёплый процесс: без него в dev завершённые job оставались в счёте (load.ts, D-0013).
+    ...workerPoolOptions(),
   }),
 );
