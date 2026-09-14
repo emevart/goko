@@ -45,20 +45,20 @@ function setup(opts: { graceMs?: number } = {}) {
 }
 
 describe('watchDeparture', () => {
-  it('ожидание по умолчанию — минута, меньше пустой комнаты game-server (300 с)', () => {
-    expect(RETURN_GRACE_MS).toBe(60_000);
+  it('ожидание по умолчанию — 15 минут: пауза на обдумывание и погасший экран', () => {
+    expect(RETURN_GRACE_MS).toBe(15 * 60_000);
   });
 
   it('участник ушёл и не вернулся — onGone ровно по истечении ожидания, один раз', () => {
     const t = setup();
     t.watch.onDisconnected({ identity: 'phone-s1' });
-    expect(t.events).toEqual(['[!] voice-agent: участник ушёл, ждём возврата 60 с']);
+    expect(t.events).toEqual(['[!] voice-agent: участник ушёл, ждём возврата 900 с']);
     t.advance(RETURN_GRACE_MS - 1);
     expect(t.events).not.toContain('gone');
     t.advance(1);
     expect(t.events).toEqual([
-      '[!] voice-agent: участник ушёл, ждём возврата 60 с',
-      '[!] voice-agent: участник не вернулся за 60 с, завершаем работу',
+      '[!] voice-agent: участник ушёл, ждём возврата 900 с',
+      '[!] voice-agent: участник не вернулся за 900 с, завершаем работу',
       'gone',
     ]);
     t.advance(RETURN_GRACE_MS * 5);
@@ -73,7 +73,7 @@ describe('watchDeparture', () => {
     expect(t.pending()).toBe(0);
     t.advance(RETURN_GRACE_MS * 2);
     expect(t.events).toEqual([
-      '[!] voice-agent: участник ушёл, ждём возврата 60 с',
+      '[!] voice-agent: участник ушёл, ждём возврата 900 с',
       '[OK] voice-agent: участник вернулся',
       'return:phone-s1',
     ]);
@@ -100,7 +100,7 @@ describe('watchDeparture', () => {
   it('повторный уход во время ожидания не продлевает срок', () => {
     const t = setup();
     t.watch.onDisconnected({ identity: 'phone-s1' });
-    t.advance(40_000);
+    t.advance(RETURN_GRACE_MS - 20_000);
     t.watch.onDisconnected({ identity: 'phone-s1' });
     t.advance(20_000);
     expect(t.events.at(-1)).toBe('gone');
@@ -127,7 +127,7 @@ describe('watchDeparture', () => {
     t.watch.onDisconnected({ identity: 'phone-s1' });
     t.watch.onConnected({ identity: 'phone-s1' });
     t.advance(RETURN_GRACE_MS * 2);
-    expect(t.events).toEqual(['[!] voice-agent: участник ушёл, ждём возврата 60 с']);
+    expect(t.events).toEqual(['[!] voice-agent: участник ушёл, ждём возврата 900 с']);
   });
 
   it('после onGone события участника ничего не делают', () => {

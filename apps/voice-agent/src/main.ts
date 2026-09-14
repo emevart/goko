@@ -67,8 +67,8 @@ async function runSession(ctx: JobContext, sessionId: string): Promise<void> {
   const identity = participant.identity;
 
   // Уход участника сеанс не закрывает (closeOnDisconnect: false ниже): перезагрузка вкладки возвращает того же
-  // участника в ту же комнату. Не вернулся за минуту — job завершается (departure.ts). Подписка сразу после
-  // ожидания: участник может уйти, пока открывается Realtime.
+  // участника в ту же комнату. Не вернулся за RETURN_GRACE_MS (15 мин) — job завершается (departure.ts).
+  // Подписка сразу после ожидания: участник может уйти, пока открывается Realtime.
   let mode: ModeFollower | null = null;
   const departure = watchDeparture<RemoteParticipant>({
     identity,
