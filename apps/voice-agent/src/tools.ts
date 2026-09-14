@@ -50,12 +50,16 @@ export const KOMI_TEXT = 'коми бывает только с половино
 const NO_GAME = 'партия не начата: предложи начать';
 const THINKING_NOTE = 'Гоко ещё думает: свой ход он назовёт сам, когда решит';
 const SCORING_NOTE = 'Гоко ещё считает очки: итог назовёт сам';
-// Хвосты отказов, когда ход или отмена могли дойти до сервера. Партия не менялась — ход точно не записан,
-// ждём слов человека; партия менялась — модель не знает, что в ней, и сначала смотрит позицию.
-const NOT_APPLIED_TAIL = 'Не повторяй ход сам: скажи человеку и дождись его слов';
-const CHANGED_TAIL = 'Не повторяй ход сам: посмотри позицию и скажи человеку';
-// Перечитать партию после таймаута или обрыва не вышло: записан ли ход, неизвестно.
-const NOT_APPLIED_PASS_TAIL = 'Не повторяй пас сам: скажи человеку и дождись его слов';
+// Хвост отказа хода, паса или поправки после таймаута или обрыва (sendMove): запрос мог дойти до сервера,
+// поэтому модель не повторяет его сама. Слово — «пас» для паса, «ход» для хода и поправки, во всех трёх ветках.
+// WAIT_NEXT — сказать человеку и ждать его слов: ревизия та же, хода в партии пока нет (notAppliedText), или
+// перечитать партию не вышло, и записан ли ход, неизвестно (catch перечитывания в sendMove).
+// LOOK_NEXT — сначала посмотреть позицию: партия изменилась, а хода в конце нет, что в ней — модель не знает
+// (changedText).
+const WAIT_NEXT = 'скажи человеку и дождись его слов';
+const LOOK_NEXT = 'посмотри позицию и скажи человеку';
+const noRepeatTail = (coord: string, next: string): string => `Не повторяй ${coord === 'pass' ? 'пас' : 'ход'} сам: ${next}`;
+// Отмена после таймаута или обрыва не перечитывается: могла пройти, модель смотрит позицию.
 const UNDO_UNKNOWN_TEXT = 'отмена могла пройти. Не повторяй отмену сам: посмотри позицию и скажи человеку';
 
 // Коми по протоколу — x.5 от 0,5 до 13,5 (иначе сервер ответит bad_request без понятной человеку причины).
@@ -111,17 +115,17 @@ function appliedMove(g: GameState, coord: string, known: { moves: number; humanC
 
 const turnText = (g: GameState): string => (g.status === 'finished' ? 'партия окончена' : `сейчас ход: ${turnOf(g)}`);
 
-// Ревизия та же: ход не записан. Запрос мог ещё дойти до сервера, поэтому модель не повторяет ход сама.
+// Ревизия та же: хода в партии пока нет. Запрос мог ещё дойти до сервера, поэтому модель не повторяет ход сама.
 // prefix — причина отказа исходного вызова («сервер не отвечает» или «нет связи с сервером»).
 function notAppliedText(prefix: string, g: GameState, coord: string): string {
   const what = coord === 'pass' ? 'паса' : `хода ${coord}`;
-  return `${prefix}: ${what} в партии пока нет, ${turnText(g)}. ${NOT_APPLIED_TAIL}`;
+  return `${prefix}: ${what} в партии пока нет, ${turnText(g)}. ${noRepeatTail(coord, WAIT_NEXT)}`;
 }
 
 // Ревизия другая, а хода в конце партии нет: записан ли он, неизвестно — модель сначала смотрит позицию.
 function changedText(prefix: string, g: GameState, coord: string): string {
   const what = coord === 'pass' ? 'паса в конце партии не видно' : `хода ${coord} в конце партии нет`;
-  return `${prefix}, а партия за это время изменилась: ${what}, ${turnText(g)}. ${CHANGED_TAIL}`;
+  return `${prefix}, а партия за это время изменилась: ${what}, ${turnText(g)}. ${noRepeatTail(coord, LOOK_NEXT)}`;
 }
 
 export function createToolFns(deps: ToolDeps) {
@@ -214,7 +218,7 @@ export function createToolFns(deps: ToolDeps) {
       g = note(await client.getGame(gameId, opts));
     } catch (e) {
       // Партию не видно: ход мог и дойти, модель всё равно его не повторяет.
-      return fail(`${reasonOf(e).reason}. ${coord === 'pass' ? NOT_APPLIED_PASS_TAIL : NOT_APPLIED_TAIL}`);
+      return fail(`${reasonOf(e).reason}. ${noRepeatTail(coord, WAIT_NEXT)}`);
     }
     if (g.revision === before?.revision) return fail(notAppliedText(prefix, g, coord));
     return appliedMove(g, coord, before) ?? fail(changedText(prefix, g, coord));

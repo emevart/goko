@@ -10,6 +10,7 @@ import {
   FINISH_WAIT_MS,
   KOMI_TEXT,
   NETWORK_TEXT,
+  type ToolClient,
   type ToolFns,
   createToolFns,
   createTools,
@@ -170,18 +171,22 @@ describe('play_move / correct_last_move', () => {
     expect(state.announcedFinish).toBe('g1');
     expect(state.awaitingReply).toBe(false);
   });
-  it('сеть, обрыв тела (terminated) и ответ не по протоколу на чтении — «нет связи с сервером»; таймаут чтения — «сервер не отвечает»', async () => {
-    const { fns, client } = await withGame();
-    client.failNext(new TypeError('fetch failed'));
-    expect(await fns.getAssessment()).toEqual({ ok: false, reason: NETWORK_TEXT });
-    client.failNext(new HttpError(502, '<html>Bad Gateway</html>'));
-    expect(await fns.getPosition()).toBe(NETWORK_TEXT);
-    client.failNext(new TypeError('terminated'));
-    expect(await fns.resign()).toEqual({ ok: false, reason: NETWORK_TEXT });
-    client.failNext(new ClientTimeoutError('analyze', 15_000));
-    expect(await fns.getAssessment()).toEqual({ ok: false, reason: humanText('client_timeout') });
+  // Инструменты, что сперва читают партию: отказ адресован названному методу (failOn), а не первому getGame.
+  it.each<[string, keyof ToolClient, string, (f: ToolFns) => Promise<unknown>, () => Error, unknown, string[]]>([
+    ['get_assessment', 'analyze', 'fetch failed', (f) => f.getAssessment(), () => new TypeError('fetch failed'), { ok: false, reason: NETWORK_TEXT }, ['getGame', 'analyze']],
+    ['get_assessment', 'analyze', 'таймаут', (f) => f.getAssessment(), () => new ClientTimeoutError('analyze', 15_000), { ok: false, reason: humanText('client_timeout') }, ['getGame', 'analyze']],
+    ['get_position', 'ascii', 'HttpError', (f) => f.getPosition(), () => new HttpError(502, '<html>Bad Gateway</html>'), NETWORK_TEXT, ['getGame', 'ascii']],
+    ['get_position', 'getGame', 'fetch failed', (f) => f.getPosition(), () => new TypeError('fetch failed'), NETWORK_TEXT, ['getGame', 'ascii']],
+    ['resign', 'resign', 'terminated', (f) => f.resign(), () => new TypeError('terminated'), { ok: false, reason: NETWORK_TEXT }, ['getGame', 'resign']],
+    ['set_rank', 'setRank', 'таймаут', (f) => f.setRank({ rank: '5 кю' }), () => new ClientTimeoutError('setRank', 15_000), { ok: false, reason: humanText('client_timeout') }, ['getGame', 'setRank']],
+  ])('%s: отказ на %s (%s) — «нет связи с сервером» или «сервер не отвечает», партия и ранг не тронуты', async (_tool, method, _err, run, err, expected, methods) => {
+    const { fns, client, state } = await withGame();
+    client.failOn(method, err());
+    expect(await run(fns)).toEqual(expected);
+    expect(client.calls.map((c) => c.method)).toEqual(methods);
+    expect(gameOf(client)).toMatchObject({ status: 'playing', revision: 0 });
+    expect(state.rank).toBe('10k');
     expect(humanText('client_timeout')).not.toBe(NETWORK_TEXT);
-    expect(client.calls.map((c) => c.method)).toEqual(['getGame', 'analyze', 'getGame', 'ascii', 'getGame', 'getGame', 'analyze']);
   });
   it('ошибка кода пробрасывается: её увидит лог воркера, а не человек', async () => {
     const { fns, client } = await withGame();
@@ -263,6 +268,9 @@ describe('play_move / correct_last_move', () => {
 describe('таймаут клиента на ходе, пасе и поправке: перечитывание вместо повтора', () => {
   const NOT_APPLIED_TAIL = 'Не повторяй ход сам: скажи человеку и дождись его слов';
   const CHANGED_TAIL = 'Не повторяй ход сам: посмотри позицию и скажи человеку';
+  // Пас — теми же хвостами со словом «пас», во всех трёх ветках: ревизия та же, партия изменилась, перечитать не вышло.
+  const NOT_APPLIED_PASS_TAIL = 'Не повторяй пас сам: скажи человеку и дождись его слов';
+  const CHANGED_PASS_TAIL = 'Не повторяй пас сам: посмотри позицию и скажи человеку';
 
   it('ход не записан: партия перечитана тем же сигналом, ход не повторён, модель слышит, чей ход на самом деле', async () => {
     const { fns, client, state, controller } = await withGame();
@@ -295,7 +303,7 @@ describe('таймаут клиента на ходе, пасе и поправ�
     expect(await fns.pass()).toMatchObject({ ok: true, myMove: 'K10' });
     client.failNext(new ClientTimeoutError('pass', 15_000));
     // По одним ходам (пас человека, за ним ход Гоко) пас выглядел бы записанным: решает ревизия из ответа пасу.
-    expect(await fns.pass()).toEqual({ ok: false, reason: `сервер не отвечает: паса в партии пока нет, сейчас ход: чёрные (твой). ${NOT_APPLIED_TAIL}` });
+    expect(await fns.pass()).toEqual({ ok: false, reason: `сервер не отвечает: паса в партии пока нет, сейчас ход: чёрные (твой). ${NOT_APPLIED_PASS_TAIL}` });
     expect(client.calls.map((c) => c.method)).toEqual(['pass', 'pass', 'getGame']);
     expect(gameOf(client).moves.map((m) => m.coord)).toEqual(['pass', 'K10']);
   });
@@ -323,7 +331,7 @@ describe('таймаут клиента на ходе, пасе и поправ�
 
   it.each([
     ['play_move', 'play', (f: ToolFns) => f.playMove({ coord: 'E5' }), () => new ClientTimeoutError('play', 15_000), () => new ClientTimeoutError('getGame', 10_000), `сервер не отвечает. ${NOT_APPLIED_TAIL}`],
-    ['pass', 'pass', (f: ToolFns) => f.pass(), () => new TypeError('fetch failed'), () => new TypeError('fetch failed'), 'нет связи с сервером. Не повторяй пас сам: скажи человеку и дождись его слов'],
+    ['pass', 'pass', (f: ToolFns) => f.pass(), () => new TypeError('fetch failed'), () => new TypeError('fetch failed'), `${NETWORK_TEXT}. ${NOT_APPLIED_PASS_TAIL}`],
     ['correct_last_move', 'correct', (f: ToolFns) => f.correctLastMove({ coord: 'D5' }), () => new HttpError(502, 'Bad Gateway'), () => new TypeError('terminated'), `нет связи с сервером. ${NOT_APPLIED_TAIL}`],
   ])('%s: после таймаута или обрыва перечитать не вышло — к причине добавлено «не повторяй» (круг 2)', async (_name, method, run, callErr, readErr, reason) => {
     const { fns, client } = await withGame({ replies: ['K10', 'D10'] });
@@ -356,7 +364,7 @@ describe('таймаут клиента на ходе, пасе и поправ�
     client.failNext(new ClientTimeoutError('pass', 15_000), 'after');
     expect(await fns.pass()).toMatchObject({ ok: true, myMove: 'K10' });
     client.failNext(new ClientTimeoutError('pass', 15_000));
-    expect(await fns.pass()).toEqual({ ok: false, reason: `сервер не отвечает: паса в партии пока нет, сейчас ход: чёрные (твой). ${NOT_APPLIED_TAIL}` });
+    expect(await fns.pass()).toEqual({ ok: false, reason: `сервер не отвечает: паса в партии пока нет, сейчас ход: чёрные (твой). ${NOT_APPLIED_PASS_TAIL}` });
     expect(gameOf(client).moves.map((m) => m.coord)).toEqual(['pass', 'K10']);
   });
 
@@ -366,7 +374,7 @@ describe('таймаут клиента на ходе, пасе и поправ�
     expect(await fns.startGame({})).toMatchObject({ ok: true, gameId: 'g2' });
     expect(await fns.pass()).toMatchObject({ ok: true, myMove: 'D10' }); // g2, ревизия 2
     client.failNext(new ClientTimeoutError('pass', 15_000));
-    expect(await fns.pass()).toEqual({ ok: false, reason: `сервер не отвечает: паса в партии пока нет, сейчас ход: чёрные (твой). ${NOT_APPLIED_TAIL}` });
+    expect(await fns.pass()).toEqual({ ok: false, reason: `сервер не отвечает: паса в партии пока нет, сейчас ход: чёрные (твой). ${NOT_APPLIED_PASS_TAIL}` });
   });
 
   it('партию сменили не инструментом: ревизия прежней партии в сверку не идёт', async () => {
@@ -422,7 +430,7 @@ describe('таймаут клиента на ходе, пасе и поправ�
     client.failNext(new ClientTimeoutError('pass', 15_000));
     expect(await fns.pass()).toEqual({
       ok: false,
-      reason: `сервер не отвечает, а партия за это время изменилась: паса в конце партии не видно, сейчас ход: чёрные (твой). ${CHANGED_TAIL}`,
+      reason: `сервер не отвечает, а партия за это время изменилась: паса в конце партии не видно, сейчас ход: чёрные (твой). ${CHANGED_PASS_TAIL}`,
     });
   });
 
@@ -457,7 +465,7 @@ describe('таймаут клиента на ходе, пасе и поправ�
     client.failNext(new ClientTimeoutError('pass', 15_000));
     expect(await fns.pass()).toEqual({
       ok: false,
-      reason: `сервер не отвечает, а партия за это время изменилась: паса в конце партии не видно, сейчас ход: чёрные (твой). ${CHANGED_TAIL}`,
+      reason: `сервер не отвечает, а партия за это время изменилась: паса в конце партии не видно, сейчас ход: чёрные (твой). ${CHANGED_PASS_TAIL}`,
     });
     expect(gameOf(client).moves.map((m) => m.coord)).toEqual(['pass', 'K10']);
   });
@@ -469,7 +477,7 @@ describe('таймаут клиента на ходе, пасе и поправ�
     client.failNext(new ClientTimeoutError('pass', 15_000), 'after');
     expect(await fns.pass()).toEqual({
       ok: false,
-      reason: `сервер не отвечает, а партия за это время изменилась: паса в конце партии не видно, сейчас ход: чёрные (твой). ${CHANGED_TAIL}`,
+      reason: `сервер не отвечает, а партия за это время изменилась: паса в конце партии не видно, сейчас ход: чёрные (твой). ${CHANGED_PASS_TAIL}`,
     });
     expect(gameOf(client).moves.map((m) => m.coord)).toEqual(['pass', 'K10']);
   });
@@ -829,7 +837,7 @@ describe('человек против человека (D-0005)', () => {
     return t;
   }
   const PASS_CHANGED =
-    'сервер не отвечает, а партия за это время изменилась: паса в конце партии не видно, сейчас ход: чёрные. Не повторяй ход сам: посмотри позицию и скажи человеку';
+    'сервер не отвечает, а партия за это время изменилась: паса в конце партии не видно, сейчас ход: чёрные. Не повторяй пас сам: посмотри позицию и скажи человеку';
   it('таймаут паса чёрных, а последним стоит пас белых — это не наш пас (круг 2)', async () => {
     const { fns, client } = hvh();
     expect(await fns.pass()).toMatchObject({ ok: true, toPlay: 'B' }); // белые спасовали голосом: свой ответ, ход чёрных
@@ -929,7 +937,7 @@ describe('сигнал сеанса в каждом инструменте (M7)'
   });
 });
 
-describe('фейковый клиент: failNext (M6)', () => {
+describe('фейковый клиент: failNext (M6) и failOn', () => {
   const newGameReq = { black: { controller: 'human' as const }, white: { controller: 'engine' as const, rank: '10k' as const } };
   async function ready() {
     const client = createFakeClient({ replies: ['K10', 'D10'] });
@@ -964,5 +972,16 @@ describe('фейковый клиент: failNext (M6)', () => {
     if (!call) throw new Error(`нет вызова ${method}`);
     client.failNext(new Error('boom'), 'after');
     await expect(call(client)).rejects.toThrow('fake client: failNext(err, "after") works only for play, pass and correct');
+  });
+  it.each(Object.keys(calls))('failOn(%s, err): другие методы идут как обычно, срабатывает на следующем вызове этого, и только на нём', async (method) => {
+    const client = await ready();
+    const call = calls[method];
+    const other = calls[method === 'getGame' ? 'ascii' : 'getGame'];
+    if (!call || !other) throw new Error(`нет вызова ${method}`);
+    const err = new Error('boom');
+    client.failOn(method as keyof ToolClient, err);
+    await expect(other(client)).resolves.toBeDefined();
+    await expect(call(client)).rejects.toBe(err);
+    await expect(call(client)).resolves.toBeDefined();
   });
 });

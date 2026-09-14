@@ -56,12 +56,16 @@ export type FakeClient = ToolClient & {
   // play, pass и correct: ход и ответ движка уже записаны, а вызов бросает (таймаут клиента после записи на
   // сервере). 'after', а следующим позван другой метод — ошибка самого теста.
   failNext(err: Error, when?: 'before' | 'after'): void;
+  // Следующий вызов метода method бросает err до всякой работы; остальные методы идут как обычно. Для
+  // инструментов, что сперва читают партию: отказ падает на названном методе, а не на первом getGame.
+  failOn(method: keyof ToolClient, err: Error): void;
 };
 
 export function createFakeClient(opts: FakeClientOptions = {}): FakeClient {
   const replies = [...(opts.replies ?? ['K10', 'D10', 'K4'])];
   let pending: Error | null = null;
   let pendingAfter = false;
+  const failures = new Map<keyof ToolClient, Error>();
   let pollsLeft = -1;
   let n = 0;
 
@@ -73,6 +77,9 @@ export function createFakeClient(opts: FakeClientOptions = {}): FakeClient {
     failNext(err, when = 'before') {
       pending = err;
       pendingAfter = when === 'after';
+    },
+    failOn(method, err) {
+      failures.set(method, err);
     },
     async newGame(sessionId: string, req: NewGameRequest, o?: CallOptions): Promise<NewGameResponse> {
       record('newGame', o, sessionId, req);
@@ -181,11 +188,16 @@ export function createFakeClient(opts: FakeClientOptions = {}): FakeClient {
   };
 
   // Журнал без CallOptions (сигналы — отдельно); отменённый сигнал ведёт себя как у настоящего клиента:
-  // вызов бросает причину отмены до всякой работы.
-  function record(method: string, o: CallOptions | undefined, ...args: unknown[]) {
+  // вызов бросает причину отмены до всякой работы. Затем — отказ, адресованный этому методу (failOn).
+  function record(method: keyof ToolClient, o: CallOptions | undefined, ...args: unknown[]) {
     self.calls.push({ method, args });
     self.signals.push(o?.signal);
     o?.signal?.throwIfAborted();
+    const failure = failures.get(method);
+    if (failure) {
+      failures.delete(method);
+      throw failure;
+    }
   }
   // Ход, пас и поправка: 'before' бросается здесь, 'after' — в throwPendingAfter после записи хода.
   function throwPendingBefore() {
