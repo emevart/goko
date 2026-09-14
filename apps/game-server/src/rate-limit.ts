@@ -18,7 +18,7 @@ type Window = { start: number; count: number };
 // выдаёт клиенту всю /64, и перебор адресов внутри неё не должен давать свежее окно. IPv4-mapped
 // IPv6 (::ffff:a.b.c.d — так сокет с двойным стеком показывает IPv4) — как IPv4. Не адрес — как есть.
 export function addressKey(address: string): string {
-  if (isIPv4(address) || !isIPv6(address)) return address;
+  if (!isIPv6(address)) return address;
   const groups = ipv6Groups(address);
   const [hi = 0, lo = 0] = groups.slice(6);
   if (groups.slice(0, 5).every((g) => g === 0) && groups[5] === 0xffff) return `${hi >> 8}.${hi & 0xff}.${lo >> 8}.${lo & 0xff}`;

@@ -156,6 +156,8 @@ describe('addressKey: ключ лимитера по адресу', () => {
     expect(addressKey('0:0:0:0:0:ffff:203.0.113.7')).toBe('203.0.113.7');
     expect(addressKey('::ffff:0.0.0.0')).toBe('0.0.0.0');
     expect(addressKey('::ffff:255.255.255.255')).toBe('255.255.255.255');
+    // Зона интерфейса отбрасывается и у mapped: иначе хвост «a.b.c.d%eth0» не читался бы как IPv4.
+    expect(addressKey('::ffff:203.0.113.7%eth0')).toBe('203.0.113.7');
     // ::ffff:0:a.b.c.d (IPv4-translated), ::a.b.c.d (IPv4-compatible) и ffff не на своём месте — IPv6.
     expect(addressKey('::ffff:0:cb00:7107')).toBe('0:0:0:0::/64');
     expect(addressKey('::203.0.113.7')).toBe('0:0:0:0::/64');
