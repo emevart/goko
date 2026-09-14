@@ -243,7 +243,7 @@ export function smokeFinisher({ stopAll, dataDir, fail, warn, failures, log = (l
 const HUMAN_MOVE_CANDIDATES = ['K10', 'L10', 'M10', 'K4', 'L4', 'M4'];
 const CORRECTION_CANDIDATES = ['K4', 'L4', 'M4', 'K10', 'L10', 'M10'];
 
-// Первая свободная координата из списка кандидатов по строке доски (indexToCoord/coordToIndex —
+// Первая свободная координата из списка кандидатов по строке доски (coordToIndex —
 // как в packages/go-core: строка board — это board[row * size + col]).
 function firstFreeCoord(board, size, candidates) {
   for (const coord of candidates) {

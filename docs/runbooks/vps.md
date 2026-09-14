@@ -36,10 +36,9 @@ dc() { ( set -a; . /opt/goko/.env; set +a; docker compose --env-file /opt/goko/.
 Порты Docker обходят ufw: наружу не публиковать ничего, кроме того, что в
 таблице.
 
-Логи Docker у `game-server`, `go-engine`, `voice-agent` ротируются
+Логи Docker у `caddy`, `livekit`, `game-server`, `go-engine`, `voice-agent` ротируются
 (`json-file`, 10 МБ × 3): в логе воркера расшифровки реплик, бессрочно они не
-хранятся. У `caddy` и `livekit` ротации нет (было до стадии 1, вынесено в
-широкое ревью).
+хранятся.
 
 Размеры образов (сборка на ПК, задача 10): `voice-agent` ~1,1 ГБ,
 `go-engine` ~0,8 ГБ, `game-server` ~0,4 ГБ; на VPS нужно около 2,5 ГБ под
@@ -151,8 +150,8 @@ healthcheck не проверяет: его видно по строке
 `ROOM_DEPARTURE_TIMEOUT_SECONDS` и `RETURN_GRACE_MS` менять только вместе:
 если комната закроется раньше таймера агента, агент уйдёт раньше своего срока.
 Повторно вызвать агента в ту же комнату сейчас нельзя (эндпоинт re-dispatch —
-«вариант C» в `docs/NOW.md`). Токен телефона живёт TTL сессии от её создания
-(D-0008).
+«вариант C» в `docs/NOW.md`). Токен телефона живёт фиксированный TTL от выдачи,
+а срок сессии продлевается событиями её канала (D-0008).
 
 ## Режимы и лимиты
 
@@ -167,6 +166,12 @@ healthcheck не проверяет: его видно по строке
   (`rate_limited` с `Retry-After` или `too_many_games`). Партии без сессии и
   список партий в prod выключены (`bad_request`, `reason`
   `sessionless_disabled` и `list_disabled`).
+- Закрытая вкладка не освобождает сессию: слот `MAX_SESSIONS` остаётся занят до
+  её TTL. На время приёмки у доски поставить `MAX_SESSIONS=8` в
+  `/opt/goko/.env` и применить `dc up -d game-server`; на телефоне страницу
+  перезагружать, а не закрывать. Если никто не играет и нужно освободить все
+  слоты сразу, выполнить `dc restart game-server`: текущие сессии и комнаты
+  потеряются.
 
 ## Проверки после деплоя
 
@@ -208,6 +213,7 @@ dc logs -f --since 10m livekit | grep --line-buffered "goko-$SID"
 
 ```bash
 # терминал 2
+dc() { ( set -a; . /opt/goko/.env; set +a; docker compose --env-file /opt/goko/.env "$@" ); }
 SID=<id из строки [OK] проверки 1>
 dc logs -f --since 10m voice-agent | grep --line-buffered "goko-$SID\|участник не пришёл"
 ```
@@ -406,6 +412,14 @@ Hetzner (только CPU/RAM, без переезда; по явной прос
 `dc up -d go-engine`.
 
 ## Секреты
+
+`APP_KEY` попадает в клиентский бандл и не защищает от расходов OpenAI. До
+первого разговора с телефона в OpenAI Project Settings открыть
+`Limits` → `Spend` → `Edit spend limit`, задать месячный лимит без суммы в
+репозитории, включить `Enforce a hard limit` и сохранить. Оповещения настроить
+отдельно: они сообщают о расходах, но не останавливают их. Применение жёсткого
+лимита не мгновенное, поэтому возможен небольшой перерасход. Факт настройки
+проверить в аккаунте перед прогоном. Источник: [OpenAI Spend limits](https://developers.openai.com/api/docs/guides/spend-limits).
 
 Ротация любого ключа: поправить `/opt/goko/.env` (и `.env` на ПК для
 `APP_KEY`, `LIVEKIT_*`), затем `dc up -d` для затронутых сервисов;

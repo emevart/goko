@@ -1,13 +1,14 @@
 // Сессия Гоко на телефоне: сессия через game-server (sessionStorage), комната LiveKit по её токену, режим
 // «Голос / Чат» атрибутом goko.mode, микрофон, чат и лента диалога. Комнат страница не создаёт (D-0001).
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ConnectionError, ConnectionErrorReason, Room, RoomEvent, Track } from 'livekit-client';
+import { Room, RoomEvent, Track } from 'livekit-client';
 import { CreateSessionResponse } from '@goko/protocol';
 import { client } from '../api.ts';
 import { agentReady, sendChat } from '../chat.ts';
 import { type Mode, type Prefs, loadPrefs, modeAttributes, savePrefs } from '../prefs.ts';
 import { describeError } from '../text.ts';
 import { type Line, acceptLine, lineId, upsertLine, whoOf } from '../transcript.ts';
+import { connectionFailureAction } from '../session-connection.ts';
 
 const STORAGE_KEY = 'goko.session';
 
@@ -50,8 +51,6 @@ function setRemoteAudio(room: Room, on: boolean) {
 // Вход отклонён сервером LiveKit: токен истёк или неверен (401/403 при проверке соединения) либо комнаты сессии
 // уже нет (404 «requested room does not exist») — livekit-client 2.22.3 даёт на всё это NotAllowed. С тем же токеном
 // повтор бесполезен. Прочие причины (сеть, таймаут ICE, отмена) — временные: сессия остаётся, повтор по касанию.
-const loginRejected = (e: unknown): boolean => e instanceof ConnectionError && e.reason === ConnectionErrorReason.NotAllowed;
-
 const chatLineId = () => `chat-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 
 export function useSession() {
@@ -215,10 +214,12 @@ export function useSession() {
         joining.current = null;
         void room.disconnect();
         setLink('failed');
-        if (loginRejected(e)) {
-          // Токен истёк раньше продлённой сессии (D-0008) или комнаты уже нет: перезагрузка создаст новую сессию.
+        if (connectionFailureAction(e) === 'reset') {
+          // Токен истёк раньше продлённой сессии (D-0008) или комнаты уже нет: новая сессия создаётся сразу,
+          // а следующее касание входит уже с её токеном.
           saveStored(null);
-          setError('нет связи с Гоко: доска работает тапами, перезагрузи страницу, чтобы подключиться заново');
+          reset();
+          setError('нет связи с Гоко: доска работает тапами, коснись экрана, чтобы подключиться заново');
         } else {
           // Временный сбой: сессия сохранена, следующее касание страницы входит заново с тем же токеном.
           setError('нет связи с Гоко: доска работает тапами, коснись экрана, чтобы подключиться снова');
@@ -244,7 +245,7 @@ export function useSession() {
     })();
     joining.current = joined;
     return joined;
-  }, [info, sendMode]);
+  }, [info, sendMode, reset]);
 
   const enableMic = useCallback(async () => {
     const room = await connect();
