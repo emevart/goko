@@ -7,7 +7,7 @@ import { client } from '../api.ts';
 import { agentReady, sendChat } from '../chat.ts';
 import { type Mode, type Prefs, loadPrefs, modeAttributes, savePrefs } from '../prefs.ts';
 import { describeError } from '../text.ts';
-import { type Line, acceptLine, lineId, upsertLine, whoOf } from '../transcript.ts';
+import { type Line, acceptLine, isTrustedTranscriptSender, lineId, upsertLine, whoOf } from '../transcript.ts';
 import { connectionFailureAction } from '../session-connection.ts';
 import { acceptConversationEvent, bindAgent, isBoundAgent, participantRefOf, type AgentBinding } from '../conversation.ts';
 import { DiagnosticRecorder, watchTrackEnd, type RecorderTrack, type RecordingSnapshot, type RecordingStopReason } from '../recording.ts';
@@ -265,12 +265,15 @@ export function useSession() {
       // SDK передаёт stream sender только с identity; SID/kind фиксируем немедленно при открытии stream,
       // чтобы поздние chunks не были приписаны новому участнику с той же identity.
       const sender = streamSender(participant);
-      if (!isBoundAgent(agentBinding.current, gen, sender)) return;
-      const validSender = () => current() && isBoundAgent(agentBinding.current, gen, sender);
       const attrs = reader.info.attributes ?? {};
       const id = lineId(attrs, reader.info.id);
       const mySids = new Set(room.localParticipant.getTrackPublications().map((p) => p.trackSid));
-      const who = whoOf(attrs, mySids, participant?.identity ?? '', room.localParticipant.identity);
+      const senderIdentity = participant?.identity ?? '';
+      const myIdentity = room.localParticipant.identity;
+      const who = whoOf(attrs, mySids, senderIdentity, myIdentity);
+      const trusted = () => isTrustedTranscriptSender(who, senderIdentity, myIdentity, isBoundAgent(agentBinding.current, gen, sender));
+      if (!trusted()) return;
+      const validSender = () => current() && trusted();
       if (who === 'me') {
         // Человек: промежуточные результаты STT — отдельные закрытые потоки того же сегмента; берём только финал.
         try {

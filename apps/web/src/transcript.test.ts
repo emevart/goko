@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { type Line, MAX_LINES, acceptLine, lineId, upsertLine, whoOf } from './transcript.ts';
+import { type Line, MAX_LINES, acceptLine, isTrustedTranscriptSender, lineId, upsertLine, whoOf } from './transcript.ts';
 
 const line = (id: string, text: string, who: 'me' | 'goko' = 'goko', final = true): Line => ({ id, who, text, final });
 
@@ -29,6 +29,17 @@ describe('whoOf / lineId', () => {
   it('id строки — сегмент, иначе id потока', () => {
     expect(lineId({ 'lk.segment_id': 'SG_1' }, 'ST_9')).toBe('SG_1');
     expect(lineId({}, 'ST_9')).toBe('ST_9');
+  });
+});
+
+describe('isTrustedTranscriptSender', () => {
+  it('принимает bound agent и пересланную им речь с логическим identity телефона', () => {
+    expect(isTrustedTranscriptSender('goko', 'goko', 'phone-s1', true)).toBe(true);
+    expect(isTrustedTranscriptSender('me', 'phone-s1', 'phone-s1', false)).toBe(true);
+  });
+  it('не принимает неизвестного remote sender, даже если track attrs классифицировали строку как мою', () => {
+    expect(isTrustedTranscriptSender('me', 'stranger', 'phone-s1', false)).toBe(false);
+    expect(isTrustedTranscriptSender('goko', 'stranger', 'phone-s1', false)).toBe(false);
   });
 });
 

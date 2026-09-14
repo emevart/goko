@@ -24,6 +24,13 @@ export function whoOf(
   return senderIdentity === myIdentity ? 'me' : 'goko';
 }
 
+// Обычные транскрипты публикует bound agent. Пользовательский STT он пересылает тем же data stream,
+// но LiveKit подставляет в callback логический senderIdentity телефона; его принимаем только как `me`
+// и только при точном совпадении с identity текущего local participant.
+export function isTrustedTranscriptSender(who: Who, senderIdentity: string, myIdentity: string, boundAgent: boolean): boolean {
+  return boundAgent || (who === 'me' && senderIdentity === myIdentity);
+}
+
 export const lineId = (attrs: Readonly<Record<string, string>>, streamId: string): string => attrs['lk.segment_id'] ?? streamId;
 
 // Лента — диалог без дублей (D-0011). Реплика Гоко идёт дельта-потоком с lk.transcription_final навсегда 'false'
