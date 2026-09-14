@@ -24,7 +24,7 @@ import { type AgentState, forgetFinishIfReopened, noteFinishRevision } from './s
 
 export const ERROR_REPEAT_MS = 30_000;
 export const SESSION_EXPIRED_INSTRUCTIONS =
-  'Сессия на сервере закончилась: истекла или сервер перезапущен. Скажи одной фразой, что эту игру отсюда не продолжить и нужно перезагрузить страницу.';
+  'Сессия на сервере закончилась: истекла или сервер перезапущен, эту игру отсюда не продолжить. Скажи вслух только: «Сессия закончилась, перезагрузи страницу».';
 
 const capitalize = (text: string): string => text.charAt(0).toUpperCase() + text.slice(1);
 // Конец каждого текста события: дословная реплика. Кавычки внутри реплики не ставим.
@@ -220,7 +220,7 @@ export function handleEvent(ev: GameEvent, state: AgentState, now: () => number 
       const t = now();
       if (t - state.lastErrorAt < ERROR_REPEAT_MS) return null;
       state.lastErrorAt = t;
-      return `Сбой на сервере: ${humanText(ev.code)}; сервер повторит попытку сам. Скажи одной фразой, что тебе нужно ещё немного времени.`;
+      return `Сбой на сервере: ${humanText(ev.code)}; сервер повторит попытку сам. ${sayOnly('Сервер задумался, ещё немного')}`;
     }
     default:
       return null;

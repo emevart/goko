@@ -489,7 +489,7 @@ describe('handleEvent: конец партии и ошибки', () => {
     const now = () => t;
     expect(handleEvent({ type: 'engine.thinking', gameId: 'g1', color: 'W' }, s)).toBeNull();
     const first = handleEvent({ type: 'error', gameId: 'g1', code: 'engine_unavailable', message: 'engine is unavailable' }, s, now);
-    expect(first).toContain(humanText('engine_unavailable'));
+    expect(first).toBe(`Сбой на сервере: ${humanText('engine_unavailable')}; сервер повторит попытку сам. Скажи вслух только: «Сервер задумался, ещё немного».`);
     expect(first).not.toContain('engine is unavailable');
     t += ERROR_REPEAT_MS - 1;
     expect(handleEvent({ type: 'error', gameId: 'g1', code: 'engine_unavailable', message: 'engine is unavailable' }, s, now)).toBeNull();
@@ -675,6 +675,19 @@ describe('handleEvent: реплики событий — факт, а не пр�
       expect(text).toMatch(/Скажи вслух только: «[^«»]+»\.$/);
       expect(text).not.toMatch(/Назови|Объяви|Скажи одну короткую фразу/);
       expect(text).toMatch(/уже (на доске|записан|сделан)|перестал повторять/);
+    }
+  });
+
+  it('сбой сервера и конец сессии — тоже дословная реплика, без свободной формулировки (ревью M1)', () => {
+    const st = newAgentState('s1');
+    st.gameId = 'g1';
+    const error = handleEvent({ type: 'error', gameId: 'g1', code: 'engine_busy', message: 'engine did not respond within 8000 ms' }, st, () => 1_000_000);
+    expect(SESSION_EXPIRED_INSTRUCTIONS).toBe(
+      'Сессия на сервере закончилась: истекла или сервер перезапущен, эту игру отсюда не продолжить. Скажи вслух только: «Сессия закончилась, перезагрузи страницу».',
+    );
+    for (const text of [error, SESSION_EXPIRED_INSTRUCTIONS]) {
+      expect(text).toMatch(/Скажи вслух только: «[^«»]+»\.$/);
+      expect(text).not.toMatch(/Скажи одной фразой|Назови|Объяви/);
     }
   });
 });
