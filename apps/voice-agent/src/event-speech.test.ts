@@ -1,36 +1,56 @@
 import { describe, expect, it } from 'vitest';
 import { llm } from '@livekit/agents';
-import { EVENT_MESSAGE_PREFIX, SAY_EVENT_INSTRUCTIONS, type SpeakerAgent, type SpeakerSession, createEventSpeaker, eventMessage } from './event-speech.ts';
+import {
+  EVENT_MESSAGE_PREFIX,
+  SAY_EVENT_FALLBACK_INSTRUCTIONS,
+  SAY_EVENT_INSTRUCTIONS,
+  THINKING_WAIT_MS,
+  type SpeakerAgent,
+  type SpeakerSession,
+  createEventSpeaker,
+  eventMessage,
+} from './event-speech.ts';
 
 type Journal = string[];
 
 const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
 const texts = (ctx: llm.ChatContext) => ctx.items.map((i) => (i.type === 'message' ? `${i.role}:${i.textContent ?? ''}` : `${i.type}:${i.id}`));
 
-// Realtime-сессия плагина: chatCtx — копия подтверждённой сервером истории, updateChatCtx ждёт conversation.item.created.
+// Realtime-сессия плагина: chatCtx — копия подтверждённой сервером истории, updateChatCtx под мьютексом сверяет
+// переданную историю с серверной (лишнее на сервере удаляет, недостающее создаёт) и ждёт conversation.item.created.
 function fakeRealtime(journal: Journal, opts: { syncMs?: (n: number) => number; fail?: boolean } = {}) {
   let remote = new llm.ChatContext([llm.FunctionCall.create({ id: 'item_remote_call', callId: 'c1', name: 'start_game', args: '{}' })]);
   const sent: llm.ChatContext[] = [];
+  const deleted: string[] = [];
   let n = 0;
+  let lock: Promise<void> = Promise.resolve();
   return {
     sent,
+    deleted,
     get chatCtx() {
       return remote.copy();
     },
     async updateChatCtx(ctx: llm.ChatContext) {
       const call = ++n;
       sent.push(ctx);
-      await new Promise((resolve) => setTimeout(resolve, opts.syncMs?.(call) ?? 0));
-      if (opts.fail) throw new Error('update_chat_ctx timed out.');
-      remote = ctx.copy();
-      journal.push(`sync ${texts(ctx).at(-1)}`);
+      const run = lock.then(async () => {
+        await new Promise((resolve) => setTimeout(resolve, opts.syncMs?.(call) ?? 0));
+        if (opts.fail) throw new Error('update_chat_ctx timed out.');
+        const keep = new Set(ctx.items.map((i) => i.id));
+        for (const item of remote.items) if (!keep.has(item.id)) deleted.push(item.id);
+        remote = ctx.copy();
+        journal.push(`sync ${texts(ctx).at(-1)}`);
+      });
+      lock = run.catch(() => {});
+      return run;
     },
   };
 }
 
 function fakeSession(journal: Journal, history: () => llm.ChatContext, opts: { playoutMs?: number; failReply?: number } = {}) {
   const calls: Parameters<SpeakerSession['generateReply']>[0][] = [];
-  const session: SpeakerSession = {
+  const session: SpeakerSession & { agentState: SpeakerSession['agentState'] } = {
+    agentState: 'listening',
     generateReply(options) {
       calls.push(options);
       if (opts.failReply === calls.length) throw new Error('AgentSession is not running');
@@ -135,7 +155,10 @@ describe('createEventSpeaker: реплика на событие через ис
     const { session, calls } = fakeSession(journal, () => rt.chatCtx);
     await createEventSpeaker({ agent, session, log: (l) => void logs.push(l) })('Твой ход ка десять уже на доске.');
     expect(logs).toEqual(['[!] voice-agent: событие не попало в историю Realtime (Error: update_chat_ctx timed out.), текст события — в инструкции ответа']);
-    expect(calls).toEqual([{ instructions: `${SAY_EVENT_INSTRUCTIONS}\nСобытие с экрана: Твой ход ка десять уже на доске.`, toolChoice: 'none' }]);
+    expect(calls).toEqual([{ instructions: `${SAY_EVENT_FALLBACK_INSTRUCTIONS}\nСобытие с экрана: Твой ход ка десять уже на доске.`, toolChoice: 'none' }]);
+    // Запасная инструкция не отсылает к «последнему сообщению» истории: там прошлое событие, а не это (ревью M2).
+    expect(SAY_EVENT_FALLBACK_INSTRUCTIONS).toBe('Скажи вслух ровно реплику из события ниже, одной короткой репликой. Ходы из него уже на доске.');
+    expect(SAY_EVENT_FALLBACK_INSTRUCTIONS).not.toMatch(/последнее сообщение/);
     expect(agent._chatCtx.items).toHaveLength(1); // в историю агента не попало то, чего нет у модели
   });
 
@@ -151,5 +174,61 @@ describe('createEventSpeaker: реплика на событие через ис
     await second;
     await tick();
     expect(journal.at(-1)).toBe('played 2');
+  });
+});
+
+describe('createEventSpeaker: событие не гоняется с результатом инструмента в истории Realtime (ревью I1)', () => {
+  // Сценарий ревью: голосовой play_move, движок не ответил. game-server шлёт в поток событие error и в тот же момент
+  // отвечает на play; библиотека копирует историю сессии, добавляет function_call_output и синхронизирует его,
+  // agentState всё это время — thinking. Событие error приходит в speak ровно тогда.
+  it('историю копирует только после выхода agentState из thinking: ни результат инструмента, ни событие не удалены', async () => {
+    const journal: Journal = [];
+    const rt = fakeRealtime(journal, { syncMs: () => 20 });
+    const agent = realtimeAgent(rt);
+    const { session, calls } = fakeSession(journal, () => rt.chatCtx);
+    session.agentState = 'thinking';
+    const ourSyncStates: string[] = [];
+    const update = rt.updateChatCtx.bind(rt);
+    rt.updateChatCtx = (ctx: llm.ChatContext) => {
+      if (ctx.items.some((i) => i.type === 'message' && i.role === 'system')) ourSyncStates.push(session.agentState);
+      return update(ctx);
+    };
+
+    const spoken = createEventSpeaker({ agent, session, pollMs: 2 })(
+      'Сбой на сервере: движок не отвечает; сервер повторит попытку сам. Скажи вслух только: «Сервер задумался, ещё немного».',
+    );
+    // Библиотека (agent_activity.ts): инструмент завершился, копия истории сессии + вывод, updateChatCtx, затем ответ.
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    const libCtx = rt.chatCtx.copy();
+    libCtx.items.push(llm.FunctionCallOutput.create({ id: 'item_tool_output', callId: 'c2', name: 'play_move', output: '{"ok":true}', isError: false }));
+    await rt.updateChatCtx(libCtx);
+    session.agentState = 'speaking';
+    await spoken;
+
+    expect(ourSyncStates).toEqual(['speaking']);
+    expect(rt.deleted).toEqual([]);
+    expect(texts(rt.chatCtx)).toEqual([
+      'function_call:item_remote_call',
+      'function_call_output:item_tool_output',
+      'system:Событие с экрана: Сбой на сервере: движок не отвечает; сервер повторит попытку сам. Скажи вслух только: «Сервер задумался, ещё немного».',
+    ]);
+    expect(calls).toEqual([{ instructions: SAY_EVENT_INSTRUCTIONS, toolChoice: 'none' }]);
+  });
+
+  it('thinking дольше потолка: [!] в логе, событие всё же уходит в историю и звучит', async () => {
+    const journal: Journal = [];
+    const logs: string[] = [];
+    const rt = fakeRealtime(journal);
+    const agent = realtimeAgent(rt);
+    const { session, calls } = fakeSession(journal, () => rt.chatCtx);
+    session.agentState = 'thinking';
+    await createEventSpeaker({ agent, session, log: (l) => void logs.push(l), thinkingWaitMs: 30, pollMs: 2 })('Твой ход ка десять уже на доске.');
+    expect(logs).toEqual(['[!] voice-agent: модель занята (agentState thinking) дольше 0,03 с, событие кладу в историю без ожидания']);
+    expect(journal).toEqual(['sync system:Событие с экрана: Твой ход ка десять уже на доске.', 'reply after system:Событие с экрана: Твой ход ка десять уже на доске.', 'played 1']);
+    expect(calls).toHaveLength(1);
+  });
+
+  it('потолок ожидания — 20 с: выше клиентского потолка play/analyze (15 с) плюс таймаут синхронизации плагина (5 с)', () => {
+    expect(THINKING_WAIT_MS).toBe(20_000);
   });
 });
