@@ -54,6 +54,8 @@ import {
   PlayRequest,
   PlayResponse,
   ResignRequest,
+  RedoRequest,
+  RedoResponse,
   SetRankRequest,
   StateResponse,
   UndoRequest,
@@ -74,6 +76,7 @@ const state = {
   ko: null,
   consecutivePasses: 0,
   pendingEngineMove: false,
+  canRedo: false,
 };
 
 const move = { n: 1, color: 'B', coord: 'D4', captured: 0, at: state.createdAt };
@@ -347,6 +350,7 @@ describe('операции', () => {
 
     expect(UndoRequest.parse({})).toEqual({ via: 'api' });
     expect(UndoRequest.parse({ expectedRevision: 7, via: 'tap' })).toEqual({ expectedRevision: 7, via: 'tap' });
+    expect(RedoRequest.parse({ expectedRevision: 8, via: 'voice' })).toEqual({ expectedRevision: 8, via: 'voice' });
     expect(() => UndoRequest.parse({ via: 'sms' })).toThrow();
 
     expect(CorrectRequest.parse({ coord: 'D4' })).toEqual({ coord: 'D4', waitForReply: true, via: 'api' });
@@ -383,6 +387,7 @@ describe('операции', () => {
     expect(() => StateResponse.parse({ state: { ...state, toPlay: 'X' } })).toThrow();
 
     expect(UndoResponse.parse({ state, removed: [move] })).toEqual({ state, removed: [move] });
+    expect(RedoResponse.parse({ state: { ...state, canRedo: false }, restored: [move] })).toEqual({ state: { ...state, canRedo: false }, restored: [move] });
     expect(() => UndoResponse.parse({ state })).toThrow();
     expect(() => UndoResponse.parse({ state, removed: [{ ...move, color: 'X' }] })).toThrow();
     expect(() => UndoResponse.parse({ state: { ...state, toPlay: 'X' }, removed: [] })).toThrow();
@@ -427,8 +432,8 @@ describe('операции', () => {
 });
 
 describe('ошибки', () => {
-  it('ровно семнадцать кодов', () => {
-    expect(ERROR_CODES).toHaveLength(17);
+  it('ровно восемнадцать кодов', () => {
+    expect(ERROR_CODES).toHaveLength(18);
     expect([...ERROR_CODES].sort()).toEqual(
       [
         'bad_request',
@@ -442,6 +447,7 @@ describe('ошибки', () => {
         'not_found',
         'not_your_turn',
         'nothing_to_undo',
+        'nothing_to_redo',
         'rate_limited',
         'retries_exhausted',
         'revision_conflict',
@@ -463,6 +469,7 @@ describe('ошибки', () => {
       not_your_turn: 409,
       game_finished: 409,
       nothing_to_undo: 409,
+      nothing_to_redo: 409,
       revision_conflict: 409,
       limit_reached: 429,
       rate_limited: 429,
@@ -472,7 +479,7 @@ describe('ошибки', () => {
       engine_unavailable: 503,
       retries_exhausted: 503,
     });
-    expect(Object.keys(ERROR_STATUS)).toHaveLength(17);
+    expect(Object.keys(ERROR_STATUS)).toHaveLength(18);
     for (const code of ERROR_CODES) expect(ERROR_STATUS[code], code).toBeGreaterThanOrEqual(400);
   });
 
@@ -555,8 +562,8 @@ describe('события', () => {
     expect(() => GameEvent.parse({ type: 'nope' })).toThrow();
   });
 
-  it('девять причин обновления состояния', () => {
-    expect(StateCause.options).toEqual(['play', 'pass', 'undo', 'correct', 'rank', 'engine', 'resign', 'new', 'sync']);
+  it('десять причин обновления состояния', () => {
+    expect(StateCause.options).toEqual(['play', 'pass', 'undo', 'redo', 'correct', 'rank', 'engine', 'resign', 'new', 'sync']);
     for (const cause of StateCause.options) {
       expect(GameEvent.parse({ type: 'state.updated', state, cause, by: 'human', via: 'voice' })).toEqual({
         type: 'state.updated',
@@ -722,6 +729,7 @@ describe('строгость запросов', () => {
       ['PassRequest', PassRequest, {}],
       ['ResignRequest', ResignRequest, { color: 'B' }],
       ['UndoRequest', UndoRequest, {}],
+      ['RedoRequest', RedoRequest, {}],
       ['CorrectRequest', CorrectRequest, { coord: 'D4' }],
       ['SetRankRequest', SetRankRequest, { color: 'W', rank: '3d' }],
       ['AnalyzeRequest', AnalyzeRequest, {}],

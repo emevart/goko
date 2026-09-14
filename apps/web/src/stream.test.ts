@@ -397,6 +397,7 @@ describe('needsRetry', () => {
       ko: null,
       consecutivePasses: 0,
       pendingEngineMove: true,
+      canRedo: false,
     };
     expect(needsRetry(true, { type: 'state.updated', state, cause: 'sync', by: 'system' })).toBe(false);
   });

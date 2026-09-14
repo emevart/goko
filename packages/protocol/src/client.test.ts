@@ -18,6 +18,7 @@ const state = {
   ko: null,
   consecutivePasses: 0,
   pendingEngineMove: true,
+  canRedo: false,
 };
 
 describe('createClient', () => {
@@ -319,6 +320,7 @@ const timedRoutes: TimedRoute[] = [
   { name: 'pass', op: 'pass', run: (c, signal) => c.pass('g1', {}, { signal }) },
   { name: 'resign', op: 'resign', run: (c, signal) => c.resign('g1', { color: 'B' }, { signal }) },
   { name: 'undo', op: 'undo', run: (c, signal) => c.undo('g1', {}, { signal }) },
+  { name: 'redo', op: 'redo', run: (c, signal) => c.redo('g1', {}, { signal }) },
   { name: 'correct', op: 'correct_last_move', run: (c, signal) => c.correct('g1', { coord: 'D4' }, { signal }) },
   { name: 'setRank', op: 'set_rank', run: (c, signal) => c.setRank('g1', { color: 'W', rank: '10k' }, { signal }) },
   { name: 'analyze', op: 'analyze', run: (c, signal) => c.analyze('g1', {}, { signal }) },
@@ -344,6 +346,7 @@ describe('таймауты клиента', () => {
       pass: 15_000,
       resign: 5_000,
       undo: 5_000,
+      redo: 5_000,
       correct_last_move: 15_000,
       set_rank: 5_000,
       analyze: 15_000,

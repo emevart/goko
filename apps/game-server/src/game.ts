@@ -34,6 +34,7 @@ export function newGame(input: NewGameParams): GameState {
     captures: { B: 0, W: 0 },
     ko: null,
     consecutivePasses: 0,
+    canRedo: false,
   };
   return { ...base, pendingEngineMove: pending(base) };
 }
@@ -76,6 +77,7 @@ export function applyMove(state: GameState, color: Color, coord: string, at: str
     ko: played.position.ko === null ? null : indexToCoord(played.position.ko, size),
     consecutivePasses: normalized === 'pass' ? state.consecutivePasses + 1 : 0,
     pendingEngineMove: false,
+    canRedo: state.canRedo,
   };
   next.pendingEngineMove = pending(next);
   return { state: next, move };

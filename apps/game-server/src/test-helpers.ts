@@ -1,6 +1,6 @@
 // Ошибка синхронного вызова как значение: проверяем code и details через toMatchObject.
 import type { ApiError, GameState } from '@goko/protocol';
-import type { AbandonMarks, SnapshotStore } from './store.ts';
+import type { AbandonMarks, GameSnapshot, RedoPortion, SnapshotStore } from './store.ts';
 
 // Снапшоты в памяти вместо диска. Настоящая запись идёт в пуле потоков и под нагрузкой длится
 // дольше любого разумного числа оборотов очереди, поэтому тесты, которые ждут фоновый коммит по
@@ -8,21 +8,22 @@ import type { AbandonMarks, SnapshotStore } from './store.ts';
 // load — последнее состояние каждой партии (как после рестарта), seed — снапшоты «с прошлого запуска».
 // Как и диск, хранит снимки (structuredClone) при записи и отдаёт копии при чтении: правка состояния
 // на месте после коммита не должна быть видна «на диске». removed — удалённые снапшоты по порядку.
-export type MemoryStore = SnapshotStore & { saved: GameState[]; removed: string[] };
+export type MemoryStore = SnapshotStore & { saved: GameSnapshot[]; removed: string[] };
 
-export function memoryStore(seed: GameState[] = []): MemoryStore {
-  const saved: GameState[] = [];
+export function memoryStore(seed: GameSnapshot[] = []): MemoryStore {
+  const saved: GameSnapshot[] = [];
   const removed: string[] = [];
-  const latest = new Map<string, GameState>(seed.map((state) => [state.id, structuredClone(state)]));
+  const latest = new Map<string, GameSnapshot>(seed.map((state) => [state.id, structuredClone(state)]));
   return {
     dir: '(memory)',
     saved,
     removed,
     init: async () => undefined,
     load: async () => [...latest.values()].map((state) => structuredClone(state)).sort((a, b) => a.createdAt.localeCompare(b.createdAt)),
-    save: async (state: GameState) => {
-      saved.push(structuredClone(state));
-      latest.set(state.id, structuredClone(state));
+    save: async (state: GameState, redoHistory: RedoPortion[] = []) => {
+      const snapshot = { ...structuredClone(state), ...(redoHistory.length > 0 ? { redoHistory: structuredClone(redoHistory) } : {}) };
+      saved.push(snapshot);
+      latest.set(state.id, snapshot);
     },
     remove: async (id: string) => {
       removed.push(id);

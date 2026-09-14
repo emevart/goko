@@ -147,7 +147,7 @@ describe('GameService: партия человек против движка', (
   });
 
   it('create без ожидания ответа возвращается сразу, ход движка приходит позже', async () => {
-    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
     const engine = createFakeEngine({ script: ['C3'], delayMs: 50 });
     const { service } = await make(engine);
     const created = await service.create({ ...ENGINE_BLACK, ...S9, waitForReply: false });
@@ -248,6 +248,91 @@ describe('GameService: партия человек против движка', (
     expect(engine.calls.genmove).toBe(2);
     expect(service.get(id).moves).toEqual([]);
     expect(service.get(id).pendingEngineMove).toBe(false);
+  });
+
+  it('redo последовательно возвращает сохранённые порции без повторного вызова движка и переживает restart', async () => {
+    const engine = createFakeEngine({ script: ['E5', 'F6'] });
+    const store = memoryStore();
+    const first = await make(engine, { store });
+    const g = await first.service.create({ ...HUMAN_BLACK, ...S9, waitForReply: true });
+    await first.service.play(g.state.id, { coord: 'D4', waitForReply: true, via: 'api' });
+    await first.service.play(g.state.id, { coord: 'C3', waitForReply: true, via: 'api' });
+    await first.service.undo(g.state.id, { via: 'api' });
+    await first.service.undo(g.state.id, { via: 'api' });
+    expect(first.service.get(g.state.id).canRedo).toBe(true);
+    expect(engine.calls.genmove).toBe(2);
+
+    const second = await make(engine, { store });
+    const r1 = await second.service.redo(g.state.id, { via: 'voice' });
+    expect(r1.restored.map((m) => m.coord)).toEqual(['D4', 'E5']);
+    expect(r1.state.moves.map((m) => m.coord)).toEqual(['D4', 'E5']);
+    expect(r1.state.canRedo).toBe(true);
+    const r2 = await second.service.redo(g.state.id, { via: 'api' });
+    expect(r2.restored.map((m) => m.coord)).toEqual(['C3', 'F6']);
+    expect(r2.state.moves.map((m) => m.coord)).toEqual(['D4', 'E5', 'C3', 'F6']);
+    expect(r2.state.canRedo).toBe(false);
+    expect(engine.calls.genmove).toBe(2);
+  });
+
+  it('redo одного отменённого человеческого хода запускает новый поиск; новая ветка очищает redo, rank сохраняет', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const engine = createFakeEngine({ script: ['E5', 'F6'], delayMs: 100 });
+    const { service } = await make(engine);
+    const g = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: false });
+    await service.play(g.state.id, { coord: 'D4', waitForReply: false, via: 'api' });
+    await untilTick(() => engine.calls.genmove === 1);
+    await service.undo(g.state.id, { via: 'api' });
+    await service.setRank(g.state.id, { color: 'W', rank: '9k' });
+    expect(service.get(g.state.id).canRedo).toBe(true);
+    await service.redo(g.state.id, { via: 'api' });
+    await untilTick(() => engine.calls.genmove === 2);
+    expect(service.get(g.state.id).pendingEngineMove).toBe(true);
+    await vi.advanceTimersByTimeAsync(100);
+    await untilTick(() => service.get(g.state.id).moves.length === 2);
+    expect(service.get(g.state.id).canRedo).toBe(false);
+
+    await service.undo(g.state.id, { via: 'api' });
+    await service.play(g.state.id, { coord: 'C3', waitForReply: false, via: 'api' });
+    expect(service.get(g.state.id).canRedo).toBe(false);
+    await expect(service.redo(g.state.id, { via: 'api' })).rejects.toMatchObject({ code: 'nothing_to_redo' });
+  });
+
+  it('redo двух пасов возвращает сохранённый итог score без пересчёта', async () => {
+    const engine = createFakeEngine();
+    const { service } = await make(engine);
+    const g = await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: true });
+    await service.pass(g.state.id, { waitForReply: false, via: 'api' });
+    await service.pass(g.state.id, { waitForReply: false, via: 'api' });
+    await untilTick(() => service.get(g.state.id).status === 'finished');
+    const saved = service.get(g.state.id).result;
+    await service.undo(g.state.id, { via: 'api' });
+    const calls = engine.calls.score;
+    const redone = await service.redo(g.state.id, { via: 'api' });
+    expect(redone.state.result).toEqual(saved);
+    expect(redone.state.status).toBe('finished');
+    expect(engine.calls.score).toBe(calls);
+  });
+
+  it('публикует ответ движка не раньше задержки от начала поиска и отменяет ожидание через undo', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    const engine = createFakeEngine({ script: ['E5', 'F6'], delayMs: 200 });
+    const { service } = await make(engine, { engineMoveDelayMs: 1_500 });
+    const g = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: false });
+    await service.play(g.state.id, { coord: 'D4', waitForReply: false, via: 'api' });
+    await thinkThrough(engine, 1, 200);
+    expect(service.get(g.state.id).moves).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1_299);
+    expect(service.get(g.state.id).moves).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(2);
+    await untilTick(() => service.get(g.state.id).moves.length === 2);
+
+    await service.play(g.state.id, { coord: 'C3', waitForReply: false, via: 'api' });
+    await thinkThrough(engine, 2, 200);
+    const undo = await service.undo(g.state.id, { via: 'api' });
+    expect(undo.state.moves).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(2_000);
+    await tick(5);
+    expect(service.get(g.state.id).moves).toHaveLength(2);
   });
 
   it('undo в finished по счёту возвращает playing и снова ждёт движок, если его ход', async () => {
@@ -754,8 +839,8 @@ describe('GameService: партия человек против движка', (
     await vi.advanceTimersByTimeAsync(120); // первое раздумье кончается впустую
     await thinkThrough(engine, 2, 120);
     const res = await correcting;
-    expect(res.reply).toMatchObject({ coord: 'F6' });
-    expect(res.state.moves.map((m) => m.coord)).toEqual(['D5', 'F6']);
+    expect(res.reply).toMatchObject({ coord: 'E5' });
+    expect(res.state.moves.map((m) => m.coord)).toEqual(['D5', 'E5']);
   });
 
   it('код ApiError движка попадает в событие error', async () => {
@@ -2354,10 +2439,8 @@ describe('GameService: серия повторов фоновой задачи',
     // Идёт единственная пауза серии; исправление ставит ожидающего ответа на новую ревизию.
     const correcting = service.correct(id, { coord: 'C3', waitForReply: true, via: 'voice' });
     const state = track(correcting);
+    // Correct отменяет прежнюю паузу и сразу начинает новую серию на новой ревизии.
     await tick(10);
-    expect(state.settled).toBe(false);
-    await vi.advanceTimersByTimeAsync(1000);
-    // Часы дальше не идут: без releaseWaiters на финале correct ждал бы 8 с.
     await untilTick(() => state.settled);
     const res = await correcting;
     expect(calls).toBe(2);

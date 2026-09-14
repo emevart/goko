@@ -34,6 +34,20 @@ describe('GameStore', () => {
     expect(loaded[0]).toEqual(state());
   });
 
+  it('история redo сохраняется отдельно, а старый снапшот без неё загружается с canRedo=false', async () => {
+    const store = new GameStore(dir);
+    const move = { n: 1, color: 'B' as const, coord: 'D4', captured: 0, at: T };
+    await store.save({ ...state(), canRedo: true }, [{ moves: [move] }]);
+    const raw = JSON.parse(await readFile(path.join(dir, 'g1.json'), 'utf8'));
+    expect(raw.redoHistory).toEqual([{ moves: [move] }]);
+    expect((await store.load())[0]).toMatchObject({ canRedo: true, redoHistory: [{ moves: [move] }] });
+
+    const old = { ...state(), id: 'old' } as Record<string, unknown>;
+    delete old.canRedo;
+    await writeFile(path.join(dir, 'old.json'), JSON.stringify(old), 'utf8');
+    expect((await store.load()).find((g) => g.id === 'old')).toMatchObject({ canRedo: false });
+  });
+
   it('load создаёт каталог, если его нет, и возвращает пустой список', async () => {
     const loaded = await new GameStore(path.join(dir, 'fresh')).load();
     expect(loaded).toEqual([]);

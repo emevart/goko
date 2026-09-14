@@ -258,6 +258,9 @@ describe('createApp: маршруты брифа', () => {
     const id = state.id;
     await client.play(id, { coord: 'D4' });
     expect((await client.undo(id)).removed).toHaveLength(2);
+    expect((await client.redo(id)).restored.map((m) => m.coord)).toEqual(['D4', 'E5']);
+    await expect(client.redo(id)).rejects.toMatchObject({ code: 'nothing_to_redo', status: 409 });
+    await client.undo(id);
     await client.play(id, { coord: 'C3' });
     expect((await client.correct(id, { coord: 'C4' })).reply?.coord).toBe('pass');
     expect((await client.analyze(id)).groups.length).toBeGreaterThan(0);

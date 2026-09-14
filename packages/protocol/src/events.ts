@@ -2,8 +2,8 @@
 import { z } from 'zod';
 import { By, Color, GameState, Result, Via } from './game.ts';
 
-// Ровно девять причин. Автоматический счёт после двух пасов публикуется с причиной 'pass'.
-export const StateCause = z.enum(['play', 'pass', 'undo', 'correct', 'rank', 'engine', 'resign', 'new', 'sync']);
+// Ровно десять причин. Автоматический счёт после двух пасов публикуется с причиной 'pass'.
+export const StateCause = z.enum(['play', 'pass', 'undo', 'redo', 'correct', 'rank', 'engine', 'resign', 'new', 'sync']);
 export type StateCause = z.infer<typeof StateCause>;
 
 export const GameEvent = z.discriminatedUnion('type', [

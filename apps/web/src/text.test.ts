@@ -28,6 +28,7 @@ function game(over: Partial<GameState> = {}): GameState {
     ko: null,
     consecutivePasses: 0,
     pendingEngineMove: false,
+    canRedo: false,
     ...over,
   };
 }

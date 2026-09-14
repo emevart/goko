@@ -1,7 +1,8 @@
 // Снапшоты партий: data/games/<id>.json, запись через временный файл и rename.
 import { mkdir, open, readFile, readdir, rename, unlink } from 'node:fs/promises';
 import path from 'node:path';
-import { ApiError, GameState } from '@goko/protocol';
+import { z } from 'zod';
+import { ApiError, GameState, Move, Result, type GameState as GameStateType, type Move as MoveType, type Result as ResultType } from '@goko/protocol';
 import { MAX_ID_LENGTH, isSafeId } from './ids.ts';
 
 // Шов файловой системы для записи и удаления: тест видит порядок шагов и обрывает любой из них.
@@ -29,6 +30,10 @@ function checkId(id: string): void {
 const ABANDONED_SUFFIX = '.abandoned';
 
 // То, чем сервис пользуется от хранилища: подделка в памяти для тестов реализует только это.
+export const RedoPortion = z.object({ moves: z.array(Move), result: Result.optional() });
+export type RedoPortion = { moves: MoveType[]; result?: ResultType };
+export type GameSnapshot = GameStateType & { redoHistory?: RedoPortion[] };
+const SnapshotHistory = z.object({ redoHistory: z.array(RedoPortion).optional() });
 export type SnapshotStore = Pick<GameStore, 'dir' | 'init' | 'load' | 'save' | 'remove'>;
 // Отметки брошенных партий: отдельный необязательный шов сервиса, подделка в памяти — memoryMarks.
 export type AbandonMarks = Pick<GameStore, 'loadAbandoned' | 'markAbandoned' | 'clearAbandoned'>;
@@ -46,15 +51,17 @@ export class GameStore {
     await mkdir(this.dir, { recursive: true });
   }
 
-  async load(): Promise<GameState[]> {
+  async load(): Promise<GameSnapshot[]> {
     await this.init();
-    const out: GameState[] = [];
+    const out: GameSnapshot[] = [];
     for (const name of await readdir(this.dir)) {
       if (!name.endsWith('.json')) continue;
       const file = path.join(this.dir, name);
       try {
-        const parsed = GameState.safeParse(JSON.parse(await readFile(file, 'utf8')));
-        if (parsed.success) out.push(parsed.data);
+        const raw = JSON.parse(await readFile(file, 'utf8')) as unknown;
+        const history = SnapshotHistory.safeParse(raw);
+        const parsed = GameState.safeParse({ ...(raw as Record<string, unknown>), canRedo: history.success && (history.data.redoHistory?.length ?? 0) > 0 });
+        if (parsed.success && history.success) out.push({ ...parsed.data, ...(history.data.redoHistory ? { redoHistory: history.data.redoHistory } : {}) });
         else console.error(`[!] store: ${name} does not match the schema, skipped`);
       } catch {
         console.error(`[!] store: ${name} is not readable, skipped`);
@@ -65,13 +72,13 @@ export class GameStore {
 
   // Долговечная запись: содержимое временного файла сброшено на диск (sync) до rename, а сам rename —
   // fsync каталога. Иначе после отключения питания под именем снапшота мог оказаться пустой файл.
-  async save(state: GameState): Promise<void> {
+  async save(state: GameStateType, redoHistory: RedoPortion[] = []): Promise<void> {
     checkId(state.id);
     const file = path.join(this.dir, `${state.id}.json`);
     const tmp = `${file}.${process.pid}.tmp`;
     const handle = await this.fs.open(tmp, 'w');
     try {
-      await handle.writeFile(JSON.stringify(state), 'utf8');
+      await handle.writeFile(JSON.stringify({ ...state, ...(redoHistory.length > 0 ? { redoHistory } : {}) }), 'utf8');
       await handle.sync();
     } catch (e) {
       // Отказ закрытия не должен заслонить исходный отказ записи.

@@ -82,6 +82,7 @@ export const GameState = z.object({
   ko: z.string().nullable(),
   consecutivePasses: z.number().int().min(0),
   pendingEngineMove: z.boolean(),
+  canRedo: z.boolean(),
   result: Result.optional(),
 }).superRefine((value, ctx) => {
   // Инвариант раздела 4 спеки: доска — строка из boardSize^2 символов '.', 'B', 'W'.

@@ -36,6 +36,7 @@ export function fakeGame(overrides: Partial<GameState> = {}): GameState {
     ko: null,
     consecutivePasses: 0,
     pendingEngineMove: false,
+    canRedo: false,
     ...overrides,
   };
 }

@@ -17,6 +17,7 @@ import {
   PassRequest,
   PlayRequest,
   ResignRequest,
+  RedoRequest,
   SetRankRequest,
   UndoRequest,
 } from '@goko/protocol';
@@ -381,6 +382,7 @@ export function createApp(deps: AppDeps): Hono {
   app.post('/api/games/:id/resign', async (c) => c.json(await service.resign(c.req.param('id'), await parseBody(c, ResignRequest))));
   // Откат партии, завершённой счётом, возвращает её в счёт: без владельца в памяти — в счёт адреса запроса (D-0012).
   app.post('/api/games/:id/undo', async (c) => c.json(await service.undo(c.req.param('id'), await parseBody(c, UndoRequest), 'human', { clientKey: clientKey(c, trustProxy) })));
+  app.post('/api/games/:id/redo', async (c) => c.json(await service.redo(c.req.param('id'), await parseBody(c, RedoRequest), 'human', { clientKey: clientKey(c, trustProxy) })));
   app.post('/api/games/:id/correct', async (c) => c.json(await service.correct(c.req.param('id'), await parseBody(c, CorrectRequest), 'human', { clientKey: clientKey(c, trustProxy) })));
   app.post('/api/games/:id/rank', async (c) => c.json(await service.setRank(c.req.param('id'), await parseBody(c, SetRankRequest))));
   app.post('/api/games/:id/analyze', async (c) => c.json(await service.analyze(c.req.param('id'), await parseBody(c, AnalyzeRequest))));

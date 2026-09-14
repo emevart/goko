@@ -58,6 +58,12 @@ export type UndoRequest = z.input<typeof UndoRequest>;
 export const UndoResponse = z.object({ state: GameState, removed: z.array(Move) });
 export type UndoResponse = z.infer<typeof UndoResponse>;
 
+export const RedoRequest = UndoRequest;
+export type RedoRequest = z.input<typeof RedoRequest>;
+
+export const RedoResponse = z.object({ state: GameState, restored: z.array(Move) });
+export type RedoResponse = z.infer<typeof RedoResponse>;
+
 export const CorrectRequest = z.strictObject({
   coord: z.string().min(1).max(8),
   waitForReply: z.boolean().default(true),

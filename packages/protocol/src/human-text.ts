@@ -36,6 +36,7 @@ export const ERROR_TEXT: Record<ErrorCode, string> = {
   not_your_turn: 'сейчас не твой ход',
   game_finished: 'партия уже закончена',
   nothing_to_undo: 'отменять нечего',
+  nothing_to_redo: 'возвращать нечего',
   revision_conflict: 'партия уже изменилась, повтори ещё раз',
   engine_busy: 'Гоко думает дольше обычного',
   engine_unavailable: 'Гоко сейчас недоступен',

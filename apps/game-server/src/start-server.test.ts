@@ -258,6 +258,8 @@ describe('startServer: конфигурация из env', () => {
       ['PORT', '0', 'PORT должна быть целым числом от 1 до 65535'],
       ['PORT', '65536', 'PORT должна быть целым числом от 1 до 65535'],
       ['PORT', 'http', 'PORT должна быть целым числом от 1 до 65535'],
+      ['ENGINE_MOVE_DELAY_MS', '-1', 'ENGINE_MOVE_DELAY_MS должна быть целым числом от 0 до 5000'],
+      ['ENGINE_MOVE_DELAY_MS', '5001', 'ENGINE_MOVE_DELAY_MS должна быть целым числом от 0 до 5000'],
     ];
     for (const [name, value, message] of bad) {
       const { deps, rec } = harness();
@@ -308,6 +310,7 @@ describe('startServer: конфигурация из env', () => {
     expect(rec.listens).toEqual([{ port: 8787, hostname: '127.0.0.1' }]);
     expect(rec.serviceDeps[0]?.store.dir).toBe(path.join(REPO_ROOT, 'data/games'));
     expect(rec.serviceDeps[0]?.staleGameMs).toBe(SESSION_TTL_MS);
+    expect(rec.serviceDeps[0]?.engineMoveDelayMs).toBe(1500);
     expect(rec.roomOptions).toEqual([{ url: 'wss://lk.test', apiKey: 'devkey', apiSecret: SECRET }]);
     vi.useFakeTimers({ toFake: ['Date'] });
     const headers = { 'x-app-key': BASE_ENV.APP_KEY };
@@ -348,7 +351,7 @@ describe('startServer: конфигурация из env', () => {
   it('значения из env: порт, хост, агент, каталог данных, лимит; сессии истекают по SESSION_TTL_MS', async () => {
     say();
     const { deps, rec } = harness();
-    const env = { ...deps.env, PORT: '18787', HOST: '0.0.0.0', AGENT_NAME: 'goko-dev', MAX_SESSIONS: '2', SESSION_TTL_MS: '60000' };
+    const env = { ...deps.env, PORT: '18787', HOST: '0.0.0.0', AGENT_NAME: 'goko-dev', MAX_SESSIONS: '2', SESSION_TTL_MS: '60000', ENGINE_MOVE_DELAY_MS: '0' };
     vi.useFakeTimers({ toFake: ['Date'] });
     const started = await startServer({ ...deps, env });
     if (!started) throw new Error('сервер не запустился');
@@ -359,6 +362,7 @@ describe('startServer: конфигурация из env', () => {
     expect(rec.serviceDeps[0]?.log).toBe(deps.log);
     // Порог устаревшей партии — тот же SESSION_TTL_MS.
     expect(rec.serviceDeps[0]?.staleGameMs).toBe(60_000);
+    expect(rec.serviceDeps[0]?.engineMoveDelayMs).toBe(0);
     const headers = { 'x-app-key': BASE_ENV.APP_KEY };
     expect((await started.app.request('/api/sessions', { method: 'POST', headers })).status).toBe(200);
     expect(rec.rooms[0]?.agents[0]?.agentName).toBe('goko-dev');

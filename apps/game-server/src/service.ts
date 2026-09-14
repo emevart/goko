@@ -21,6 +21,8 @@ import {
   PlayRequest,
   type PlayResponse,
   ResignRequest,
+  RedoRequest,
+  type RedoResponse,
   type Result,
   SetRankRequest,
   type StateCause,
@@ -32,10 +34,10 @@ import {
 import type { Engine } from './engine-client.ts';
 import { errorDetail } from './error-detail.ts';
 import type { EventBus } from './events.ts';
-import { applyMove, finishByScore, newGame, positionOf, resign as resignGame, setRank as setRankGame, undo as undoGame } from './game.ts';
+import { applyMove, finishByScore, newGame, positionOf, rebuild, resign as resignGame, setRank as setRankGame, undo as undoGame } from './game.ts';
 import { newId } from './ids.ts';
 import { SESSION_TTL_MS } from './sessions.ts';
-import type { AbandonMarks, SnapshotStore } from './store.ts';
+import type { AbandonMarks, RedoPortion, SnapshotStore } from './store.ts';
 
 // Входы операций — уже разобранные схемой тела (z.output): defaults подставлены.
 export type NewGameInput = z.output<typeof NewGameRequest>;
@@ -43,6 +45,7 @@ export type PlayInput = z.output<typeof PlayRequest>;
 export type PassInput = z.output<typeof PassRequest>;
 export type ResignInput = z.output<typeof ResignRequest>;
 export type UndoInput = z.output<typeof UndoRequest>;
+export type RedoInput = z.output<typeof RedoRequest>;
 export type CorrectInput = z.output<typeof CorrectRequest>;
 export type SetRankInput = z.output<typeof SetRankRequest>;
 export type AnalyzeInput = z.output<typeof AnalyzeRequest>;
@@ -94,6 +97,7 @@ export type GameServiceDeps = {
   retryDelaysMs?: readonly number[];
   scoreBudgetMs?: number;
   analyzeBudgetMs?: number;
+  engineMoveDelayMs?: number;
   maxActiveGames?: number;
   maxGamesPerClient?: number;
   finishedRetentionMs?: number;
@@ -138,6 +142,7 @@ function needsTask(state: GameState): boolean {
 export class GameService {
   private readonly deps: GameServiceDeps;
   private readonly games = new Map<string, GameState>();
+  private readonly redoHistory = new Map<string, RedoPortion[]>();
   private readonly locks = new Map<string, Promise<void>>();
   private readonly waiters = new Map<string, Waiter[]>();
   private readonly sessionsByGame = new Map<string, string>();
@@ -182,7 +187,9 @@ export class GameService {
     // Отказ удаления — строка [!] в лог, партия всё равно не загружается: следующий init попробует снова.
     const now = (this.deps.now?.() ?? new Date()).getTime();
     const cutoff = now - (this.deps.finishedRetentionMs ?? FINISHED_RETENTION_MS);
-    for (const state of await this.deps.store.load()) {
+    for (const snapshot of await this.deps.store.load()) {
+      const { redoHistory = [], ...loaded } = snapshot;
+      const state: GameState = { ...loaded, canRedo: redoHistory.length > 0 };
       if (state.status === 'finished' && lastActivity(state) < cutoff) {
         try {
           await this.deps.store.remove(state.id);
@@ -192,6 +199,7 @@ export class GameService {
         continue;
       }
       this.games.set(state.id, state);
+      if (redoHistory.length > 0) this.redoHistory.set(state.id, redoHistory);
     }
     // Отметка идущей партии действует; отметка завершённой или удалённой партии — остаток, её снимаем.
     for (const id of (await this.deps.marks?.loadAbandoned()) ?? []) {
@@ -327,7 +335,7 @@ export class GameService {
     if (opts.sessionId) this.sessionsByGame.set(id, opts.sessionId);
     const waiter = state.pendingEngineMove && req.waitForReply ? this.registerWaiter(id, state.revision) : null;
     try {
-      await this.commit(state, 'new', 'system');
+      await this.commit(state, 'new', 'system', undefined, undefined, []);
     } catch (e) {
       // Партии нет и не будет: id больше не встретится, поэтому привязка к сессии и ожидающий
       // первого хода снимаются здесь, а не висят до close.
@@ -354,8 +362,8 @@ export class GameService {
       this.checkSeat(prev, color, by);
       const next = applyMove(prev, color, req.coord, this.now());
       const waiter = req.waitForReply && next.state.pendingEngineMove ? this.registerWaiter(id, next.state.revision) : null;
-      await this.commitOrReleaseWaiter(next.state, next.move.coord === 'pass' ? 'pass' : 'play', by, req.via);
-      return { ...next, waiter };
+      await this.commitOrReleaseWaiter(next.state, next.move.coord === 'pass' ? 'pass' : 'play', by, req.via, [], true);
+      return { ...next, state: this.get(id), waiter };
     });
     return this.withReply(id, state, move, waiter);
   }
@@ -374,8 +382,8 @@ export class GameService {
       }
       this.checkSeat(prev, req.color, by);
       const next = resignGame(prev, req.color);
-      await this.commit(next, 'resign', by, req.via);
-      return { state: next };
+      await this.commit(next, 'resign', by, req.via, undefined, [], true);
+      return { state: this.get(id) };
     });
   }
 
@@ -385,8 +393,28 @@ export class GameService {
       const prev = this.get(id);
       this.checkRevision(prev, req.expectedRevision);
       const rolled = undoGame(prev);
-      await this.commit(rolled.state, 'undo', by, req.via);
+      const portion: RedoPortion = {
+        moves: [...rolled.removed].reverse(),
+        ...(prev.result ? { result: structuredClone(prev.result) } : {}),
+      };
+      await this.commit(rolled.state, 'undo', by, req.via, undefined, [...(this.redoHistory.get(id) ?? []), portion], true);
       return { state: this.get(id), removed: rolled.removed };
+    }, opts);
+  }
+
+  async redo(id: string, req: RedoInput, by: By = 'human', opts: { clientKey?: string } = {}): Promise<RedoResponse> {
+    return this.humanAction(id, by === 'human', async () => {
+      const prev = this.get(id);
+      this.checkRevision(prev, req.expectedRevision);
+      const history = this.redoHistory.get(id) ?? [];
+      const portion = history.at(-1);
+      if (!portion) throw new ApiError('nothing_to_redo', 'there are no moves to restore');
+      const replayed = rebuild(prev, [...prev.moves, ...portion.moves]);
+      const next: GameState = portion.result
+        ? { ...replayed, status: 'finished', pendingEngineMove: false, result: structuredClone(portion.result) }
+        : replayed;
+      await this.commit(next, 'redo', by, req.via, undefined, history.slice(0, -1), true);
+      return { state: this.get(id), restored: portion.moves.map((move) => ({ ...move })) };
     }, opts);
   }
 
@@ -398,8 +426,8 @@ export class GameService {
       this.checkSeat(rolled.state, color, by);
       const next = applyMove(rolled.state, color, req.coord, this.now());
       const waiter = req.waitForReply && next.state.pendingEngineMove ? this.registerWaiter(id, next.state.revision) : null;
-      await this.commitOrReleaseWaiter(next.state, 'correct', by, req.via);
-      return { ...next, waiter };
+      await this.commitOrReleaseWaiter(next.state, 'correct', by, req.via, [], true);
+      return { ...next, state: this.get(id), waiter };
     }, opts);
     return this.withReply(id, state, move, waiter);
   }
@@ -407,7 +435,7 @@ export class GameService {
   async setRank(id: string, req: SetRankInput): Promise<StateResponse> {
     return this.humanAction(id, true, async () => {
       const next = setRankGame(this.get(id), req.color, req.rank);
-      await this.commit(next, 'rank', 'human');
+      await this.commit(next, 'rank', 'human', undefined, undefined, undefined, true);
       return { state: next };
     });
   }
@@ -693,12 +721,16 @@ export class GameService {
 
   // Фиксирует новое состояние: снапшот, событие, пробуждение ожидающих, запуск движка или счёта.
   // humanFallback передаёт только ход движка: признак относится к одному ходу, а не к партии.
-  private async commit(next: GameState, cause: StateCause, by: By, via?: Via, humanFallback?: boolean): Promise<void> {
+  private async commit(next: GameState, cause: StateCause, by: By, via?: Via, humanFallback?: boolean, history = this.redoHistory.get(next.id) ?? [], abortObsolete = false): Promise<void> {
     const prev = this.games.get(next.id);
+    next = { ...next, canRedo: history.length > 0 };
     // Снапшот пишется до публикации состояния: читатель, увидевший новое состояние
     // (или дождавшийся его опросом), уже не может опередить запись на диск.
-    await this.deps.store.save(next);
+    await this.deps.store.save(next, history);
     this.games.set(next.id, next);
+    if (history.length > 0) this.redoHistory.set(next.id, history);
+    else this.redoHistory.delete(next.id);
+    if (abortObsolete) this.taskAborts.get(next.id)?.abort();
     // Удачный коммит обнуляет счёт серии повторов: новая позиция — новая серия. Коммит человека —
     // после correct во время раздумья пауза снова первая, как после undo и play. Коммит движка или
     // счёта — удачный конец фоновой задачи; обнулять здесь, а не по выходу задачи: коммит паса движка
@@ -718,9 +750,9 @@ export class GameService {
 
   // Коммит хода с ожидающим ответа на его ревизию: при отказе записи ревизии не будет, и ожидающий
   // снимается сразу. Ожидающие прежних ревизий (ответ движка на прошлый ход) остаются.
-  private async commitOrReleaseWaiter(next: GameState, cause: StateCause, by: By, via?: Via): Promise<void> {
+  private async commitOrReleaseWaiter(next: GameState, cause: StateCause, by: By, via?: Via, history?: RedoPortion[], abortObsolete = false): Promise<void> {
     try {
-      await this.commit(next, cause, by, via);
+      await this.commit(next, cause, by, via, undefined, history, abortObsolete);
     } catch (e) {
       this.releaseWaitersFrom(next.id, next.revision);
       throw e;
@@ -902,6 +934,7 @@ export class GameService {
       if (!state || state.status !== 'playing' || !state.pendingEngineMove) return;
       const color = state.toPlay;
       const rank = state.seats[color].rank ?? DEFAULT_RANK;
+      const startedAt = Date.now();
       this.emitGame(id, { type: 'engine.thinking', gameId: id, color });
       let reply: Awaited<ReturnType<Engine['genmove']>>;
       try {
@@ -915,6 +948,9 @@ export class GameService {
         if (await this.onEngineFailure(id, e, signal)) continue;
         return;
       }
+      const delayLeft = (this.deps.engineMoveDelayMs ?? 0) - (Date.now() - startedAt);
+      if (delayLeft > 0) await this.sleep(delayLeft, signal);
+      if (this.closed || signal.aborted) return;
       const applied = await this.locked(id, async () => {
         const current = this.games.get(id);
         // Партия изменилась, пока движок думал, или задача отменена: ответ не применяется.
@@ -923,7 +959,7 @@ export class GameService {
         const engineLead = color === 'B' ? reply.scoreLeadB : -reply.scoreLeadB;
         // Спека говорит «после 60-го хода», поэтому строгое `>`, а не `>=`.
         if (current.moves.length > ENGINE_RESIGN_AFTER_MOVE && engineWinrate < ENGINE_RESIGN_WINRATE && engineLead < ENGINE_RESIGN_LEAD) {
-          await this.commit(resignGame(current, color), 'resign', 'engine');
+          await this.commit(resignGame(current, color), 'resign', 'engine', undefined, undefined, []);
           return true;
         }
         let next: ReturnType<typeof applyMove>;
@@ -933,7 +969,7 @@ export class GameService {
           this.log(`[!] the engine suggested an illegal move ${reply.move}: ${e instanceof Error ? e.message : String(e)}; passing instead`);
           next = applyMove(current, color, 'pass', this.now());
         }
-        await this.commit(next.state, 'engine', 'engine', undefined, reply.humanFallback);
+        await this.commit(next.state, 'engine', 'engine', undefined, reply.humanFallback, []);
         return true;
       });
       if (applied) return;
@@ -996,7 +1032,7 @@ export class GameService {
         const current = this.games.get(id);
         if (this.closed || signal.aborted || !current || current.revision !== state.revision) return false;
         // причина `pass`: спека не вводит отдельной причины для автосчёта
-        await this.commit(finishByScore(current, result), 'pass', 'system');
+        await this.commit(finishByScore(current, result), 'pass', 'system', undefined, undefined, []);
         return true;
       });
       if (applied) return;

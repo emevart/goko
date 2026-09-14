@@ -82,6 +82,7 @@ services:
       AGENT_NAME: ${AGENT_NAME:-goko}
       ENGINE_URL: http://go-engine:8788
       ENGINE_KEY: ${ENGINE_KEY}
+      ENGINE_MOVE_DELAY_MS: ${ENGINE_MOVE_DELAY_MS:-1500}
       MAX_SESSIONS: ${MAX_SESSIONS:-3}
       SESSION_TTL_MS: ${SESSION_TTL_MS:-7200000}
       # За Caddy: ключ лимитов — последний адрес X-Forwarded-For; voice-agent без заголовка — по адресу сокета.
