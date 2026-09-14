@@ -10,16 +10,6 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { ApiError, ClientTimeoutError, createClient, humanText } from '@goko/protocol';
 
-// @livekit/rtc-node пишет свой pino-лог прямо в stdout: при NODE_ENV не production — с уровнем debug, и в каждой
-// строке имя машины (hostname). Вывод прогонов попадает в отчёты публичного репозитория (правило 6 CLAUDE.md),
-// а логгер библиотека не экспортирует: уровень и hostname она берёт при загрузке. Поэтому загружаем её
-// динамически, выставив NODE_ENV (если не задан) и подменив имя машины для этого процесса.
-async function loadRtc() {
-  if (env('NODE_ENV') === undefined) process.env.NODE_ENV = 'production';
-  os.hostname = () => 'goko-chat';
-  return import('@livekit/rtc-node');
-}
-
 // Режим «Чат» (D-0011): агент выключает звук сессии и отвечает только текстом в lk.transcription.
 export const CHAT_ATTRIBUTES = { 'goko.mode': 'chat' };
 
@@ -33,12 +23,29 @@ const envMs = (name, fallback) => {
   return Number.isFinite(n) && n >= 0 ? n : fallback;
 };
 
-// Сколько ждать тишины после EOF на stdin: ответ на последнюю фразу приходит позже конца ввода,
-// и при скриптовом прогоне (echo 'дэ четыре' | npm run chat) он иначе теряется целиком.
+// @livekit/rtc-node пишет свой pino-лог прямо в stdout: при NODE_ENV не production — с уровнем debug, и в каждой
+// строке имя машины (hostname). Вывод прогонов попадает в отчёты публичного репозитория (правило 6 CLAUDE.md),
+// а логгер библиотека не экспортирует: уровень и hostname она берёт при загрузке. Поэтому загружаем её
+// динамически, выставив NODE_ENV (если не задан) и подменив имя машины для этого процесса.
+// [!] Подмена работает, только пока pino ещё не загружен: pino читает os.hostname() один раз при загрузке
+// своего модуля (pino/pino.js). Статических импортов чего-либо, что тянет pino (@livekit/rtc-node,
+// @livekit/agents и т.п.), в этом файле быть не должно — иначе имя ПК молча вернётся в stdout.
+async function loadRtc() {
+  if (env('NODE_ENV') === undefined) process.env.NODE_ENV = 'production';
+  os.hostname = () => 'goko-chat';
+  return import('@livekit/rtc-node');
+}
+
+// Сколько ждать тишины после ответа: хвост реплики может прийти несколькими сегментами. Перед выходом по EOF
+// и перед следующей строкой сценария ждём сначала начала ответа, затем тишину, — иначе ответ на последнюю
+// фразу при скриптовом прогоне (echo 'дэ четыре' | npm run chat) теряется целиком.
 const QUIET_MS = envMs('CHAT_QUIET_MS', 5000);
-// Потолок ожидания: агент может замолчать или зациклиться, а висящая комната — это живые деньги
+// Потолок одного ожидания: агент может замолчать или зациклиться, а висящая комната — это живые деньги
 // за сессию Realtime (empty_timeout закрывает её только через 5 минут).
 const MAX_WAIT_MS = envMs('CHAT_MAX_WAIT_MS', 60000);
+// Потолок всего сценария из пайпа (от приглашения до выхода): зависший поток не должен держать платный
+// сеанс N строк по MAX_WAIT_MS. 5 минут — порядок empty_timeout комнаты; длинный сценарий — через переменную.
+const RUN_MAX_MS = envMs('CHAT_RUN_MAX_MS', 300000);
 // Пауза без новых кусков сегмента, после которой считаем сегмент законченным.
 const SEGMENT_DEBOUNCE_MS = 500;
 // Диспетчеризация воркера занимает 3-5 с; фраза, отправленная в эту щель, до агента не доходит
@@ -69,22 +76,65 @@ export function describeEvent(ev) {
 }
 
 /**
- * Ждёт тишины: probe() не занят (нет открытых потоков и неподтверждённых сегментов) и quietMs без
- * новой активности, но не дольше maxWaitMs. true — дождался, false — вышел по потолку.
- * @param {() => { busy: boolean, lastActivityAt: number }} probe
- * @param {{ quietMs: number, maxWaitMs: number, pollMs?: number, now?: () => number, pause?: (ms: number) => Promise<unknown> }} opts
+ * Ждёт ответа и тишины: ответ начался (replied, по умолчанию true), probe() не занят (нет открытых потоков
+ * и неподтверждённых сегментов) и quietMs без новой активности. Пауза вызова инструмента (ход движка до 8 с,
+ * analyze до 10 с без событий SSE) бывает длиннее quietMs, поэтому до начала ответа тишина — не ответ.
+ * Потолок — maxWaitMs от начала ожидания или общий deadline, что раньше; тишина проверяется до потолка.
+ * 'quiet' — дождался; 'no_reply' — потолок, а ответ так и не начался; 'busy' — потолок при начатом ответе.
+ * @param {() => { busy: boolean, lastActivityAt: number, replied?: boolean }} probe
+ * @param {{ quietMs: number, maxWaitMs: number, deadline?: number, pollMs?: number, now?: () => number, pause?: (ms: number) => Promise<unknown> }} opts
+ * @returns {Promise<'quiet' | 'no_reply' | 'busy'>}
  */
-export async function waitForQuiet(probe, { quietMs, maxWaitMs, pollMs = POLL_MS, now = Date.now, pause = sleep }) {
+export async function waitForQuiet(probe, { quietMs, maxWaitMs, deadline = Number.POSITIVE_INFINITY, pollMs = POLL_MS, now = Date.now, pause = sleep }) {
   const startedAt = now();
   for (;;) {
-    const { busy, lastActivityAt } = probe();
-    if (busy === false && now() - lastActivityAt >= quietMs) return true;
-    if (now() - startedAt >= maxWaitMs) return false;
+    const { busy, lastActivityAt, replied = true } = probe();
+    if (replied === true && busy === false && now() - lastActivityAt >= quietMs) return 'quiet';
+    if (now() - startedAt >= maxWaitMs || now() >= deadline) return replied === true ? 'busy' : 'no_reply';
     await pause(pollMs);
   }
 }
 
-async function main() {
+/**
+ * Строка [!] для ожидания, кончившегося не тишиной; null — тишина.
+ * @param {'quiet' | 'no_reply' | 'busy'} outcome
+ * @param {{ lastSent: string | null, waitedMs: number, then: string }} ctx
+ */
+export function waitWarning(outcome, { lastSent, waitedMs, then }) {
+  if (outcome === 'quiet') return null;
+  const seconds = Math.round(waitedMs / 1000);
+  if (outcome === 'no_reply') return `[!] ответа на «${lastSent}» не дождался за ${seconds} с, ${then}`;
+  return `[!] тишины не дождался за ${seconds} с, ${then}`;
+}
+
+/**
+ * Что делать при RoomEvent.Disconnected. Своё отключение ведёт shutdown. Чужое — всегда сбой: пока телефон
+ * в комнате, сервер её не закрывает, а нативный слой сначала переподключается; значит, обрыв связи,
+ * истёкший токен (D-0008) или вытеснение участника. Код 1 по брифу («сбой LiveKit»), адреса в строке нет.
+ * @param {boolean} closing
+ */
+export function disconnectOutcome(closing) {
+  if (closing) return null;
+  return { code: 1, line: '[X] соединение с LiveKit потеряно, комната закрыта' };
+}
+
+/**
+ * Строка [X] для исключения, дошедшего до main().catch. Текст ошибки не печатаем: у клиента он содержит адрес
+ * game-server, у rtc-node — адрес LiveKit. До сессии ответ сервера по протоколу (limit_reached, rate_limited,
+ * unauthorized) и таймаут клиента — фразой humanText и кодом; после сессии — только имя класса ошибки.
+ * @param {unknown} e
+ * @param {boolean} sessionCreated
+ */
+export function fatalLine(e, sessionCreated) {
+  if (sessionCreated) return `[X] chat: сбой после создания сессии (${e instanceof Error ? e.name : typeof e}), выхожу`;
+  if (e instanceof ApiError || e instanceof ClientTimeoutError) {
+    return `[X] chat: не удалось создать сессию: ${humanText(e.code, e instanceof ApiError ? e.details : undefined)} (${e.code})`;
+  }
+  return '[X] chat: не удалось создать сессию; проверьте --api, APP_KEY и запущенный game-server';
+}
+
+/** @param {{ sessionCreated: boolean }} progress */
+async function main(progress) {
   const root = path.resolve(import.meta.dirname, '..');
   if (existsSync(path.join(root, '.env'))) process.loadEnvFile(path.join(root, '.env'));
   const argv = process.argv.slice(2);
@@ -109,6 +159,7 @@ async function main() {
   const client = createClient({ baseUrl: api, appKey });
   // Комнату и диспетчеризацию агента создаёт game-server в POST /api/sessions (D-0001); токен — только на эту комнату.
   const { session, livekit } = await client.createSession();
+  progress.sessionCreated = true;
   // Значение AGENT_NAME не печатаем (правило 4 CLAUDE.md): агента диспетчеризует game-server по своей переменной.
   console.log(`[OK] сессия ${session.id}, комната ${session.room}, агент по AGENT_NAME game-server`);
 
@@ -122,6 +173,11 @@ async function main() {
   let agentJoined = false;
   // Первый поток lk.transcription — приветствие: агент запустил сеанс и принимает lk.chat.
   let agentSpoke = false;
+  // Сколько потоков lk.transcription началось; replyBaseline — их число перед последней отправкой в lk.chat
+  // (null — ответа не ждём). Ответ начался, когда счётчик вырос: тишина до этого — пауза инструмента, а не конец.
+  let streamsStarted = 0;
+  let replyBaseline = null;
+  let lastSent = null;
   // Сегменты, уже напечатанные: повторные куски того же сегмента игнорируем.
   const printedSegments = new Set();
   // lk.segment_id -> { identity, text, timer } — сегменты в ожидании подтверждения.
@@ -184,6 +240,7 @@ async function main() {
   // Регистрировать до connect: первые реплики агента приходят сразу после входа.
   room.registerTextStreamHandler('lk.transcription', async (reader, participant) => {
     activeStreams += 1;
+    streamsStarted += 1;
     lastActivityAt = Date.now();
     agentSpoke = true;
     const attrs = reader.info.attributes ?? {};
@@ -247,10 +304,12 @@ async function main() {
   });
   room.on(RoomEvent.ParticipantDisconnected, (p) => console.log(`[!] вышел: ${p.identity}`));
   room.on(RoomEvent.Disconnected, () => {
-    // Наше собственное отключение уже ведёт shutdown; выходить здесь — оборвать хвост вывода.
-    if (closing) return;
-    console.log('[!] комната закрыта');
-    process.exit(0);
+    // Наше собственное отключение уже ведёт shutdown; выходить здесь — оборвать хвост вывода. Чужое — сбой:
+    // через shutdown, чтобы погасить SSE и напечатать недописанные сегменты (см. disconnectOutcome).
+    const outcome = disconnectOutcome(closing);
+    if (outcome === null) return;
+    console.error(outcome.line);
+    void shutdown(outcome.code, false);
   });
 
   try {
@@ -308,21 +367,38 @@ async function main() {
     if (!agentSpoke) console.log('[!] агент не поздоровался; писать можно, но первая фраза может пропасть');
   }
 
-  const quietProbe = () => ({ busy: activeStreams > 0 || pendingSegments.size > 0, lastActivityAt });
+  const quietProbe = () => ({
+    busy: activeStreams > 0 || pendingSegments.size > 0,
+    lastActivityAt,
+    replied: replyBaseline === null || streamsStarted > replyBaseline,
+  });
   // Сценарий из пайпа (printf '...' | npm run chat) приходит весь сразу: без паузы следующая фраза прервала бы
   // ответ на предыдущую (interrupt в RoomIO), а /board показал бы доску до хода. С клавиатуры человек ждёт сам.
   const scripted = process.stdin.isTTY !== true;
   const me = room.localParticipant?.identity ?? 'phone';
+  // Общий потолок только у сценария: интерактивный разговор длится сколько угодно, у него потолок — Ctrl+C.
+  const runDeadline = scripted ? Date.now() + RUN_MAX_MS : Number.POSITIVE_INFINITY;
 
   console.log('[OK] пиши фразы («давай партию», «дэ четыре», «кто впереди»); /board — доска; Ctrl+C — выход');
   const rl = readline.createInterface({ input: process.stdin });
   for await (const line of rl) {
+    if (closing) break;
     const text = line.trim();
     if (!text) continue;
     if (scripted) {
-      if ((await waitForQuiet(quietProbe, { quietMs: QUIET_MS, maxWaitMs: MAX_WAIT_MS })) === false) {
-        console.error(`[!] тишины не дождался за ${Math.round(MAX_WAIT_MS / 1000)} с, отправляю следующую строку`);
+      const startedAt = Date.now();
+      const outcome = await waitForQuiet(quietProbe, { quietMs: QUIET_MS, maxWaitMs: MAX_WAIT_MS, deadline: runDeadline });
+      // Потолок сценария проверяется только когда тишины нет: успевший ответить агент сценарий не обрывает.
+      const overRun = outcome !== 'quiet' && Date.now() >= runDeadline;
+      const warning = waitWarning(outcome, { lastSent, waitedMs: Date.now() - startedAt, then: overRun ? 'остальные строки не отправляю' : 'отправляю следующую строку' });
+      if (warning) console.error(warning);
+      if (overRun) {
+        console.error(`[X] сценарий не уложился в CHAT_RUN_MAX_MS (${Math.round(RUN_MAX_MS / 1000)} с), закрываю сессию`);
+        await shutdown(1, false);
+        return;
       }
+      // Ответа на прежнюю фразу не было — не ждать его заново перед каждой следующей строкой.
+      if (outcome === 'no_reply') replyBaseline = null;
       // Строка из пайпа на экране не видна: без эха в логе прогона непонятно, на что ответ.
       console.log(`[${me}] ${text}`);
     }
@@ -338,34 +414,37 @@ async function main() {
       }
       continue;
     }
+    // Число потоков до отправки: ответ, открывшийся сразу, пока sendText ещё не вернулся, тоже засчитывается.
+    const baseline = streamsStarted;
     try {
       await room.localParticipant.sendText(text, { topic: 'lk.chat' });
     } catch {
       console.error('[X] не удалось отправить реплику агенту; соединение с LiveKit потеряно');
       await shutdown(1, false);
+      return;
     }
+    replyBaseline = baseline;
+    lastSent = text;
     lastActivityAt = Date.now();
   }
+  if (closing) return;
 
-  // EOF на stdin — ещё не конец разговора. Ждём тишины: нет открытых потоков, нет неподтверждённых
-  // сегментов, QUIET_MS без новой активности, — но не дольше MAX_WAIT_MS.
-  if ((await waitForQuiet(quietProbe, { quietMs: QUIET_MS, maxWaitMs: MAX_WAIT_MS })) === false) {
-    console.error(`[!] тишины не дождался за ${Math.round(MAX_WAIT_MS / 1000)} с, закрываю сессию`);
-  }
+  // EOF на stdin — ещё не конец разговора. Ждём начала ответа на последнюю фразу и тишины: нет открытых
+  // потоков, нет неподтверждённых сегментов, QUIET_MS без новой активности, — но не дольше MAX_WAIT_MS
+  // и потолка сценария. Все строки уже отправлены, поэтому выход по потолку — [!] и код 0, как в брифе.
+  const startedAt = Date.now();
+  const outcome = await waitForQuiet(quietProbe, { quietMs: QUIET_MS, maxWaitMs: MAX_WAIT_MS, deadline: runDeadline });
+  const warning = waitWarning(outcome, { lastSent, waitedMs: Date.now() - startedAt, then: 'закрываю сессию' });
+  if (warning) console.error(warning);
 
   await shutdown(0);
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  main().catch((e) => {
-    // Сюда попадают сбои до входа в комнату (createSession). Текст ошибки клиента содержит адрес
-    // game-server, поэтому err.message не печатаем. Ответ сервера по протоколу (limit_reached,
-    // rate_limited, unauthorized) и таймаут клиента — фразой humanText и кодом; остальное — своей строкой.
-    if (e instanceof ApiError || e instanceof ClientTimeoutError) {
-      console.error(`[X] chat: не удалось создать сессию: ${humanText(e.code, e instanceof ApiError ? e.details : undefined)} (${e.code})`);
-    } else {
-      console.error('[X] chat: не удалось создать сессию; проверьте --api, APP_KEY и запущенный game-server');
-    }
+  // Этап нужен main().catch: до createSession сбой — «не удалось создать сессию», после — другой текст.
+  const progress = { sessionCreated: false };
+  main(progress).catch((e) => {
+    console.error(fatalLine(e, progress.sessionCreated));
     process.exit(1);
   });
 }
