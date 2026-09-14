@@ -121,6 +121,11 @@ function lastActivity(state: GameState): number {
   return Date.parse(state.moves.at(-1)?.at ?? state.createdAt);
 }
 
+// Откат (undo, correct) снимает итог партии: всякий, кроме сдачи (то же условие, что в undo из game.ts).
+function reopensOnUndo(state: GameState): boolean {
+  return state.status === 'finished' && state.result?.reason !== 'resign';
+}
+
 // Партии нужна фоновая задача: автосчёт после двух пасов или ход движка (то же условие, что в kick).
 function needsTask(state: GameState): boolean {
   return state.status === 'playing' && (state.consecutivePasses >= 2 || state.pendingEngineMove);
@@ -157,6 +162,8 @@ export class GameService {
   // Время последнего возврата к партии вне счёта, прошедшего лимиты: для порога устаревания это активность.
   // Только память; записей не больше, чем партий в памяти.
   private readonly returnedAt = new Map<string, number>();
+  // Завершённые партии, которые откат (undo, correct) прошёл лимиты и сейчас снимает с итога: в счёте до конца операции.
+  private readonly reopening = new Set<string>();
   private marksWrite: Promise<void> = Promise.resolve();
   private closed = false;
 
@@ -240,14 +247,16 @@ export class GameService {
   // ставится после неё. Удачный коммит поставит задачу сам и уже по новому состоянию: после сдачи
   // движок не зовётся. Отклонённая операция (not_your_turn, nothing_to_undo, отказ записи) задачу
   // ставит здесь, и серия идёт заново. resume (открытие потока) ставит задачу сразу: операции нет.
-  private async humanAction<T>(id: string, human: boolean, op: () => Promise<T>): Promise<T> {
+  // reopen передаёт откат (undo, correct): партия, с которой он снимет итог, проверяется как возврат (D-0012).
+  private async humanAction<T>(id: string, human: boolean, op: () => Promise<T>, reopen?: { clientKey?: string }): Promise<T> {
     // Возврат к партии вне счёта сверх лимита — отказ до операции: партия не меняется и остаётся вне счёта.
-    const refused = human ? this.reactivate(id) : undefined;
+    const refused = human ? this.reactivate(id, reopen) : undefined;
     if (refused) throw refused;
     const resumed = human && this.gaveUp.delete(id);
     try {
       return await op();
     } finally {
+      this.reopening.delete(id);
       const state = resumed ? this.games.get(id) : undefined;
       if (state) this.kick(state);
     }
@@ -351,18 +360,19 @@ export class GameService {
     }));
   }
 
-  async undo(id: string, req: UndoInput, by: By = 'human'): Promise<UndoResponse> {
+  // clientKey — адрес запроса: в его счёт идёт партия без владельца, которую откат снимает с итога (D-0012).
+  async undo(id: string, req: UndoInput, by: By = 'human', opts: { clientKey?: string } = {}): Promise<UndoResponse> {
     return this.humanAction(id, by === 'human', () => this.locked(id, async () => {
       const prev = this.get(id);
       this.checkRevision(prev, req.expectedRevision);
       const rolled = undoGame(prev);
       await this.commit(rolled.state, 'undo', by, req.via);
       return { state: this.get(id), removed: rolled.removed };
-    }));
+    }), opts);
   }
 
   // Атомарно: откат пары, новый ход человека, новый ответ движка. Одно событие state.updated cause 'correct'.
-  async correct(id: string, req: CorrectInput, by: By = 'human'): Promise<PlayResponse> {
+  async correct(id: string, req: CorrectInput, by: By = 'human', opts: { clientKey?: string } = {}): Promise<PlayResponse> {
     const { state, move, waiter } = await this.humanAction(id, by === 'human', () => this.locked(id, async () => {
       const rolled = undoGame(this.get(id));
       const color = rolled.state.toPlay;
@@ -371,7 +381,7 @@ export class GameService {
       const waiter = req.waitForReply && next.state.pendingEngineMove ? this.registerWaiter(id, next.state.revision) : null;
       await this.commitOrReleaseWaiter(next.state, 'correct', by, req.via);
       return { ...next, waiter };
-    }));
+    }), opts);
     return this.withReply(id, state, move, waiter);
   }
 
@@ -508,28 +518,33 @@ export class GameService {
     const max = this.deps.maxActiveGames ?? MAX_ACTIVE_GAMES;
     const now = (this.deps.now?.() ?? new Date()).getTime();
     let active = 0;
-    for (const state of this.games.values()) if (state.id !== replaced && state.status !== 'finished' && !this.isStale(state, now)) active++;
+    for (const state of this.games.values()) if (state.id !== replaced && this.counted(state, now)) active++;
     for (const id of this.pendingCreates) if (!this.games.has(id)) active++;
     return active >= max ? new ApiError('too_many_games', `limit of ${max} unfinished games reached`, { max }) : undefined;
   }
 
   // Лимит незавершённых партий на клиента (D-0012), счёт как у общего: создаваемая уже в счёте, завершённая,
-  // устаревшая и брошенная сменой — нет, заменяемая текущая партия сессии — тоже нет. Брошенная не вычищается:
-  // возврат к ней пройдёт этот же лимит и вернёт её в счёт.
+  // устаревшая и брошенная сменой — нет, заменяемая текущая партия сессии — тоже нет. Брошенная и завершённая
+  // счётом не вычищаются: возврат или откат пройдёт этот же лимит владельца. Вычищается только сданная партия.
   private clientLimitError(clientKey: string, replaced?: string): ApiError | undefined {
     const max = this.deps.maxGamesPerClient ?? MAX_GAMES_PER_CLIENT;
     const now = (this.deps.now?.() ?? new Date()).getTime();
     let active = 0;
     for (const [id, key] of this.clientByGame) {
       const state = this.games.get(id);
-      if (state?.status === 'finished') {
+      if (state?.status === 'finished' && !reopensOnUndo(state)) {
         this.clientByGame.delete(id);
         continue;
       }
       if (key !== clientKey || id === replaced) continue;
-      if (state ? !this.isStale(state, now) : this.pendingCreates.has(id)) active++;
+      if (state ? this.counted(state, now) : this.pendingCreates.has(id)) active++;
     }
     return active >= max ? new ApiError('too_many_games', `limit of ${max} unfinished games per client reached`, { max, scope: 'client' }) : undefined;
+  }
+
+  // В счёте лимитов: незавершённая и не устаревшая или завершённая, которую сейчас снимает с итога откат.
+  private counted(state: GameState, now: number): boolean {
+    return this.reopening.has(state.id) || (state.status !== 'finished' && !this.isStale(state, now));
   }
 
   // Не в счёте лимитов и без задачи init: без активности дольше порога или брошена сменой партии (D-0012).
@@ -551,14 +566,22 @@ export class GameService {
   // весь общий лимит по кругу: «новая партия в сессии → поток брошенной» или по 3 партии за порог устаревания,
   // затем возврат ко всем. Сверх лимита партия остаётся вне счёта, и отказ возвращается вызывающему. Партия без
   // записи клиента (создана до рестарта) проходит только общий лимит. Партия в счёте проверку не проходит.
-  private reactivate(id: string): ApiError | undefined {
+  // Откат (reopen: undo, correct) партии, завершённой не сдачей, — тоже возврат: он снимает итог. Партия без
+  // владельца идёт в счёт адреса запроса, и адрес записывается владельцем.
+  private reactivate(id: string, reopen?: { clientKey?: string }): ApiError | undefined {
     const state = this.games.get(id);
     const now = (this.deps.now?.() ?? new Date()).getTime();
-    if (state === undefined || state.status === 'finished' || !this.isStale(state, now)) return undefined;
-    const clientKey = this.clientByGame.get(id);
-    const refused = this.activeLimitError() ?? (clientKey === undefined ? undefined : this.clientLimitError(clientKey));
+    if (state === undefined) return undefined;
+    const reopening = reopen !== undefined && reopensOnUndo(state);
+    if (!reopening && (state.status === 'finished' || !this.isStale(state, now))) return undefined;
+    const clientKey = this.clientByGame.get(id) ?? reopen?.clientKey;
+    // Сама партия себе не мешает: второй одновременный откат той же партии уже видит её в счёте.
+    const refused = this.activeLimitError(id) ?? (clientKey === undefined ? undefined : this.clientLimitError(clientKey, id));
     if (refused) return refused;
-    // В счёте сразу, до хода: одновременные возвраты видят друг друга.
+    if (clientKey !== undefined) this.clientByGame.set(id, clientKey);
+    // В счёте сразу, до хода: одновременные возвраты видят друг друга. Открываемая откатом до коммита ещё
+    // завершена, поэтому до конца операции её держит reopening.
+    if (reopening) this.reopening.add(id);
     this.returnedAt.set(id, now);
     if (this.abandoned.delete(id)) this.persistMark(id, false);
     return undefined;

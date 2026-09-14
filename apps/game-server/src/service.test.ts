@@ -3692,6 +3692,103 @@ describe('GameService: лимит партий и старые снапшоты 
     expect(service.get(b).moves).toHaveLength(0);
   });
 
+  // Партия завершается счётом: ход, пас, пас, затем автосчёт.
+  const finishByPasses = async (service: GameService, id: string): Promise<void> => {
+    await service.play(id, { coord: 'D4', waitForReply: false, via: 'api' });
+    await service.pass(id, { waitForReply: false, via: 'api' });
+    await service.pass(id, { waitForReply: false, via: 'api' });
+    await untilTick(() => service.get(id).status === 'finished');
+  };
+
+  it('обход через undo закрыт: «счёт → новая партия в сессии → undo прежней» по кругу возвращает в счёт не больше лимита клиента; владелец завершённой партии помнится', async () => {
+    const { service } = await make(createFakeEngine());
+    const phone = { clientKey: 'phone' };
+    // undo идёт с адреса агента: в счёт идёт владелец партии, а не адрес запроса.
+    const agent = { clientKey: 'agent' };
+    const create = () => service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, { ...phone, sessionId: 's1' });
+    let current = (await create()).state.id;
+    const refusals: unknown[] = [];
+    for (let i = 0; i < MAX_ACTIVE_GAMES + 1; i++) {
+      await finishByPasses(service, current);
+      const next = (await create()).state.id;
+      await service.undo(current, { via: 'api' }, 'human', agent).catch((e: unknown) => refusals.push(e));
+      current = next;
+    }
+    const counted = service.list().filter((g) => g.status === 'playing');
+    expect(counted).toHaveLength(MAX_GAMES_PER_CLIENT);
+    expect(refusals).toHaveLength(MAX_ACTIVE_GAMES + 1 - (MAX_GAMES_PER_CLIENT - 1));
+    for (const reason of refusals) expect(reason).toMatchObject({ code: 'too_many_games', details: { max: MAX_GAMES_PER_CLIENT, scope: 'client' } });
+    await expect(service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, { ...phone, sessionId: 's2' })).rejects.toMatchObject({ details: { scope: 'client' } });
+    await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, { clientKey: 'other', sessionId: 's3' });
+  });
+
+  it('undo и correct завершённой счётом партии сверх лимита — 429 до операции, партия не меняется; в пределах лимита undo возвращает её в счёт', async () => {
+    const { service } = await make(createFakeEngine(), { maxActiveGames: 2, maxGamesPerClient: 1 });
+    const old = (await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, { clientKey: 'A' })).state.id;
+    await finishByPasses(service, old);
+    const finished = service.get(old);
+    const mine = (await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, { clientKey: 'A' })).state.id;
+    await expect(service.undo(old, { via: 'api' }, 'human', { clientKey: 'A' })).rejects.toMatchObject({ code: 'too_many_games', status: 429, details: { max: 1, scope: 'client' } });
+    await expect(service.correct(old, { coord: 'E5', waitForReply: false, via: 'api' }, 'human', { clientKey: 'A' })).rejects.toMatchObject({ code: 'too_many_games', details: { max: 1, scope: 'client' } });
+    const other = (await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, { clientKey: 'B' })).state.id;
+    // Общий лимит проверяется первым: отказ без scope.
+    await expect(service.undo(old, { via: 'api' }, 'human', { clientKey: 'A' })).rejects.toMatchObject({ code: 'too_many_games', details: { max: 2 } });
+    await expect(service.undo(old, { via: 'api' }, 'human', { clientKey: 'A' })).rejects.not.toHaveProperty('details.scope');
+    expect(service.get(old)).toBe(finished);
+    await service.resign(other, { color: 'B', via: 'api' });
+    await service.resign(mine, { color: 'B', via: 'api' });
+    const undone = await service.undo(old, { via: 'api' }, 'human', { clientKey: 'A' });
+    expect(undone.state).toMatchObject({ status: 'playing', moves: [{ coord: 'D4' }] });
+    await expect(service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, { clientKey: 'A' })).rejects.toMatchObject({ details: { scope: 'client' } });
+  });
+
+  it('correct завершённой счётом партии в пределах лимита проходит и возвращает её в счёт; партия без владельца (до рестарта) идёт в счёт адреса запроса', async () => {
+    const store = memoryStore([seedPassed('scored', HOUR)]);
+    const { service } = await make(createFakeEngine(), { store, now: () => NOW, maxGamesPerClient: 1 });
+    await untilTick(() => service.get('scored').status === 'finished');
+    const res = await service.correct('scored', { coord: 'E5', waitForReply: false, via: 'api' }, 'human', { clientKey: 'A' });
+    expect(res.state.status).toBe('playing');
+    // Адрес запроса записан владельцем: у A место занято, у B свободно.
+    await expect(service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, { clientKey: 'A' })).rejects.toMatchObject({ details: { scope: 'client' } });
+    await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, { clientKey: 'B' });
+  });
+
+  it('undo сданной партии лимит не проходит: game_finished, а не 429', async () => {
+    const { service } = await make(createFakeEngine(), { maxActiveGames: 1 });
+    const done = (await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false })).state.id;
+    await service.play(done, { coord: 'D4', waitForReply: false, via: 'api' });
+    await service.resign(done, { color: 'B', via: 'api' });
+    await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false });
+    await expect(service.undo(done, { via: 'api' }, 'human', { clientKey: 'A' })).rejects.toMatchObject({ code: 'game_finished' });
+  });
+
+  it('открываемая откатом партия в счёте с проверки: одновременные create и второй undo на границе лимита отклонены', async () => {
+    const { service } = await make(createFakeEngine(), { maxActiveGames: 1 });
+    const a = (await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false })).state.id;
+    await finishByPasses(service, a);
+    const b = (await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false })).state.id;
+    await finishByPasses(service, b);
+    const results = await Promise.allSettled([
+      service.undo(a, { via: 'api' }, 'human', { clientKey: 'A' }),
+      service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }),
+      service.undo(b, { via: 'api' }, 'human', { clientKey: 'B' }),
+    ]);
+    expect(results.map((r) => r.status)).toEqual(['fulfilled', 'rejected', 'rejected']);
+    expect(service.list().filter((g) => g.status === 'playing').map((g) => g.id)).toEqual([a]);
+    // Отказ отката не оставляет партию в счёте: после сдачи a место свободно.
+    await service.resign(a, { color: 'B', via: 'api' });
+    await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false });
+  });
+
+  it('два одновременных undo одной завершённой счётом партии на границе лимита: оба проходят, партия себе не мешает', async () => {
+    const { service } = await make(createFakeEngine(), { maxActiveGames: 1, maxGamesPerClient: 1 });
+    const a = (await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, { clientKey: 'A' })).state.id;
+    await finishByPasses(service, a);
+    const results = await Promise.allSettled([service.undo(a, { via: 'api' }, 'human', { clientKey: 'A' }), service.undo(a, { via: 'api' }, 'human', { clientKey: 'A' })]);
+    expect(results.map((r) => r.status)).toEqual(['fulfilled', 'fulfilled']);
+    expect(service.get(a)).toMatchObject({ status: 'playing', moves: [] });
+  });
+
   it('close дожидается и записи отметки, поставленной во время close', async () => {
     const base = memoryMarks();
     const gates: Array<() => void> = [];

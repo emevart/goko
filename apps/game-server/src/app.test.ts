@@ -1382,6 +1382,42 @@ describe('createApp: партии только в сессии и не боль�
     expect((await post(app, `/api/games/${g1}/play`, phone, { coord: 'D4' })).status).toBe(200);
   });
 
+  it('undo и correct партии, завершённой счётом, через HTTP проходят лимит владельца: сверх лимита — 429, партия завершена; после сдачи текущей undo возвращает её', async () => {
+    const { app, service } = await make({ maxGamesPerClient: 1, ttlMs: 60 * MIN });
+    const phone = '203.0.113.21';
+    const sid = await sessionOf(app, phone);
+    const g0 = await gameIn(app, sid, phone);
+    expect((await post(app, `/api/games/${g0}/play`, phone, { coord: 'D4' })).status).toBe(200);
+    expect((await post(app, `/api/games/${g0}/pass`, phone, {})).status).toBe(200);
+    expect((await post(app, `/api/games/${g0}/pass`, phone, {})).status).toBe(200);
+    await untilTick(() => service.get(g0).status === 'finished');
+    const g1 = await gameIn(app, sid, phone);
+    // Откат с другого адреса (агент) идёт в счёт владельца партии.
+    for (const [path, body] of [[`/api/games/${g0}/undo`, {}], [`/api/games/${g0}/correct`, { coord: 'E5' }]] as const) {
+      const refused = await post(app, path, '198.51.100.30', body);
+      expect(refused.status, path).toBe(429);
+      expect(((await refused.json()) as ErrorJson).error.details, path).toEqual({ max: 1, scope: 'client' });
+    }
+    expect(service.get(g0).status).toBe('finished');
+    expect((await post(app, `/api/games/${g1}/resign`, phone, { color: 'B' })).status).toBe(200);
+    const undone = await post(app, `/api/games/${g0}/undo`, '198.51.100.30', {});
+    expect(undone.status).toBe(200);
+    expect(service.get(g0).status).toBe('playing');
+  });
+
+  it('undo партии без владельца (создана до рестарта) идёт в счёт адреса запроса, и адрес записывается владельцем', async () => {
+    const { app, service } = await make({ maxGamesPerClient: 1 });
+    const g = (await service.create({ ...HUMAN_ONLY, waitForReply: false })).state.id;
+    for (const path of ['play', 'pass', 'pass']) expect((await post(app, `/api/games/${g}/${path}`, '192.0.2.70', path === 'play' ? { coord: 'D4' } : {})).status).toBe(200);
+    await untilTick(() => service.get(g).status === 'finished');
+    expect((await post(app, '/api/games', '192.0.2.71', HUMAN_ONLY)).status).toBe(200);
+    const refused = await post(app, `/api/games/${g}/undo`, '192.0.2.71', {});
+    expect(refused.status).toBe(429);
+    expect(((await refused.json()) as ErrorJson).error.details).toEqual({ max: 1, scope: 'client' });
+    expect((await post(app, `/api/games/${g}/undo`, '192.0.2.72', {})).status).toBe(200);
+    expect((await post(app, '/api/games', '192.0.2.72', HUMAN_ONLY)).status).toBe(429);
+  });
+
   it('без sessionlessGames POST /api/games — 400 bad_request с reason sessionless_disabled до разбора тела; партия в сессии и чтение списка работают', async () => {
     const { app, service } = await make({ sessionlessGames: false });
     const res = await post(app, '/api/games', '192.0.2.40', HUMAN_ONLY);

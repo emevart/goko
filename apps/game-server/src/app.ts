@@ -374,8 +374,9 @@ export function createApp(deps: AppDeps): Hono {
   app.post('/api/games/:id/play', async (c) => c.json(await service.play(c.req.param('id'), await parseBody(c, PlayRequest))));
   app.post('/api/games/:id/pass', async (c) => c.json(await service.pass(c.req.param('id'), await parseBody(c, PassRequest))));
   app.post('/api/games/:id/resign', async (c) => c.json(await service.resign(c.req.param('id'), await parseBody(c, ResignRequest))));
-  app.post('/api/games/:id/undo', async (c) => c.json(await service.undo(c.req.param('id'), await parseBody(c, UndoRequest))));
-  app.post('/api/games/:id/correct', async (c) => c.json(await service.correct(c.req.param('id'), await parseBody(c, CorrectRequest))));
+  // Откат партии, завершённой счётом, возвращает её в счёт: без владельца в памяти — в счёт адреса запроса (D-0012).
+  app.post('/api/games/:id/undo', async (c) => c.json(await service.undo(c.req.param('id'), await parseBody(c, UndoRequest), 'human', { clientKey: clientKey(c, trustProxy) })));
+  app.post('/api/games/:id/correct', async (c) => c.json(await service.correct(c.req.param('id'), await parseBody(c, CorrectRequest), 'human', { clientKey: clientKey(c, trustProxy) })));
   app.post('/api/games/:id/rank', async (c) => c.json(await service.setRank(c.req.param('id'), await parseBody(c, SetRankRequest))));
   app.post('/api/games/:id/analyze', async (c) => c.json(await service.analyze(c.req.param('id'), await parseBody(c, AnalyzeRequest))));
   app.post('/api/games/:id/score', async (c) => c.json(await service.score(c.req.param('id'))));
