@@ -6,7 +6,7 @@ export const TRACE_MAX_JSON_BYTES = 4 * 1024 * 1024;
 
 export type RecordingStopReason = 'user' | 'duration' | 'size' | 'mode-off' | 'disconnect' | 'track-change' | 'error';
 export type TraceEvent = { t: number; type: string; payload?: unknown };
-export type RecorderTrack = Pick<MediaStreamTrack, 'id' | 'kind' | 'readyState' | 'clone' | 'stop'>;
+export type RecorderTrack = Pick<MediaStreamTrack, 'id' | 'kind' | 'readyState' | 'clone' | 'stop' | 'addEventListener' | 'removeEventListener'>;
 export type RecorderLike = Pick<MediaRecorder, 'state' | 'mimeType' | 'start' | 'stop' | 'addEventListener' | 'removeEventListener'>;
 
 export type RecordingResult = {
@@ -42,6 +42,11 @@ type Deps = {
 const MIME_TYPES = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4'];
 const encoder = new TextEncoder();
 
+export function watchTrackEnd(track: RecorderTrack, onEnded: () => void): () => void {
+  track.addEventListener('ended', onEnded, { once: true });
+  return () => track.removeEventListener('ended', onEnded);
+}
+
 function defaults(): Deps {
   return {
     now: () => performance.now(),
@@ -57,7 +62,17 @@ function defaults(): Deps {
   };
 }
 
-type Side = { label: 'mic' | 'agent'; clone: RecorderTrack; recorder: RecorderLike; chunks: Blob[]; startOffsetMs: number; stopped: Promise<void>; resolveStopped: () => void };
+type Side = {
+  label: 'mic' | 'agent';
+  clone: RecorderTrack;
+  recorder: RecorderLike;
+  chunks: Blob[];
+  startOffsetMs: number;
+  stopped: Promise<void>;
+  resolveStopped: () => void;
+  started: boolean;
+  stopFallback: ReturnType<typeof setTimeout> | null;
+};
 
 export class DiagnosticRecorder {
   private readonly deps: Deps;
@@ -131,8 +146,26 @@ export class DiagnosticRecorder {
         clones.push(clone);
         const recorder = this.deps.createRecorder(clone, mime);
         const chunks: Blob[] = [];
-        let resolveStopped!: () => void;
-        const stopped = new Promise<void>((resolve) => (resolveStopped = resolve));
+        let resolvePromise!: () => void;
+        let stoppedResolved = false;
+        const stopped = new Promise<void>((resolve) => (resolvePromise = resolve));
+        const side: Side = {
+          label,
+          clone,
+          recorder,
+          chunks,
+          startOffsetMs: Math.max(0, this.deps.now() - startedAtMs),
+          stopped,
+          resolveStopped: () => {
+            if (stoppedResolved) return;
+            stoppedResolved = true;
+            if (side.stopFallback) clearTimeout(side.stopFallback);
+            side.stopFallback = null;
+            resolvePromise();
+          },
+          started: false,
+          stopFallback: null,
+        };
         recorder.addEventListener('dataavailable', ((event: BlobEvent) => {
           if (event.data.size > 0) chunks.push(event.data);
           const bytes = this.sides.reduce((sum, side) => sum + side.chunks.reduce((n, chunk) => n + chunk.size, 0), 0);
@@ -140,15 +173,20 @@ export class DiagnosticRecorder {
           if (bytes >= RECORDING_STOP_BYTES) void this.stop('size');
         }) as EventListener);
         recorder.addEventListener('error', (() => void this.stop('error')) as EventListener);
-        recorder.addEventListener('stop', resolveStopped as EventListener);
-        this.sides.push({ label, clone, recorder, chunks, startOffsetMs: Math.max(0, this.deps.now() - startedAtMs), stopped, resolveStopped });
+        recorder.addEventListener('stop', (() => {
+          side.resolveStopped();
+          if (this.snapshot.phase === 'recording') void this.stop('track-change');
+        }) as EventListener);
+        this.sides.push(side);
         recorder.start(1000);
+        side.started = true;
       }
     } catch (error) {
       for (const side of this.sides) {
         if (side.recorder.state !== 'inactive') {
           try { side.recorder.stop(); } catch { side.resolveStopped(); }
-        } else side.resolveStopped();
+        } else if (!side.started) side.resolveStopped();
+        else if (!side.stopFallback) side.stopFallback = setTimeout(side.resolveStopped, 1000);
       }
       await Promise.all(this.sides.map((side) => side.stopped));
       for (const clone of clones) clone.stop();
@@ -176,7 +214,8 @@ export class DiagnosticRecorder {
       for (const side of this.sides) {
         if (side.recorder.state !== 'inactive') {
           try { side.recorder.stop(); } catch { side.resolveStopped(); }
-        } else side.resolveStopped();
+        } else if (!side.started) side.resolveStopped();
+        else if (!side.stopFallback) side.stopFallback = setTimeout(side.resolveStopped, 1000);
       }
       await Promise.all(this.sides.map((side) => side.stopped));
       const durationMs = Math.max(0, this.deps.now() - (this.snapshot.startedAtMs ?? this.deps.now()));

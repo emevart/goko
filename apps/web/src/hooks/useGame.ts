@@ -9,7 +9,7 @@ import { client } from '../api.ts';
 import { type Prefs, newGameRequest } from '../prefs.ts';
 import { type StreamHandle, needsRetry, streamEvents } from '../stream.ts';
 import { type SentMove, actionRefusal, describeError, retryDelayMs, sendTapMove } from '../text.ts';
-import { guardedGameResponse } from '../game-response.ts';
+import { guardedGameResponse, thinkingAfterMutationResponse } from '../game-response.ts';
 
 const MESSAGE_MS = 3000;
 
@@ -24,6 +24,7 @@ export function useGame(sessionId: string | null, onLost: () => void, trace: (ty
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const stream = useRef<StreamHandle | null>(null);
   const gameRef = useRef<string | null>(null);
+  const stateRef = useRef<GameState | null>(null);
   const blockedUntil = useRef(0);
   // Защита от второго тапа (m1): действие в пути и последний записанный ход тапом. Ref, а не состояние: тап в том же
   // кадре, до перерисовки, видит уже выставленную отметку.
@@ -69,6 +70,7 @@ export function useGame(sessionId: string | null, onLost: () => void, trace: (ty
             break;
           case 'state.updated':
             gameRef.current = ev.state.id;
+            stateRef.current = ev.state;
             setState(ev.state);
             setGameId(ev.state.id);
             setThinking(false);
@@ -92,6 +94,7 @@ export function useGame(sessionId: string | null, onLost: () => void, trace: (ty
       // Сессия сменилась (reset после not_found): поток новой сессии без партии не шлёт ничего,
       // и доска прежней партии иначе осталась бы на экране, а тапы уходили бы в партию чужой сессии.
       gameRef.current = null;
+      stateRef.current = null;
       setState(null);
       setGameId(null);
       setThinking(false);
@@ -151,8 +154,11 @@ export function useGame(sessionId: string | null, onLost: () => void, trace: (ty
   // Состояние из ответа хода или перечитывания: не затирает более новое из потока и не рисуется,
   // если текущая партия сессии уже другая.
   const applyState = useCallback((actual: GameState) => {
-    if (gameRef.current !== actual.id) return;
-    setState((s) => guardedGameResponse(gameRef.current, s, actual) ?? s);
+    const accepted = guardedGameResponse(gameRef.current, stateRef.current, actual);
+    if (!accepted) return null;
+    stateRef.current = accepted;
+    setState(accepted);
+    return accepted;
   }, []);
 
   const mutate = useCallback(
@@ -166,8 +172,8 @@ export function useGame(sessionId: string | null, onLost: () => void, trace: (ty
       try {
         await request(async (o) => {
           const response = await fn(targetId, state, o);
-          applyState(response.state);
-          if (!response.state.pendingEngineMove) setThinking(false);
+          const accepted = applyState(response.state);
+          setThinking((value) => thinkingAfterMutationResponse(value, accepted));
         });
       } finally {
         if (mutationSequence.current === operation) {

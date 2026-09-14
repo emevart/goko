@@ -7,3 +7,7 @@ export function guardedGameResponse(currentGameId: string | null, current: GameS
   if (current && current.id === response.id && current.revision > response.revision) return null;
   return response;
 }
+
+export function thinkingAfterMutationResponse(current: boolean, accepted: GameState | null): boolean {
+  return accepted && !accepted.pendingEngineMove ? false : current;
+}

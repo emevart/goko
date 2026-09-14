@@ -114,7 +114,7 @@ export function App() {
           <MoveHistory state={g.state} />
         </section>
         <section className="conversation" aria-label="разговор с Гоко">
-          <VoiceOrb link={link} mic={mic} agentState={s.agentState} amplitude={s.amplitude} />
+          <VoiceOrb link={link} mic={mic} agentPresent={s.agentPresent} agentState={s.agentState} amplitude={s.amplitude} />
           {s.audioPlaybackError && <div className="playback-error">{s.audioPlaybackError} <button type="button" className="btn btn-inline btn-accent" onClick={() => void s.retryAudio()}>Включить звук</button></div>}
           <Transcript lines={s.lines} mode={s.prefs.mode} notice={agentHint ? AGENT_HINT_TEXT[agentHint] : null} />
           <div className="conversation-input-row">

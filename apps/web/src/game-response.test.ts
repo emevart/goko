@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { GameState } from '@goko/protocol';
-import { guardedGameResponse } from './game-response.ts';
+import { guardedGameResponse, thinkingAfterMutationResponse } from './game-response.ts';
 
 const game = (revision: number): GameState => ({
   id: 'g1', createdAt: 't', revision, settings: { boardSize: 13, rules: 'chinese', komi: 7.5 },
@@ -14,5 +14,10 @@ describe('guardedGameResponse', () => {
     expect(guardedGameResponse('g1', afterUndo, game(6))).toBeNull();
     expect(guardedGameResponse('g1', afterUndo, game(8))?.revision).toBe(8);
     expect(guardedGameResponse('g2', null, game(8))).toBeNull();
+  });
+
+  it('не сбрасывает thinking новой партии ответом мутации старой', () => {
+    expect(thinkingAfterMutationResponse(true, guardedGameResponse('g2', null, game(8)))).toBe(true);
+    expect(thinkingAfterMutationResponse(true, guardedGameResponse('g1', null, game(8)))).toBe(false);
   });
 });

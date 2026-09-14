@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { DiagnosticRecorder, TRACE_MAX_EVENTS, TRACE_MAX_PAYLOAD_CHARS, type RecorderLike, type RecorderTrack } from './recording.ts';
+import { DiagnosticRecorder, TRACE_MAX_EVENTS, TRACE_MAX_PAYLOAD_CHARS, watchTrackEnd, type RecorderLike, type RecorderTrack } from './recording.ts';
 
 class FakeRecorder extends EventTarget implements RecorderLike {
   state: RecordingState = 'inactive';
@@ -15,6 +15,13 @@ class FakeRecorder extends EventTarget implements RecorderLike {
   stop() {
     this.state = 'inactive';
     queueMicrotask(() => this.dispatchEvent(new Event('stop')));
+  }
+  beginNaturalStop() {
+    this.state = 'inactive';
+  }
+  finishNaturalStop(size: number) {
+    this.emit(size);
+    this.dispatchEvent(new Event('stop'));
   }
 }
 
@@ -47,6 +54,42 @@ function fixture() {
 }
 
 describe('DiagnosticRecorder', () => {
+  it('останавливает общую запись при ended дорожки без зависимости от AudioContext', async () => {
+    const f = fixture();
+    const mic = Object.assign(new EventTarget(), track('mic').original) as unknown as RecorderTrack;
+    await f.recorder.start(mic, track('agent').original);
+    const unwatch = watchTrackEnd(mic, () => void f.recorder.stop('track-change'));
+    (mic as unknown as EventTarget).dispatchEvent(new Event('ended'));
+    await vi.waitFor(() => expect(f.recorder.getSnapshot().phase).toBe('ready'));
+    expect(f.recorder.getSnapshot().result).toMatchObject({ stopReason: 'track-change', partial: true });
+    unwatch();
+  });
+
+  it('сохраняет обе стороны, если один MediaRecorder завершился сам', async () => {
+    const f = fixture();
+    await f.recorder.start(track('mic').original, track('agent').original);
+    f.recorders[0]!.stop();
+    await vi.waitFor(() => expect(f.recorder.getSnapshot().phase).toBe('ready'));
+    expect(f.recorder.getSnapshot().result).toMatchObject({ stopReason: 'track-change', partial: true });
+    expect(f.recorders[1]!.state).toBe('inactive');
+  });
+
+  it('ждёт stop после inactive и включает запоздавший финальный chunk в результат', async () => {
+    const f = fixture();
+    const mic = Object.assign(new EventTarget(), track('mic').original) as unknown as RecorderTrack;
+    await f.recorder.start(mic, track('agent').original);
+    const unwatch = watchTrackEnd(mic, () => void f.recorder.stop('track-change'));
+    f.recorders[0]!.beginNaturalStop();
+    (mic as unknown as EventTarget).dispatchEvent(new Event('ended'));
+    await Promise.resolve();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(f.recorder.getSnapshot().phase).toBe('stopping');
+    f.recorders[0]!.finishNaturalStop(9);
+    await vi.waitFor(() => expect(f.recorder.getSnapshot().phase).toBe('ready'));
+    expect(f.recorder.getSnapshot().result?.mic.blob.size).toBe(9);
+    unwatch();
+  });
+
   it('честно отказывает без MediaRecorder вместо фиктивного успеха', async () => {
     const recorder = new DiagnosticRecorder();
     await expect(recorder.start(track('mic').original, track('agent').original)).rejects.toThrow(/MediaRecorder|запись звука/);

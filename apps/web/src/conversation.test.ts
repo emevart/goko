@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { acceptConversationEvent, bindAgent, isBoundAgent } from './conversation.ts';
+import { acceptConversationEvent, bindAgent, isBoundAgent, participantRefOf } from './conversation.ts';
 
 const agentKind = 4;
 const event = (seq: number, interrupted = false) =>
@@ -22,5 +22,17 @@ describe('agent conversation binding', () => {
     expect(acceptConversationEvent(first, 1, sender1, '{"type":"bad"}')).toBeNull();
     const restarted = bindAgent(1, [{ identity: 'goko', sid: 'A2', kind: agentKind }], agentKind)!;
     expect(acceptConversationEvent(restarted, 1, { ...sender1, sid: 'A2' }, event(1))).not.toBeNull();
+  });
+
+  it('не переименовывает поздний stream A1 в нового producer A2 с той же identity', () => {
+    let current = { identity: 'goko', sid: 'A1', kind: agentKind };
+    const streamA1 = participantRefOf({ identity: 'goko' }, () => current);
+    current = { ...current, sid: 'A2' };
+    const restarted = bindAgent(1, [{ identity: 'goko', sid: 'A2', kind: agentKind }], agentKind)!;
+    expect(isBoundAgent(restarted, 1, streamA1)).toBe(false);
+    expect(acceptConversationEvent(restarted, 1, streamA1, event(1))).toBeNull();
+
+    const streamA2 = participantRefOf({ identity: 'goko' }, () => current);
+    expect(acceptConversationEvent(restarted, 1, streamA2, event(1))).not.toBeNull();
   });
 });

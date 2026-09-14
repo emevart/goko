@@ -9,8 +9,8 @@ import { type Mode, type Prefs, loadPrefs, modeAttributes, savePrefs } from '../
 import { describeError } from '../text.ts';
 import { type Line, acceptLine, lineId, upsertLine, whoOf } from '../transcript.ts';
 import { connectionFailureAction } from '../session-connection.ts';
-import { acceptConversationEvent, bindAgent, isBoundAgent, type AgentBinding } from '../conversation.ts';
-import { DiagnosticRecorder, type RecorderTrack, type RecordingSnapshot, type RecordingStopReason } from '../recording.ts';
+import { acceptConversationEvent, bindAgent, isBoundAgent, participantRefOf, type AgentBinding } from '../conversation.ts';
+import { DiagnosticRecorder, watchTrackEnd, type RecorderTrack, type RecordingSnapshot, type RecordingStopReason } from '../recording.ts';
 
 const STORAGE_KEY = 'goko.session';
 
@@ -63,6 +63,7 @@ export function useSession() {
   const [mic, setMic] = useState<MicState>('off');
   const [link, setLink] = useState<LinkState>('idle');
   const [agent, setAgent] = useState(false);
+  const [agentPresent, setAgentPresent] = useState(false);
   const [agentState, setAgentState] = useState<string>('connecting');
   const [amplitude, setAmplitude] = useState(0);
   const [audioPlaybackError, setAudioPlaybackError] = useState<string | null>(null);
@@ -139,6 +140,7 @@ export function useSession() {
     setMic('off');
     setLink('idle');
     setAgent(false);
+    setAgentPresent(false);
     setAgentState('connecting');
     setLines([]);
     setError(null); // фраза прежней сессии не должна висеть над новой до входа в комнату
@@ -167,10 +169,10 @@ export function useSession() {
     // и for await висел бы вечно, держа старую комнату, а строка Гоко оставалась бы незаконченной.
     const streams = new AbortController();
     const audioHost = document.getElementById('audio') ?? document.body;
-    const participantRef = (identity: string) => {
-      const p = room.remoteParticipants.get(identity);
-      return p ? { identity: p.identity, sid: p.sid, kind: p.kind } : undefined;
-    };
+    const streamSender = (participant: { identity: string }) => participantRefOf(participant, (identity) => {
+      const found = room.remoteParticipants.get(identity);
+      return found ? { identity: found.identity, sid: found.sid, kind: found.kind } : undefined;
+    });
     const refreshAgent = () => {
       const participants = [...room.remoteParticipants.values()].map((p) => ({ identity: p.identity, sid: p.sid, kind: p.kind }));
       const old = agentBinding.current;
@@ -179,6 +181,7 @@ export function useSession() {
       if (old && next?.sid !== old.sid && recorderRef.current.getSnapshot().phase === 'recording') void recorderRef.current.stop('track-change');
       agentBinding.current = next;
       const p = next ? room.remoteParticipants.get(next.identity) : undefined;
+      setAgentPresent(Boolean(p));
       setAgent(Boolean(p && agentReady(p.attributes)));
       setAgentState(p?.attributes['lk.agent.state'] ?? (p ? 'initializing' : 'connecting'));
       if (!p) remoteAgentTrack.current = null;
@@ -252,14 +255,18 @@ export function useSession() {
       setLink('idle');
       setMic('off');
       setAgent(false);
+      setAgentPresent(false);
       setAgentState('connecting');
     });
     // Регистрировать до connect: первые реплики агента приходят сразу после входа.
     // Ленту трогает только текущая попытка входа: после reset лента принадлежит новой сессии.
     room.registerTextStreamHandler('lk.transcription', async (reader, participant) => {
       reader.withAbortSignal(streams.signal); // до чтения: сигнал берётся при создании итератора
-      const sender = participantRef(participant?.identity ?? '');
+      // SDK передаёт stream sender только с identity; SID/kind фиксируем немедленно при открытии stream,
+      // чтобы поздние chunks не были приписаны новому участнику с той же identity.
+      const sender = streamSender(participant);
       if (!isBoundAgent(agentBinding.current, gen, sender)) return;
+      const validSender = () => current() && isBoundAgent(agentBinding.current, gen, sender);
       const attrs = reader.info.attributes ?? {};
       const id = lineId(attrs, reader.info.id);
       const mySids = new Set(room.localParticipant.getTrackPublications().map((p) => p.trackSid));
@@ -268,7 +275,7 @@ export function useSession() {
         // Человек: промежуточные результаты STT — отдельные закрытые потоки того же сегмента; берём только финал.
         try {
           const text = await reader.readAll();
-          if (current() && acceptLine(attrs, who) && text.trim()) {
+          if (validSender() && acceptLine(attrs, who) && text.trim()) {
             recorderRef.current.trace('transcript.final', { id, who, text });
             setLines((ls) => upsertLine(ls, { id, who, text, final: true }));
           }
@@ -282,8 +289,9 @@ export function useSession() {
       let complete = false;
       try {
         for await (const chunk of reader) {
+          if (!validSender()) return;
           text += chunk;
-          if (current()) {
+          if (validSender()) {
             recorderRef.current.trace('transcript.chunk', { id, who, chars: text.length });
             setLines((ls) => upsertLine(ls, { id, who, text, final: false }));
           }
@@ -292,7 +300,7 @@ export function useSession() {
       } catch {
         recorderRef.current.trace('transcript.error', { id, who, chars: text.length });
       } finally {
-        if (current() && text) {
+        if (validSender() && text) {
           recorderRef.current.trace(complete ? 'transcript.final' : 'transcript.stream-error', { id, who, text });
           setLines((ls) => upsertLine(ls, { id, who, text, final: complete, error: !complete }));
         }
@@ -300,13 +308,14 @@ export function useSession() {
     });
     room.registerTextStreamHandler(CONVERSATION_TOPIC, async (reader, participant) => {
       reader.withAbortSignal(streams.signal);
+      const sender = streamSender(participant);
+      if (!isBoundAgent(agentBinding.current, gen, sender)) return;
       let raw = '';
       try {
         raw = await reader.readAll();
       } catch {
         return;
       }
-      const sender = participantRef(participant?.identity ?? '');
       const event = acceptConversationEvent(agentBinding.current, gen, sender, raw);
       if (!current() || !event) return;
       recorderRef.current.trace('conversation.response-finished', { seq: event.seq, itemId: event.itemId, interrupted: event.interrupted, text: event.text });
@@ -374,6 +383,10 @@ export function useSession() {
       micTrack.current = room.localParticipant.getTrackPublications().find((p) => p.kind === Track.Kind.Audio)?.track?.mediaStreamTrack ?? null;
       stopMeter.current?.();
       const currentMic = micTrack.current;
+      if (currentMic) {
+        const stopTrackEnd = watchTrackEnd(currentMic, () => void recorderRef.current.stop('track-change'));
+        stopMeter.current = stopTrackEnd;
+      }
       if (currentMic && typeof AudioContext !== 'undefined') {
         try {
           const context = new AudioContext();
@@ -393,11 +406,10 @@ export function useSession() {
             frame = requestAnimationFrame(tick);
           };
           frame = requestAnimationFrame(tick);
-          const ended = () => void recorderRef.current.stop('track-change');
-          (currentMic as MediaStreamTrack).addEventListener('ended', ended, { once: true });
+          const stopTrackEnd = stopMeter.current;
           stopMeter.current = () => {
             cancelAnimationFrame(frame);
-            (currentMic as MediaStreamTrack).removeEventListener('ended', ended);
+            stopTrackEnd?.();
             source.disconnect();
             analyser.disconnect();
             void context.close();
@@ -509,6 +521,7 @@ export function useSession() {
     mic,
     link,
     agent,
+    agentPresent,
     agentState,
     amplitude,
     prefs,

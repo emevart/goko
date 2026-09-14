@@ -1,7 +1,19 @@
-import type { RecordingSnapshot } from '../recording.ts';
+import type { RecordingSnapshot, RecordingStopReason } from '../recording.ts';
 
 const duration = (ms: number) => `${Math.floor(ms / 60_000)}:${String(Math.floor(ms / 1000) % 60).padStart(2, '0')}`;
 const bytes = (size: number) => size < 1024 * 1024 ? `${Math.ceil(size / 1024)} КиБ` : `${(size / 1024 / 1024).toFixed(1)} МиБ`;
+
+const STOP_REASON_LABELS: Record<RecordingStopReason, string> = {
+  user: 'остановлена вручную',
+  duration: 'достигнут предел 20 минут',
+  size: 'достигнут предел 64 МиБ',
+  'mode-off': 'голос выключен',
+  disconnect: 'соединение прервано',
+  'track-change': 'аудиодорожка изменилась',
+  error: 'ошибка записи',
+};
+
+export const recordingStopReasonLabel = (reason: RecordingStopReason) => STOP_REASON_LABELS[reason];
 
 export function DiagnosticRecording({ snapshot, supported, onStart, onStop, onDelete }: { snapshot: RecordingSnapshot; supported: boolean; onStart: () => void; onStop: () => void; onDelete: () => void }) {
   const result = snapshot.result;
@@ -17,7 +29,7 @@ export function DiagnosticRecording({ snapshot, supported, onStart, onStop, onDe
         </div>
       ) : result ? (
         <div className="recording-result">
-          <p>{result.partial ? 'Частичная запись' : 'Запись готова'} · {duration(result.durationMs)} · {bytes(result.totalBytes)} · причина: {result.stopReason}</p>
+          <p>{result.partial ? 'Частичная запись' : 'Запись готова'} · {duration(result.durationMs)} · {bytes(result.totalBytes)} · причина: {recordingStopReasonLabel(result.stopReason)}</p>
           <div className="download-row">
             <a className="btn link-btn" href={result.mic.url} download={`goko-microphone.${result.mic.mimeType.includes('mp4') ? 'm4a' : 'webm'}`}>Микрофон</a>
             <a className="btn link-btn" href={result.agent.url} download={`goko-agent.${result.agent.mimeType.includes('mp4') ? 'm4a' : 'webm'}`}>Гоко</a>
