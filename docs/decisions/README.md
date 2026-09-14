@@ -46,6 +46,8 @@ updated: YYYY-MM-DD
 
 ## Реестр
 
+Следующая итерация разговора и истории: [D-0014](0014-unified-conversation-history-recording.md), 15.09.2026.
+
 | № | Решение | Дата | Статус |
 | --- | --- | --- | --- |
 | [0001](0001-livekit-room-created-by-server.md) | Комнату LiveKit создаёт game-server, телефону только roomJoin; TTL токена = TTL сессии | 2026-09-13 | living |
