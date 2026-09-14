@@ -397,6 +397,64 @@ describe('watchSession', () => {
     expect(slept).toEqual([42_000]);
     expect(s.blockedUntil).toBe(42_000);
   });
+  it('пауза не короче blockedUntil от инструментов: и при обрыве, и при rate_limited с меньшим Retry-After (D-0012)', async () => {
+    const s = newAgentState('s1');
+    s.blockedUntil = 90_000;
+    const abort = new AbortController();
+    let t = 10_000;
+    let connects = 0;
+    const client = {
+      async *events(): AsyncGenerator<GameEvent, void, undefined> {
+        connects++;
+        if (connects === 1) throw new TypeError('fetch failed');
+        if (connects === 2) throw new ApiError('rate_limited', 'too many requests, retry in 42 s', { retryAfterSeconds: 42 });
+        abort.abort();
+      },
+    };
+    const slept: number[] = [];
+    const sleep = async (ms: number) => {
+      slept.push(ms);
+      t += 5_000; // часы идут, но меньше паузы: срок блокировки ещё не наступил
+    };
+    await watchSession({ client, state: s, signal: abort.signal, speak: () => {}, now: () => t, sleep }).done;
+    expect(slept).toEqual([80_000, 75_000]);
+    expect(s.blockedUntil).toBe(90_000);
+  });
+  it('реплика человека после retries_exhausted не переоткрывает поток до blockedUntil', async () => {
+    const s = newAgentState('s1');
+    const abort = new AbortController();
+    const logs: string[] = [];
+    let t = 0;
+    let connects = 0;
+    const client = {
+      async *events(_target: EventsTarget, signal?: AbortSignal): AsyncGenerator<GameEvent, void, undefined> {
+        connects++;
+        if (connects === 1) {
+          yield { type: 'session.game', gameId: 'g1' };
+          yield { type: 'error', gameId: 'g1', code: 'retries_exhausted', message: 'background task retries are exhausted' };
+          await new Promise<void>((resolve) => signal?.addEventListener('abort', () => resolve(), { once: true }));
+          throw new DOMException('This operation was aborted', 'AbortError');
+        }
+        abort.abort();
+      },
+    };
+    let announced: () => void = () => {};
+    const exhaustedSpoken = new Promise<void>((resolve) => {
+      announced = resolve;
+    });
+    const watch = watchSession({ client, state: s, signal: abort.signal, speak: () => announced(), log: (l) => void logs.push(l), now: () => t, sleep: async () => {} });
+    await exhaustedSpoken;
+    s.blockedUntil = 50_000;
+    t = 49_999;
+    watch.humanSpoke(); // запрос к game-server раньше срока Retry-After не шлём: поток живёт, флаг остаётся
+    expect(logs).toEqual([]);
+    expect(s.retriesExhausted).toBe(true);
+    t = 50_000;
+    watch.humanSpoke();
+    await watch.done;
+    expect(connects).toBe(2);
+    expect(logs).toEqual(['[OK] voice-agent: реплика человека после retries_exhausted, переоткрываю поток сессии']);
+  });
   it('not_found (сессия истекла): одна реплика, лог и выход без переподключения', async () => {
     const s = newAgentState('s1');
     const abort = new AbortController();

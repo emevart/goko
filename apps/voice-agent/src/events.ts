@@ -227,8 +227,10 @@ export function watchSession(opts: WatchOptions): WatchHandle {
     }
   };
 
+  // До blockedUntil (rate_limited у инструментов или потока, D-0012) запрос к game-server не шлём: поток
+  // остаётся открытым, retriesExhausted — выставленным, и переоткроет следующая реплика после срока.
   const humanSpoke = () => {
-    if (!opts.state.retriesExhausted || reopening || !conn) return;
+    if (!opts.state.retriesExhausted || reopening || !conn || now() < opts.state.blockedUntil) return;
     reopening = true;
     log('[OK] voice-agent: реплика человека после retries_exhausted, переоткрываю поток сессии');
     conn.abort();
@@ -278,7 +280,8 @@ export function watchSession(opts: WatchOptions): WatchHandle {
       if (now() - openedAt >= STABLE_CONNECTION_MS) attempt = 0;
       const delay = delays[Math.min(attempt, delays.length - 1)] ?? RETRY_MS[0];
       attempt++;
-      await sleep(Math.max(retryAfter, delay));
+      // Не раньше Retry-After этого отказа и срока blockedUntil, который мог выставить инструмент (D-0012).
+      await sleep(Math.max(retryAfter, delay, opts.state.blockedUntil - now()));
     }
   };
 
