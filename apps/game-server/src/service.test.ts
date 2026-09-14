@@ -7,7 +7,7 @@ import { fakeFetch } from '@goko/protocol/testing';
 import { type Engine, createEngineClient } from './engine-client.ts';
 import { EventBus } from './events.ts';
 import { type FakeEngine, createFakeEngine } from './fake-engine.ts';
-import { applyMove, newGame, resign as resignGame } from './game.ts';
+import { applyMove, finishByScore, newGame, resign as resignGame } from './game.ts';
 import {
   ANALYZE_BUDGET_MS,
   ENGINE_RETRY_DELAYS_MS,
@@ -3235,6 +3235,8 @@ describe('GameService: лимит партий и старые снапшоты 
       seedPassed('stalescore', 10 * 60_000 + 1),
       seedGame('stalehuman', DAY),
       seedGame('stalefinished', DAY, { finished: true }),
+      // Завершена счётом: два паса в ходах остались, но задача ей не нужна.
+      finishByScore(seedPassed('stalescored', DAY), { winner: 'B', margin: 0.5, reason: 'score' }),
       seedEngineGame('freshengine', 10 * 60_000),
       seedPassed('freshscore', 60_000),
     ]);
