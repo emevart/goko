@@ -206,7 +206,7 @@ export type WatchOptions = {
 };
 
 export type WatchHandle = {
-  done: Promise<void>; // завершается по opts.signal или после not_found (сессии больше нет)
+  done: Promise<void>; // завершается по opts.signal (и при зависшей реплике) или после not_found (сессии больше нет)
   humanSpoke: () => void; // реплика человека (голос или lk.chat): после retries_exhausted переоткрыть поток
 };
 
@@ -237,18 +237,46 @@ export function watchSession(opts: WatchOptions): WatchHandle {
   let conn: AbortController | null = null;
   let reopening = false;
 
+  // Реплику ждём, пока сеанс не остановлен: зависший generateReply (сессия LiveKit закрывается) не держит done.
+  // Отказ реплики ловится и после остановки — иначе он стал бы unhandled rejection.
   const say = async (instructions: string) => {
-    try {
-      await opts.speak(instructions);
-    } catch (e) {
+    const reply = (async () => opts.speak(instructions))().catch((e: unknown) => {
       log(`[!] voice-agent: generateReply не удался: ${failureText(e)}`);
+    });
+    let wake: () => void = () => {};
+    const stopped = new Promise<void>((resolve) => {
+      wake = resolve;
+      if (opts.signal.aborted) resolve();
+      else opts.signal.addEventListener('abort', wake, { once: true });
+    });
+    try {
+      await Promise.race([reply, stopped]);
+    } finally {
+      opts.signal.removeEventListener('abort', wake);
+    }
+  };
+
+  // Сбой обработчика на одном событии — не обрыв потока: событие пропускаем, чтение продолжаем.
+  const react = (ev: GameEvent): string | null => {
+    try {
+      return handleEvent(ev, opts.state, now); // те же часы, что у пауз: троттлинг ошибок в тестах без Date.now
+    } catch (e) {
+      log(`[X] voice-agent: событие ${ev.type} пропущено, обработка упала: ${failureText(e)}`);
+      return null;
     }
   };
 
   // До blockedUntil (rate_limited у инструментов или потока, D-0012) запрос к game-server не шлём: поток
   // остаётся открытым, retriesExhausted — выставленным, и переоткроет следующая реплика после срока.
   const humanSpoke = () => {
-    if (!opts.state.retriesExhausted || reopening || !conn || now() < opts.state.blockedUntil) return;
+    if (!opts.state.retriesExhausted || reopening || !conn) return;
+    const waitMs = opts.state.blockedUntil - now();
+    if (waitMs > 0) {
+      log(
+        `[!] voice-agent: реплика человека после retries_exhausted, но game-server просил подождать (rate_limited) ещё ${Math.ceil(waitMs / 1000)} с; поток переоткроет следующая реплика`,
+      );
+      return;
+    }
     reopening = true;
     log('[OK] voice-agent: реплика человека после retries_exhausted, переоткрываю поток сессии');
     conn.abort();
@@ -266,7 +294,7 @@ export function watchSession(opts: WatchOptions): WatchHandle {
       let retryAfter = 0;
       try {
         for await (const ev of opts.client.events({ sessionId: opts.state.sessionId }, current.signal)) {
-          const instructions = handleEvent(ev, opts.state, now); // те же часы, что у пауз: троттлинг ошибок в тестах без Date.now
+          const instructions = react(ev);
           if (instructions) await say(instructions);
           // Подключение оборвали, пока шла реплика (humanSpoke, остановка): следующего события старого потока
           // не ждём — источник мог ещё не заметить отмену, и цикл висел бы на нём.

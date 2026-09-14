@@ -499,10 +499,11 @@ describe('watchSession', () => {
     const spoken: string[] = [];
     const abort = new AbortController();
     let connects = 0;
+    const targets: EventsTarget[] = []; // проверка после done: expect внутри генератора упал бы в цикл переподключения
     const client = {
-      async *events(target: { sessionId: string } | { gameId: string }): AsyncGenerator<GameEvent, void, undefined> {
+      async *events(target: EventsTarget): AsyncGenerator<GameEvent, void, undefined> {
         connects++;
-        expect(target).toEqual({ sessionId: 's1' });
+        targets.push(target);
         if (connects === 1) {
           yield { type: 'game.finished', result: { winner: 'B', reason: 'resign' } };
           throw new Error('socket hang up');
@@ -515,6 +516,7 @@ describe('watchSession', () => {
     await watchSession({ client, state: s, signal: abort.signal, speak: (t) => void spoken.push(t), now: () => 0, sleep: async (ms) => void slept.push(ms) }).done;
     expect(spoken).toEqual(['Партия окончена: победа за тобой: я сдался. Объяви результат одной фразой.']);
     expect(connects).toBe(2);
+    expect(targets).toEqual([{ sessionId: 's1' }, { sessionId: 's1' }]);
     expect(slept).toEqual([RETRY_MS[0]]);
   });
   it('пауза растёт 1, 2, 4, 8 с до потолка 15 с (R2)', async () => {
@@ -639,7 +641,8 @@ describe('watchSession', () => {
     s.blockedUntil = 50_000;
     t = 49_999;
     watch.humanSpoke(); // запрос к game-server раньше срока Retry-After не шлём: поток живёт, флаг остаётся
-    expect(logs).toEqual([]);
+    const deferred = '[!] voice-agent: реплика человека после retries_exhausted, но game-server просил подождать (rate_limited) ещё 1 с; поток переоткроет следующая реплика';
+    expect(logs).toEqual([deferred]); // отложенное переоткрытие видно в логе (Minor 6)
     expect(s.retriesExhausted).toBe(true);
     t = 50_000;
     watch.humanSpoke();
@@ -647,6 +650,7 @@ describe('watchSession', () => {
     await watch.done;
     expect(connects).toBe(3);
     expect(logs).toEqual([
+      deferred,
       '[OK] voice-agent: реплика человека после retries_exhausted, переоткрываю поток сессии',
       '[!] voice-agent: поток сессии оборвался: TypeError: fetch failed',
     ]);
@@ -898,10 +902,11 @@ describe('watchSession', () => {
     const slept: number[] = [];
     const abort = new AbortController();
     let connects = 0;
+    const targets: EventsTarget[] = [];
     const client = {
       async *events(target: EventsTarget, signal?: AbortSignal): AsyncGenerator<GameEvent, void, undefined> {
         connects++;
-        expect(target).toEqual({ sessionId: 's1' });
+        targets.push(target);
         if (connects === 1) {
           yield { type: 'session.game', gameId: 'g1' };
           yield { type: 'error', gameId: 'g1', code: 'retries_exhausted', message: 'background task retries are exhausted' };
@@ -936,12 +941,183 @@ describe('watchSession', () => {
     watch.humanSpoke(); // вторая реплика подряд не рвёт поток ещё раз
     await watch.done;
     expect(connects).toBe(2);
+    expect(targets).toEqual([{ sessionId: 's1' }, { sessionId: 's1' }]);
     expect(slept).toEqual([]);
     expect(s.retriesExhausted).toBe(false);
     expect(spoken).toHaveLength(1);
     expect(spoken[0]).toContain(humanText('retries_exhausted'));
     expect(logs).toContain('[OK] voice-agent: реплика человека после retries_exhausted, переоткрываю поток сессии');
     expect(logs.some((l) => l.includes('оборвался'))).toBe(false);
+  });
+  it('отложенное до blockedUntil переоткрытие: секунды в логе округлены вверх, повторная реплика пишет снова', async () => {
+    const s = newAgentState('s1');
+    const abort = new AbortController();
+    const logs: string[] = [];
+    let t = 0;
+    let waiting: () => void = () => {};
+    const reachedWait = new Promise<void>((resolve) => {
+      waiting = resolve;
+    });
+    const client = {
+      async *events(_target: EventsTarget, signal?: AbortSignal): AsyncGenerator<GameEvent, void, undefined> {
+        yield { type: 'error', gameId: 'g1', code: 'retries_exhausted', message: 'background task retries are exhausted' };
+        const aborted = new Promise<void>((resolve) => signal?.addEventListener('abort', () => resolve(), { once: true }));
+        waiting();
+        await aborted;
+        throw new DOMException('This operation was aborted', 'AbortError');
+      },
+    };
+    const watch = watchSession({ client, state: s, signal: abort.signal, speak: () => {}, log: (l) => void logs.push(l), now: () => t, sleep: async () => {} });
+    await reachedWait;
+    s.blockedUntil = 12_000;
+    t = 1_000;
+    watch.humanSpoke();
+    t = 11_001;
+    watch.humanSpoke();
+    abort.abort();
+    await watch.done;
+    const line = (sec: number) => `[!] voice-agent: реплика человека после retries_exhausted, но game-server просил подождать (rate_limited) ещё ${sec} с; поток переоткроет следующая реплика`;
+    expect(logs).toEqual([line(11), line(1)]);
+    expect(s.retriesExhausted).toBe(true);
+  });
+  it('исключение в обработке события — не обрыв потока: [X] в логе, событие пропущено, чтение продолжается', async () => {
+    const s = newAgentState('s1');
+    s.gameId = 'g1';
+    const abort = new AbortController();
+    const spoken: string[] = [];
+    const logs: string[] = [];
+    const slept: number[] = [];
+    let connects = 0;
+    const client = {
+      async *events(): AsyncGenerator<GameEvent, void, undefined> {
+        connects++;
+        if (connects > 1) {
+          abort.abort(); // ограничитель для кода до правки: там исключение рвало поток и цикл переподключался
+          return;
+        }
+        const broken: GameEvent = {
+          type: 'state.updated',
+          cause: 'play',
+          by: 'human',
+          get state(): GameState {
+            throw new Error('broken state');
+          },
+        };
+        yield broken;
+        yield { type: 'game.finished', result: { winner: 'B', reason: 'resign' } };
+        abort.abort();
+      },
+    };
+    await watchSession({
+      client,
+      state: s,
+      signal: abort.signal,
+      speak: (t) => void spoken.push(t),
+      log: (l) => void logs.push(l),
+      now: () => 0,
+      sleep: async (ms) => void slept.push(ms),
+    }).done;
+    expect(connects).toBe(1);
+    expect(slept).toEqual([]);
+    expect(logs).toEqual(['[X] voice-agent: событие state.updated пропущено, обработка упала: Error: broken state']);
+    expect(spoken).toEqual(['Партия окончена: победа за тобой: я сдался. Объяви результат одной фразой.']);
+  });
+  describe('зависшая реплика не держит остановку (Minor 2)', () => {
+    // Несколько оборотов цикла событий без таймеров: успевают все микрозадачи после abort.
+    const settle = async () => {
+      for (let i = 0; i < 5; i++) await new Promise<void>((resolve) => setImmediate(resolve));
+    };
+    const hangingSpeak = () => {
+      let fail: (e: Error) => void = () => {};
+      const calls: string[] = [];
+      const speak = (t: string) => {
+        calls.push(t);
+        return new Promise<void>((_resolve, reject) => {
+          fail = reject;
+        });
+      };
+      return { speak, calls, fail: (e: Error) => fail(e) };
+    };
+    const withRejectionProbe = async (body: (rejections: unknown[]) => Promise<void>) => {
+      const rejections: unknown[] = [];
+      const probe = (reason: unknown) => void rejections.push(reason);
+      process.on('unhandledRejection', probe);
+      try {
+        await body(rejections);
+      } finally {
+        process.off('unhandledRejection', probe);
+      }
+    };
+    const race = async (done: Promise<void>) => {
+      let finished = false;
+      void done.then(() => {
+        finished = true;
+      });
+      await settle();
+      return finished;
+    };
+
+    it('реплика в потоке висит: done завершается по сигналу, поздний отказ speak не становится unhandled rejection', async () => {
+      await withRejectionProbe(async (rejections) => {
+        const s = newAgentState('s1');
+        s.gameId = 'g1';
+        const abort = new AbortController();
+        const { speak, calls, fail } = hangingSpeak();
+        let connects = 0;
+        const client = {
+          async *events(): AsyncGenerator<GameEvent, void, undefined> {
+            connects++;
+            yield { type: 'game.finished', result: { winner: 'B', reason: 'resign' } };
+            yield { type: 'engine.thinking', gameId: 'g1', color: 'W' };
+          },
+        };
+        const watch = watchSession({ client, state: s, signal: abort.signal, speak, now: () => 0, sleep: async () => {} });
+        await settle();
+        expect(calls).toHaveLength(1);
+        expect(await race(watch.done)).toBe(false); // без остановки ждём реплику, как раньше
+        abort.abort();
+        expect(await race(watch.done)).toBe(true);
+        fail(new Error('session closed'));
+        await settle();
+        expect(rejections).toEqual([]);
+        expect(connects).toBe(1);
+      });
+    });
+    it('реплика not_found висит: done завершается по сигналу', async () => {
+      await withRejectionProbe(async (rejections) => {
+        const s = newAgentState('s1');
+        const abort = new AbortController();
+        const { speak, calls, fail } = hangingSpeak();
+        const client = {
+          async *events(): AsyncGenerator<GameEvent, void, undefined> {
+            throw new ApiError('not_found', 'session not found');
+          },
+        };
+        const watch = watchSession({ client, state: s, signal: abort.signal, speak, now: () => 0, sleep: async () => {} });
+        await settle();
+        expect(calls).toEqual([SESSION_EXPIRED_INSTRUCTIONS]);
+        abort.abort();
+        expect(await race(watch.done)).toBe(true);
+        fail(new Error('session closed'));
+        await settle();
+        expect(rejections).toEqual([]);
+      });
+    });
+    it('событие после остановки с зависшей репликой: done всё равно завершается', async () => {
+      const s = newAgentState('s1');
+      s.gameId = 'g1';
+      const abort = new AbortController();
+      const { speak, calls } = hangingSpeak();
+      const client = {
+        async *events(): AsyncGenerator<GameEvent, void, undefined> {
+          abort.abort();
+          yield { type: 'game.finished', result: { winner: 'B', reason: 'resign' } }; // источник ещё не заметил отмену
+        },
+      };
+      const watch = watchSession({ client, state: s, signal: abort.signal, speak, now: () => 0, sleep: async () => {} });
+      expect(await race(watch.done)).toBe(true);
+      expect(calls.length).toBeLessThanOrEqual(1);
+    });
   });
   it('ошибка speak не рвёт цикл', async () => {
     const s = newAgentState('s1');
