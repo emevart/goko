@@ -1,6 +1,6 @@
 // Лента диалога из текстовых потоков LiveKit (lk.transcription). Чистые функции без React.
 export type Who = 'me' | 'goko';
-export type Line = { id: string; who: Who; text: string; final: boolean };
+export type Line = { id: string; who: Who; text: string; final: boolean; error?: boolean };
 
 export const MAX_LINES = 200;
 

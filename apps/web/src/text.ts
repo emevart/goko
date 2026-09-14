@@ -86,7 +86,7 @@ export function statusText(g: GameState | null, thinking: boolean): string {
   if (g.status === 'finished') return resultText(g);
   const n = g.moves.length + 1;
   if (!hasEngine(g)) return `Ход ${n}, ходят ${colorName(g.toPlay)}`;
-  const whose = g.toPlay === humanColorOf(g) ? 'твой ход' : thinking ? 'Гоко думает' : 'ход Гоко';
+  const whose = g.toPlay === humanColorOf(g) ? 'твой ход' : thinking ? 'Гоко готовит ход' : 'ход Гоко';
   return `Ход ${n}, ${whose} (${colorName(g.toPlay)})`;
 }
 

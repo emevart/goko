@@ -20,7 +20,7 @@ export function Transcript({ lines, mode, notice = null }: { lines: Line[]; mode
       {lines.length === 0 && !notice && <p className="muted">{EMPTY[mode]}</p>}
       {lines.map((l) => (
         <p key={l.id} className={`line line-${l.who}${l.final ? '' : ' line-partial'}`}>
-          <span className="who">{l.who === 'me' ? 'Ты' : 'Гоко'}</span> {l.text}
+          <span className="who">{l.who === 'me' ? 'Ты' : 'Гоко'}</span> {l.text}{l.error ? ' · поток оборван' : ''}
         </p>
       ))}
       {notice && <p className="notice">{notice}</p>}

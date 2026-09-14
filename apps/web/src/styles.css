@@ -83,3 +83,61 @@ body { background: var(--bg); color: var(--fg); font: 16px/1.4 system-ui, -apple
 .chat-input { display: flex; gap: 8px; padding-bottom: 4px; }
 /* 16px в поле ввода: iOS не увеличивает страницу при фокусе. */
 .chat-field { flex: 1; min-width: 0; min-height: 44px; font-size: 16px; border-radius: 10px; border: 1px solid var(--muted); background: var(--panel); color: var(--fg); padding: 0 10px; }
+
+/* Единый экран: компактная панель сверху, доска и разговор без карточной сетки. */
+.app { max-width: 1280px; width: 100%; margin: 0 auto; overflow-y: auto; }
+.app-header { position: relative; display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 48px; }
+.app-header h1 { margin: 0; font-size: 23px; letter-spacing: .02em; }
+.app-header > .btn { flex: 0 0 auto; }
+.app-header .newgame { position: absolute; z-index: 5; top: 48px; right: 0; width: min(350px, calc(100vw - 16px)); box-shadow: 0 12px 30px #0002; }
+.game-actions { flex: 0 0 auto; }
+.mutation-busy { position: absolute; z-index: 4; top: 60px; left: 50%; transform: translateX(-50%); background: var(--panel); border-radius: 8px; padding: 6px 10px; box-shadow: 0 5px 16px #0002; }
+.main-grid { min-height: 0; flex: 1; display: grid; grid-template-columns: minmax(0, 1.08fr) minmax(320px, .92fr); gap: 16px; }
+.board-column, .conversation { min-height: 0; display: flex; flex-direction: column; gap: 8px; }
+.board-column .board-wrap { max-height: min(calc(100dvh - 230px), 660px); }
+.conversation { padding: 2px 0 4px; }
+.conversation .transcript { min-height: 180px; }
+.conversation-input-row { display: flex; gap: 8px; align-items: stretch; }
+.conversation-input-row .chat-input { flex: 1; min-width: 0; padding: 0; }
+.voice-button { flex: 0 0 auto; white-space: nowrap; }
+.voice-button-on { background: var(--accent); color: var(--accent-fg); }
+.chat-field { resize: none; padding: 10px; line-height: 1.35; }
+.playback-error { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: #9b341f; }
+.voice-orb { --level: 0; position: relative; flex: 0 0 112px; display: grid; justify-items: center; align-content: center; gap: 7px; }
+.voice-orb-core { width: 82px; height: 82px; border-radius: 50%; background: radial-gradient(circle at 35% 30%, #f1dcae, var(--accent)); box-shadow: 0 0 calc(12px + var(--level) * 26px) color-mix(in srgb, var(--accent) 60%, transparent); transform: scale(calc(1 + var(--level) * .12)); animation: orb-idle 4s ease-in-out infinite; transition: transform 100ms linear, box-shadow 100ms linear; }
+.voice-orb-speaking .voice-orb-core { background: radial-gradient(circle at 35% 30%, #fff0c8, #bf6f45); }
+.voice-orb-thinking .voice-orb-core { animation-duration: 1.8s; }
+.voice-orb-connecting .voice-orb-core { opacity: .55; }
+.voice-orb-label { font-size: 14px; color: var(--muted); }
+@keyframes orb-idle { 50% { transform: scale(calc(1.025 + var(--level) * .12)); } }
+@media (prefers-reduced-motion: reduce) { .voice-orb-core { animation: none; transition: none; } }
+.move-history, .diagnostic { border-top: 1px solid color-mix(in srgb, var(--muted) 30%, transparent); padding-top: 7px; }
+.move-history summary, .diagnostic summary { cursor: pointer; min-height: 36px; display: flex; align-items: center; color: var(--muted); }
+.move-history ol { max-height: 150px; overflow-y: auto; margin: 4px 0 0; padding: 0; list-style: none; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 3px 12px; }
+.move-history li { display: flex; gap: 7px; align-items: center; padding: 3px 5px; border-radius: 6px; }
+.move-last { background: color-mix(in srgb, var(--accent) 14%, transparent); font-weight: 600; }
+.move-stone { width: 14px; height: 14px; border-radius: 50%; flex: 0 0 14px; border: 1px solid #777; }
+.move-B { background: #111; }.move-W { background: #fafaf6; }
+.diagnostic-note { margin: 3px 0 8px; font-size: 13px; }
+.recording-active { display: flex; align-items: center; gap: 8px; }
+.recording-dot { width: 10px; height: 10px; border-radius: 50%; background: #bc2d25; animation: record-pulse 1.2s ease-in-out infinite; }
+@keyframes record-pulse { 50% { opacity: .35; } }
+@media (prefers-reduced-motion: reduce) { .recording-dot { animation: none; } }
+.recording-result p { margin: 4px 0 8px; }
+.download-row { display: flex; gap: 6px; margin-bottom: 8px; }
+.link-btn { display: inline-flex; align-items: center; justify-content: center; text-decoration: none; }
+
+@media (max-width: 720px) {
+  .app { height: auto; min-height: 100dvh; overflow: visible; }
+  .app-header { min-height: 44px; }
+  .game-actions { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 5px; }
+  .game-actions .btn { font-size: 13px; padding: 0 4px; }
+  .main-grid { display: flex; flex-direction: column; flex: none; }
+  .board-column .board-wrap { flex: none; height: calc(100vw - 16px); max-height: none; }
+  .conversation { min-height: 440px; }
+  .conversation .transcript { min-height: 180px; max-height: 42dvh; }
+  .voice-orb { flex-basis: 100px; }
+  .conversation-input-row { flex-wrap: wrap; }
+  .voice-button { width: 100%; }
+  .conversation-input-row .chat-input { width: 100%; }
+}

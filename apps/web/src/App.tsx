@@ -1,14 +1,15 @@
 // App.tsx — одна страница: режим, статус, доска, кнопки, новая партия, лента, поле чата.
 // Без агента в комнате всё, кроме ленты и чата, работает тапами.
 import { useEffect, useRef, useState } from 'react';
-import type { PointerEvent } from 'react';
 import { Board } from './components/Board.tsx';
 import { ChatInput } from './components/ChatInput.tsx';
 import { Controls } from './components/Controls.tsx';
-import { ModeSwitch } from './components/ModeSwitch.tsx';
 import { NewGame } from './components/NewGame.tsx';
 import { StatusBar } from './components/StatusBar.tsx';
 import { Transcript } from './components/Transcript.tsx';
+import { VoiceOrb } from './components/VoiceOrb.tsx';
+import { MoveHistory } from './components/MoveHistory.tsx';
+import { DiagnosticRecording } from './components/DiagnosticRecording.tsx';
 import { useGame } from './hooks/useGame.ts';
 import { useSession } from './hooks/useSession.ts';
 import { useWakeLock } from './hooks/useWakeLock.ts';
@@ -59,7 +60,7 @@ export function App() {
   const { clearError, link, mic, agent } = s;
   const sessionId = s.session?.id ?? null;
   // onLost стабилен (reset — useCallback без зависимостей): иначе useGame переоткрывал бы поток на каждом рендере.
-  const g = useGame(sessionId, s.reset);
+  const g = useGame(sessionId, s.reset, s.trace);
   const size = g.state?.settings.boardSize ?? 13;
   const keepAwake = useWakeLock();
   const activating = useRef(false);
@@ -74,14 +75,13 @@ export function App() {
   // переключателя; второй запрос, пока первый в пути, не уходит (ref creating в useSession). Пока комната не
   // подключена — вход (startAudio на iOS — только из жеста), в «Голосе» ещё и микрофон; касание во время входа
   // ничего не добавляет. Касание переключателя режима вход не запускает: setMode сам входит и включает нужное.
-  const onTouch = (e: PointerEvent<HTMLDivElement>) => {
+  const onTouch = () => {
     keepAwake();
     if (!s.session) {
       void s.activate();
       return;
     }
     if (link === 'connected' || activating.current) return;
-    if (e.target instanceof Element && e.target.closest('.mode-switch')) return;
     activating.current = true;
     void s.activate().finally(() => {
       activating.current = false;
@@ -94,25 +94,38 @@ export function App() {
     return rest;
   };
 
+  useEffect(() => {
+    if (!g.state) return;
+    s.trace('game.state', { gameId: g.state.id, revision: g.state.revision, moves: g.state.moves.length, pendingEngineMove: g.state.pendingEngineMove, status: g.state.status });
+  }, [g.state, s.trace]);
+
   return (
     <div className="app" onPointerDownCapture={onTouch}>
-      <div className="top-row">
-        <ModeSwitch mode={s.prefs.mode} onChange={(m) => void s.setMode(m)} />
-      </div>
-      <StatusBar state={g.state} thinking={g.thinking} message={g.message} notice={s.error} connected={g.connected} retry={g.retry} onRetry={g.reopen} />
-      <Board state={g.state} size={size} onTap={(coord) => void g.play(coord)} />
-      <Controls
-        mode={s.prefs.mode}
-        mic={mic}
-        canAct={g.state?.status === 'playing'}
-        onMic={() => void s.enableMic()}
-        onPass={() => void g.pass()}
-        onResign={() => void g.resign()}
-        onUndo={() => void g.undo()}
-      />
-      <NewGame prefs={s.prefs} onChange={s.updatePrefs} onStart={() => void g.newGame(s.prefs)} />
-      <Transcript lines={s.lines} mode={s.prefs.mode} notice={agentHint ? AGENT_HINT_TEXT[agentHint] : null} />
-      {s.prefs.mode === 'chat' && <ChatInput ready={agent} hint={agentHint} onSend={onSend} />}
+      <header className="app-header">
+        <h1>Гоко</h1>
+        <NewGame prefs={s.prefs} onChange={s.updatePrefs} onStart={() => void g.newGame(s.prefs)} />
+      </header>
+      <Controls canPlay={g.state?.status === 'playing'} canUndo={g.canUndo} canRedo={g.canRedo} canResign={g.canResign} onPass={() => void g.pass()} onResign={() => void g.resign()} onUndo={() => void g.undo()} onRedo={() => void g.redo()} />
+      {g.mutating && <div className="mutation-busy" role="status">Изменяю позицию…</div>}
+      <main className="main-grid">
+        <section className="board-column" aria-label="партия">
+          <StatusBar state={g.state} thinking={g.thinking} message={g.message} notice={s.error} connected={g.connected} retry={g.retry} onRetry={g.reopen} />
+          <Board state={g.state} size={size} onTap={(coord) => void g.play(coord)} />
+          <MoveHistory state={g.state} />
+        </section>
+        <section className="conversation" aria-label="разговор с Гоко">
+          <VoiceOrb link={link} mic={mic} agentState={s.agentState} amplitude={s.amplitude} />
+          {s.audioPlaybackError && <div className="playback-error">{s.audioPlaybackError} <button type="button" className="btn btn-inline btn-accent" onClick={() => void s.retryAudio()}>Включить звук</button></div>}
+          <Transcript lines={s.lines} mode={s.prefs.mode} notice={agentHint ? AGENT_HINT_TEXT[agentHint] : null} />
+          <div className="conversation-input-row">
+            <button type="button" className={`btn voice-button${s.prefs.mode === 'voice' && mic === 'on' ? ' voice-button-on' : ''}`} onClick={() => void s.toggleVoice()} disabled={mic === 'connecting'} aria-pressed={s.prefs.mode === 'voice' && mic === 'on'}>
+              {mic === 'connecting' ? 'Подключаю…' : s.prefs.mode === 'voice' && mic === 'on' ? 'Выключить голос' : mic === 'failed' ? 'Повторить голос' : 'Включить голос'}
+            </button>
+            <ChatInput ready={agent} hint={agentHint} onSend={onSend} />
+          </div>
+          <DiagnosticRecording snapshot={s.recording} supported={typeof MediaRecorder !== 'undefined'} onStart={s.startRecording} onStop={() => void s.stopRecording()} onDelete={s.deleteRecording} />
+        </section>
+      </main>
       <div id="audio" hidden />
     </div>
   );

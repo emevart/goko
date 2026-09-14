@@ -115,7 +115,7 @@ describe('text', () => {
     expect(statusText(null, false)).toBe('Партии нет: нажми «Новая партия» или попроси Гоко');
     expect(statusText(game(), false)).toBe('Ход 1, твой ход (чёрные)');
     expect(statusText(game({ toPlay: 'W', pendingEngineMove: true, moves: [{ n: 1, color: 'B', coord: 'D4', captured: 0, at: 't' }] }), false)).toBe('Ход 2, ход Гоко (белые)');
-    expect(statusText(game({ toPlay: 'W', pendingEngineMove: true }), true)).toBe('Ход 1, Гоко думает (белые)');
+    expect(statusText(game({ toPlay: 'W', pendingEngineMove: true }), true)).toBe('Ход 1, Гоко готовит ход (белые)');
     expect(statusText(game({ status: 'finished', result: { winner: 'B', margin: 3.5, reason: 'score' } }), false)).toBe('Победа твоя: +3,5');
   });
   it('resultText, capturesText, rankText', () => {

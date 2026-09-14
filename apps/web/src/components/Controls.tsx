@@ -1,22 +1,16 @@
-// Controls.tsx — «Микрофон» крупно, только в «Голосе» (повтор после отказа; первое касание страницы включает его само),
-// остальные мелко. Цели ≥ 44 px.
+// Верхние действия партии. Сдача подтверждается вторым касанием; цели не меньше 44 px.
 import { useEffect, useState } from 'react';
-import type { MicState } from '../hooks/useSession.ts';
-import type { Mode } from '../prefs.ts';
-
 type Props = {
-  mode: Mode;
-  mic: MicState;
-  canAct: boolean;
-  onMic: () => void;
+  canPlay: boolean;
+  canUndo: boolean;
+  canRedo: boolean;
+  canResign: boolean;
   onPass: () => void;
   onResign: () => void;
   onUndo: () => void;
+  onRedo: () => void;
 };
-
-const MIC_LABEL: Record<MicState, string> = { off: 'Микрофон', connecting: 'Подключаю…', on: 'Микрофон включён', failed: 'Микрофон: ещё раз' };
-
-export function Controls({ mode, mic, canAct, onMic, onPass, onResign, onUndo }: Props) {
+export function Controls({ canPlay, canUndo, canRedo, canResign, onPass, onResign, onUndo, onRedo }: Props) {
   const [armed, setArmed] = useState(false); // «Сдаться» — двумя касаниями за 3 с
   useEffect(() => {
     if (!armed) return;
@@ -29,17 +23,11 @@ export function Controls({ mode, mic, canAct, onMic, onPass, onResign, onUndo }:
     onResign();
   };
   return (
-    <div className="controls">
-      {mode === 'voice' && (
-        <button type="button" className="btn btn-mic" onClick={onMic} disabled={mic === 'connecting' || mic === 'on'}>
-          {MIC_LABEL[mic]}
-        </button>
-      )}
-      <div className="controls-row">
-        <button type="button" className="btn" onClick={onPass} disabled={!canAct}>Пас</button>
-        <button type="button" className="btn" onClick={resign} disabled={!canAct}>{armed ? 'Точно?' : 'Сдаться'}</button>
-        <button type="button" className="btn" onClick={onUndo} disabled={!canAct}>Отменить</button>
-      </div>
+    <div className="controls-row game-actions">
+      <button type="button" className="btn" onClick={onUndo} disabled={!canUndo} aria-label="назад, отменить ход">← Назад</button>
+      <button type="button" className="btn" onClick={onRedo} disabled={!canRedo} aria-label="вперёд, вернуть ход">Вперёд →</button>
+      <button type="button" className="btn" onClick={onPass} disabled={!canPlay}>Пас</button>
+      <button type="button" className="btn" onClick={resign} disabled={!canResign}>{armed ? 'Точно?' : 'Сдаться'}</button>
     </div>
   );
 }

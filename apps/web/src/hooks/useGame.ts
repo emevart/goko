@@ -9,23 +9,27 @@ import { client } from '../api.ts';
 import { type Prefs, newGameRequest } from '../prefs.ts';
 import { type StreamHandle, needsRetry, streamEvents } from '../stream.ts';
 import { type SentMove, actionRefusal, describeError, retryDelayMs, sendTapMove } from '../text.ts';
+import { guardedGameResponse } from '../game-response.ts';
 
 const MESSAGE_MS = 3000;
 
-export function useGame(sessionId: string | null, onLost: () => void) {
+export function useGame(sessionId: string | null, onLost: () => void, trace: (type: string, payload?: unknown) => void = () => {}) {
   const [state, setState] = useState<GameState | null>(null);
   const [gameId, setGameId] = useState<string | null>(null);
   const [thinking, setThinking] = useState(false);
   const [connected, setConnected] = useState(false);
   const [retry, setRetry] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  const [mutating, setMutating] = useState(false);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const stream = useRef<StreamHandle | null>(null);
   const gameRef = useRef<string | null>(null);
   const blockedUntil = useRef(0);
   // Защита от второго тапа (m1): действие в пути и последний записанный ход тапом. Ref, а не состояние: тап в том же
   // кадре, до перерисовки, видит уже выставленную отметку.
-  const inFlight = useRef(false);
+  const playInFlight = useRef(false);
+  const mutationInFlight = useRef(false);
+  const mutationSequence = useRef(0);
   const sent = useRef<SentMove | null>(null);
   // Контроллер создаётся в эффекте, а не при первом рендере: StrictMode в dev монтирует дважды,
   // и контроллер, отменённый первой уборкой, иначе отменял бы все запросы второго монтирования.
@@ -54,6 +58,9 @@ export function useGame(sessionId: string | null, onLost: () => void) {
       onLost,
       onEvent: (ev) => {
         if ((ev.type === 'engine.thinking' || ev.type === 'error') && ev.gameId !== gameRef.current) return;
+        trace('game.event', ev.type === 'state.updated'
+          ? { type: ev.type, cause: ev.cause, gameId: ev.state.id, revision: ev.state.revision, moves: ev.state.moves.length }
+          : { type: ev.type, gameId: 'gameId' in ev ? ev.gameId : undefined });
         setRetry((r) => needsRetry(r, ev));
         switch (ev.type) {
           case 'session.game':
@@ -90,8 +97,11 @@ export function useGame(sessionId: string | null, onLost: () => void) {
       setThinking(false);
       setConnected(false);
       setRetry(false);
+      mutationSequence.current++;
+      mutationInFlight.current = false;
+      setMutating(false);
     };
-  }, [sessionId, onLost, flash]);
+  }, [sessionId, onLost, flash, trace]);
 
   // «Повторить» (D-0006): переоткрытие потока сессии заново запускает серию повторов сервера.
   // Лимит D-0012 общий на клиента: после rate_limited на тапе и «Повторить» не шлёт запрос раньше срока.
@@ -125,14 +135,14 @@ export function useGame(sessionId: string | null, onLost: () => void) {
   // Второе действие, пока первое в пути, не уходит: ход тапом со старой ревизией получил бы 409 (m1).
   const act = useCallback(
     async (fn: (id: string, g: GameState, o: CallOptions) => Promise<unknown>, needTurn: boolean) => {
-      const refusal = actionRefusal(state, gameId, needTurn, inFlight.current, sent.current);
+      const refusal = actionRefusal(state, gameId, needTurn, playInFlight.current || mutationInFlight.current, sent.current);
       if (refusal !== null) return refusal ? flash(refusal) : undefined;
       if (!gameId || !state) return; // уже проверено в actionRefusal; здесь — для сужения типов
-      inFlight.current = true;
+      playInFlight.current = true;
       try {
         await request((o) => fn(gameId, state, o));
       } finally {
-        inFlight.current = false;
+        playInFlight.current = false;
       }
     },
     [gameId, state, flash, request],
@@ -142,8 +152,32 @@ export function useGame(sessionId: string | null, onLost: () => void) {
   // если текущая партия сессии уже другая.
   const applyState = useCallback((actual: GameState) => {
     if (gameRef.current !== actual.id) return;
-    setState((s) => (s && s.id === actual.id && s.revision > actual.revision ? s : actual));
+    setState((s) => guardedGameResponse(gameRef.current, s, actual) ?? s);
   }, []);
+
+  const mutate = useCallback(
+    async (fn: (id: string, g: GameState, o: CallOptions) => Promise<{ state: GameState }>, allowDuringPlay: boolean) => {
+      if (!gameId || !state) return flash('партии ещё нет');
+      if (mutationInFlight.current || (!allowDuringPlay && playInFlight.current)) return;
+      mutationInFlight.current = true;
+      const operation = ++mutationSequence.current;
+      setMutating(true);
+      const targetId = gameId;
+      try {
+        await request(async (o) => {
+          const response = await fn(targetId, state, o);
+          applyState(response.state);
+          if (!response.state.pendingEngineMove) setThinking(false);
+        });
+      } finally {
+        if (mutationSequence.current === operation) {
+          mutationInFlight.current = false;
+          setMutating(false);
+        }
+      }
+    },
+    [gameId, state, flash, request, applyState],
+  );
 
   // Ход и пас тапом. Ответ записанного хода рисуется сразу, не дожидаясь события потока, а отметка sent держит следующий
   // ход, пока на экране состояние не новее отправленной ревизии. Таймаут клиента не значит, что ход не записан: запрос
@@ -172,8 +206,9 @@ export function useGame(sessionId: string | null, onLost: () => void) {
     [tapMove],
   );
   const pass = useCallback(() => tapMove((id, revision, o) => client.pass(id, { via: 'tap', expectedRevision: revision, waitForReply: false }, o)), [tapMove]);
-  const undo = useCallback(() => act((id, _g, o) => client.undo(id, { via: 'tap' }, o), false), [act]);
-  const resign = useCallback(() => act((id, g, o) => client.resign(id, { color: humanColorOf(g), via: 'tap' }, o), false), [act]);
+  const undo = useCallback(() => mutate((id, _g, o) => client.undo(id, { via: 'tap' }, o), true), [mutate]);
+  const redo = useCallback(() => mutate((id, _g, o) => client.redo(id, { via: 'tap' }, o), true), [mutate]);
+  const resign = useCallback(() => mutate((id, g, o) => client.resign(id, { color: humanColorOf(g), via: 'tap' }, o), false), [mutate]);
 
   // «Новая партия» — цвет и ранг из выбора на экране (prefs), размер доски и коми от текущей партии.
   // Ответ движка ждать не надо: придёт событием, а Гоко прокомментирует новую партию сам.
@@ -186,5 +221,8 @@ export function useGame(sessionId: string | null, onLost: () => void) {
     [sessionId, state, request],
   );
 
-  return { state, gameId, thinking, connected, retry, message, play, pass, undo, resign, newGame, reopen };
+  const canUndo = Boolean(state && ((state.status === 'playing' && state.moves.length > 0) || (state.status === 'finished' && state.result?.reason === 'score')));
+  const canRedo = Boolean(state?.canRedo);
+  const canResign = state?.status === 'playing';
+  return { state, gameId, thinking, connected, retry, message, mutating, play, pass, undo, redo, resign, newGame, reopen, canUndo, canRedo, canResign };
 }

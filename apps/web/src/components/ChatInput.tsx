@@ -23,15 +23,22 @@ export function ChatInput({ ready, hint = null, onSend }: Props) {
   };
   return (
     <form className="chat-input" onSubmit={(e) => void submit(e)}>
-      <input
+      <textarea
         className="chat-field"
         value={draft}
         readOnly={busy}
         maxLength={CHAT_MAX_CHARS}
         enterKeyHint="send"
         aria-label="сообщение Гоко"
+        rows={1}
         placeholder={chatPlaceholder(ready, hint)}
         onChange={(e) => setDraft(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' && !e.shiftKey) {
+            e.preventDefault();
+            e.currentTarget.form?.requestSubmit();
+          }
+        }}
       />
       <button type="submit" className="btn btn-inline btn-accent" disabled={!ready || busy || !draft.trim()}>
         Отправить
