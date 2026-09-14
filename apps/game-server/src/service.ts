@@ -605,14 +605,11 @@ export class GameService {
     return reopening ? { release: this.holdReopening(id) } : {};
   }
 
-  // Удержание завершённой партии в счёте на время отката; возвращает снятие, повтор снятия ничего не делает.
+  // Удержание завершённой партии в счёте на время отката; возвращает снятие, humanAction зовёт его ровно раз.
   // Удержания считаются: два отката одной партии, или откат и его неудачный близнец, держат её по отдельности.
   private holdReopening(id: string): () => void {
     this.reopening.set(id, (this.reopening.get(id) ?? 0) + 1);
-    let held = true;
     return () => {
-      if (!held) return;
-      held = false;
       const left = (this.reopening.get(id) ?? 1) - 1;
       if (left > 0) this.reopening.set(id, left);
       else this.reopening.delete(id);

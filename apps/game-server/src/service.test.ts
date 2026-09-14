@@ -3918,6 +3918,47 @@ describe('GameService: лимит партий и старые снапшоты 
     expect(service.internalSizes().reopening).toBe(0);
   });
 
+  it('действие, ждавшее очереди, пока партию бросила смена в сессии, под мьютексом не проверяется и отметку не снимает: проверка и снятие — при запросе; следующий возврат проходит проверку и снимает её', async () => {
+    const { store, gates, control } = gatedSaves();
+    const marks = memoryMarks();
+    const { service } = await make(createFakeEngine(), { store, marks, maxGamesPerClient: 1 });
+    const inS1 = () => service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, { ...A, sessionId: 's1' });
+    const a = (await inS1()).state.id;
+    await service.play(a, { coord: 'D4', waitForReply: false, via: 'api' });
+    control.hold = (state) => state.id === a;
+    const ranking = service.setRank(a, { color: 'B', rank: '5k' });
+    const undoing = service.undo(a, { via: 'api' }, 'human', A);
+    await untilTick(() => gates.length === 1);
+    // Новая партия сессии бросает a, пока undo ждёт очереди: у A в счёте только она.
+    const b = (await inS1()).state.id;
+    await untilTick(() => marks.ids.has(a));
+    gates[0]?.();
+    await ranking;
+    await untilTick(() => gates.length === 2);
+    gates[1]?.();
+    await undoing;
+    expect(service.get(a)).toMatchObject({ status: 'playing', moves: [] });
+    expect(marks.ids.has(a)).toBe(true);
+    await service.resign(b, { color: 'B', via: 'api' });
+    control.hold = undefined;
+    // a вне счёта: место A свободно. Ход в a — возврат: сверх лимита 429, в пределах — отметка снята.
+    const c = (await createA(service)).state.id;
+    await expect(service.play(a, { coord: 'E5', waitForReply: false, via: 'api' })).rejects.toMatchObject(REFUSED_A);
+    await service.resign(c, { color: 'B', via: 'api' });
+    await service.play(a, { coord: 'E5', waitForReply: false, via: 'api' });
+    await untilTick(() => !marks.ids.has(a));
+    await expect(createA(service)).rejects.toMatchObject(REFUSED_A);
+  });
+
+  it('откат от имени движка лимиты не проходит и под мьютексом: undo by engine завершённой счётом партии при полном счёте владельца открывает её', async () => {
+    const { service } = await make(createFakeEngine(), { maxGamesPerClient: 1 });
+    const a = (await createA(service)).state.id;
+    await finishByPasses(service, a);
+    await createA(service);
+    const undone = await service.undo(a, { via: 'api' }, 'engine', A);
+    expect(undone.state).toMatchObject({ status: 'playing', moves: [{ coord: 'D4' }] });
+  });
+
   it('close дожидается и записи отметки, поставленной во время close', async () => {
     const base = memoryMarks();
     const gates: Array<() => void> = [];
