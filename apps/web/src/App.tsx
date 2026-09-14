@@ -1,6 +1,6 @@
 // App.tsx — одна страница: режим, статус, доска, кнопки, новая партия, лента, поле чата.
 // Без агента в комнате всё, кроме ленты и чата, работает тапами.
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { PointerEvent } from 'react';
 import { Board } from './components/Board.tsx';
 import { ChatInput } from './components/ChatInput.tsx';
@@ -32,7 +32,7 @@ function saveAgentSeen(sessionId: string) {
   try {
     sessionStorage.setItem(AGENT_SEEN_KEY, sessionId);
   } catch {
-    // без storage подсказка работает до перезагрузки вкладки
+    // без storage отметку держит ref в useAgentGone — до перезагрузки вкладки
   }
 }
 
@@ -40,56 +40,45 @@ function saveAgentSeen(sessionId: string) {
 // Без воркера (агента не было ни разу) подсказки нет: там поле «Гоко подключается…».
 function useAgentGone(sessionId: string | null, connected: boolean, agent: boolean): boolean {
   const [gone, setGone] = useState(false);
+  const seen = useRef<string | null>(null);
   useEffect(() => {
-    if (sessionId && agent) saveAgentSeen(sessionId);
+    if (sessionId && agent) {
+      seen.current = sessionId;
+      saveAgentSeen(sessionId);
+    }
     setGone(false);
-    if (!sessionId || !connected || agent || loadAgentSeen() !== sessionId) return;
+    if (!sessionId || !connected || agent) return;
+    if (seen.current !== sessionId && loadAgentSeen() !== sessionId) return;
     const t = setTimeout(() => setGone(true), AGENT_GONE_MS);
     return () => clearTimeout(t);
   }, [sessionId, connected, agent]);
   return gone;
 }
 
-// Страница пересоздаётся целиком (key), когда сессию нужно создать заново: после потери сессии (SSE not_found) и по
-// касанию после отказа создания. useSession создаёт сессию при монтировании, если сохранённой нет, поэтому в свежем
-// экземпляре «сессии нет, а ошибка есть» значит «создание не удалось», а не «ещё создаётся», и касание
-// не отправит второй запрос, пока первый в пути. Блокировка экрана живёт выше и пересоздание переживает.
 export function App() {
-  const [epoch, setEpoch] = useState(0);
-  const renew = useCallback(() => setEpoch((n) => n + 1), []);
-  const keepAwake = useWakeLock();
-  return <Page key={epoch} renew={renew} keepAwake={keepAwake} />;
-}
-
-function Page({ renew, keepAwake }: { renew: () => void; keepAwake: () => void }) {
   const s = useSession();
-  const { reset, clearError, link, mic, agent } = s;
+  const { clearError, link, mic, agent } = s;
   const sessionId = s.session?.id ?? null;
-  // Сессия истекла на сервере: reset стирает её из sessionStorage и отключает комнату, renew пересоздаёт страницу.
-  // Оба вызова синхронно в одном обработчике: React объединяет обновления, старый экземпляр не начнёт создание сам.
-  // onLost стабилен (reset и renew — useCallback): иначе useGame переоткрывал бы поток на каждом рендере.
-  const onLost = useCallback(() => {
-    reset();
-    renew();
-  }, [reset, renew]);
-  const g = useGame(sessionId, onLost);
+  // onLost стабилен (reset — useCallback без зависимостей): иначе useGame переоткрывал бы поток на каждом рендере.
+  const g = useGame(sessionId, s.reset);
   const size = g.state?.settings.boardSize ?? 13;
+  const keepAwake = useWakeLock();
   const activating = useRef(false);
   const agentGone = useAgentGone(sessionId, link === 'connected', agent);
 
-  // Ошибка связи с комнатой или микрофона уходит из статуса, когда причина прошла: вошли в комнату и микрофон
-  // не в отказе. Иначе фраза «нет связи с Гоко…» закрывала бы «чей ход» до перезагрузки.
+  // Ошибка связи с комнатой или микрофона уходит, когда причина прошла: вошли в комнату и микрофон не в отказе.
   useEffect(() => {
     if (link === 'connected' && mic !== 'failed') clearError();
   }, [link, mic, clearError]);
 
-  // Касание страницы: блокировка экрана; пока комната не подключена — вход (startAudio на iOS — только из жеста),
-  // в «Голосе» ещё и микрофон. Касание во время входа ничего не добавляет: вход и микрофон уже в пути.
-  // Касание переключателя режима не считается: setMode сам входит в комнату и включает нужное.
+  // Касание страницы: блокировка экрана. Без сессии (создание не удалось) — повтор создания, в том числе касанием
+  // переключателя; второй запрос, пока первый в пути, не уходит (ref creating в useSession). Пока комната не
+  // подключена — вход (startAudio на iOS — только из жеста), в «Голосе» ещё и микрофон; касание во время входа
+  // ничего не добавляет. Касание переключателя режима вход не запускает: setMode сам входит и включает нужное.
   const onTouch = (e: PointerEvent<HTMLDivElement>) => {
     keepAwake();
     if (!s.session) {
-      if (s.error) renew(); // создание сессии не удалось — касание пробует снова
+      void s.activate();
       return;
     }
     if (link === 'connected' || activating.current) return;
@@ -111,7 +100,7 @@ function Page({ renew, keepAwake }: { renew: () => void; keepAwake: () => void }
       <div className="top-row">
         <ModeSwitch mode={s.prefs.mode} onChange={(m) => void s.setMode(m)} />
       </div>
-      <StatusBar state={g.state} thinking={g.thinking} message={g.message ?? s.error} connected={g.connected} retry={g.retry} onRetry={g.reopen} />
+      <StatusBar state={g.state} thinking={g.thinking} message={g.message} notice={s.error} connected={g.connected} retry={g.retry} onRetry={g.reopen} />
       <Board state={g.state} size={size} onTap={(coord) => void g.play(coord)} />
       <Controls
         mode={s.prefs.mode}
@@ -124,7 +113,7 @@ function Page({ renew, keepAwake }: { renew: () => void; keepAwake: () => void }
       />
       <NewGame prefs={s.prefs} onChange={s.updatePrefs} onStart={() => void g.newGame(s.prefs)} />
       <Transcript lines={s.lines} mode={s.prefs.mode} notice={agentGone ? AGENT_GONE_TEXT : null} />
-      {s.prefs.mode === 'chat' && <ChatInput ready={agent} onSend={onSend} />}
+      {s.prefs.mode === 'chat' && <ChatInput ready={agent} gone={agentGone} onSend={onSend} />}
       <div id="audio" hidden />
     </div>
   );

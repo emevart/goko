@@ -23,6 +23,20 @@ export function pointAt(l: Layout, px: number, py: number): Point | null {
   return { col, row };
 }
 
+export type Box = { left: number; top: number; width: number; height: number };
+
+// Точка экрана -> координаты viewBox. Доска занимает гибкий бокс, а SVG вписывает квадратный viewBox по центру
+// (preserveAspectRatio по умолчанию — xMidYMid meet): по длинной стороне бокса остаются поля, их вычитаем.
+// Бокс нулевого размера (ещё не разложен) — null, иначе деление на ноль дало бы NaN вместо «мимо».
+export function toView(box: Box, clientX: number, clientY: number): { x: number; y: number } | null {
+  const side = Math.min(box.width, box.height);
+  if (side <= 0) return null;
+  return {
+    x: ((clientX - box.left - (box.width - side) / 2) * VIEW) / side,
+    y: ((clientY - box.top - (box.height - side) / 2) * VIEW) / side,
+  };
+}
+
 export const coordAt = (p: Point): string => formatCoord(p);
 
 export const indexOf = (p: Point, size: number): number => p.row * size + p.col;

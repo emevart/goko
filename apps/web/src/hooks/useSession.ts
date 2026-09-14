@@ -85,9 +85,12 @@ export function useSession() {
     [],
   );
 
-  useEffect(() => {
-    if (info || creating.current) return;
+  // Создание сессии. Один запрос за раз (ref creating): эффект и касание страницы после отказа (activate)
+  // не шлют второй, пока первый в пути. Старая фраза ошибки уходит сразу, чтобы не висеть над новой попыткой.
+  const create = useCallback(() => {
+    if (creating.current) return;
     creating.current = true;
+    setError(null);
     client
       .createSession()
       .then((res) => {
@@ -98,7 +101,12 @@ export function useSession() {
       .finally(() => {
         creating.current = false;
       });
-  }, [info]);
+  }, []);
+
+  // Без сессии при монтировании и после reset. После отказа сам не повторяет: повтор — касанием (activate).
+  useEffect(() => {
+    if (!info) create();
+  }, [info, create]);
 
   // Сессия истекла на сервере (SSE ответил not_found): комната тоже мертва — отключаемся и создаём новую.
   const reset = useCallback(() => {
@@ -112,6 +120,7 @@ export function useSession() {
     setLink('idle');
     setAgent(false);
     setLines([]);
+    setError(null); // фраза прежней сессии не должна висеть над новой до входа в комнату
     setInfo(null);
   }, []);
 
@@ -244,23 +253,30 @@ export function useSession() {
     try {
       await room.localParticipant.setMicrophoneEnabled(true);
       // Пока включался микрофон, выбрали «Чат»: запоздавшее включение перекрыло бы выключение ветки «Чата».
-      // Состояние mic выставляет ветка «Чата» (off), здесь его не трогаем.
       if (modeRef.current !== 'voice') {
         void room.localParticipant.setMicrophoneEnabled(false);
+        setMic('off');
         return;
       }
       setMic('on');
     } catch {
+      // Отказ пришёл уже в «Чате» (например, диалог разрешения закрыли после переключения): микрофон там не нужен,
+      // ни «failed», ни фразы про разрешение.
+      if (modeRef.current !== 'voice') {
+        setMic('off');
+        return;
+      }
       setMic('failed');
       setError('не удалось включить микрофон: разреши его в браузере или переключись на «Чат»');
     }
   }, [connect]);
 
-  // Первое касание страницы: вход в комнату; в «Голосе» — ещё и микрофон.
+  // Касание страницы: без сессии (создание не удалось) — повтор создания; иначе вход в комнату, в «Голосе» и микрофон.
   const activate = useCallback(async () => {
+    if (!info) return create();
     if (modeRef.current === 'voice') await enableMic();
     else await connect();
-  }, [connect, enableMic]);
+  }, [info, create, connect, enableMic]);
 
   const setMode = useCallback(
     async (mode: Mode) => {

@@ -1,5 +1,32 @@
 import { describe, expect, it } from 'vitest';
-import { coordAt, hoshi, indexOf, layout, pointAt, stones, x, y } from './geometry.ts';
+import { VIEW, coordAt, hoshi, indexOf, layout, pointAt, stones, toView, x, y } from './geometry.ts';
+
+describe('toView: экранная точка -> viewBox с полями вписанного квадрата', () => {
+  const l = layout(13);
+  it('квадратный бокс: масштаб без полей', () => {
+    const box = { left: 8, top: 100, width: 500, height: 500 };
+    expect(toView(box, 8 + 250, 100 + 250)).toEqual({ x: VIEW / 2, y: VIEW / 2 });
+  });
+  it('широкий бокс: поля слева и справа вычитаются, D4 попадает в D4', () => {
+    const box = { left: 10, top: 20, width: 700, height: 500 }; // квадрат 500, поля по 100
+    const s = 500 / VIEW;
+    const v = toView(box, 10 + 100 + x(l, 3) * s, 20 + y(l, 3) * s);
+    expect(v && pointAt(l, v.x, v.y)).toEqual({ col: 3, row: 3 });
+    const inMargin = toView(box, 10 + 50, 20 + 250); // касание в левом поле за доской
+    expect(inMargin && pointAt(l, inMargin.x, inMargin.y)).toBeNull();
+  });
+  it('высокий бокс: поля сверху и снизу вычитаются, N13 попадает в N13', () => {
+    const box = { left: 0, top: 0, width: 300, height: 500 }; // квадрат 300, поля по 100
+    const s = 300 / VIEW;
+    const v = toView(box, x(l, 12) * s, 100 + y(l, 12) * s);
+    expect(v && pointAt(l, v.x, v.y)).toEqual({ col: 12, row: 12 });
+    const below = toView(box, 150, 450); // нижнее поле
+    expect(below && pointAt(l, below.x, below.y)).toBeNull();
+  });
+  it('бокс нулевого размера (доска ещё не разложена) — мимо', () => {
+    expect(toView({ left: 0, top: 0, width: 0, height: 400 }, 0, 10)).toBeNull();
+  });
+});
 
 describe('geometry 13x13', () => {
   const l = layout(13);
