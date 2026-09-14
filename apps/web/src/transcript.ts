@@ -1,0 +1,33 @@
+// Лента диалога из текстовых потоков LiveKit (lk.transcription). Чистые функции без React.
+export type Who = 'me' | 'goko';
+export type Line = { id: string; who: Who; text: string; final: boolean };
+
+export const MAX_LINES = 200;
+
+// Потоковая реплика приходит кусками под одним id: заменяем строку, а не добавляем новую.
+export function upsertLine(lines: readonly Line[], line: Line): Line[] {
+  const i = lines.findIndex((l) => l.id === line.id);
+  const next = i >= 0 ? lines.map((l, j) => (j === i ? line : l)) : [...lines, line];
+  return next.length > MAX_LINES ? next.slice(next.length - MAX_LINES) : next;
+}
+
+// Транскрипт моей речи публикует агент с lk.transcribed_track_id = sid моего микрофона; свою речь агент
+// помечает своим треком. Текст без трека от меня самого (lk.chat) — тоже «я».
+export function whoOf(
+  attrs: Readonly<Record<string, string>>,
+  myTrackSids: ReadonlySet<string>,
+  senderIdentity: string,
+  myIdentity: string,
+): Who {
+  const trackId = attrs['lk.transcribed_track_id'];
+  if (trackId) return myTrackSids.has(trackId) ? 'me' : 'goko';
+  return senderIdentity === myIdentity ? 'me' : 'goko';
+}
+
+export const lineId = (attrs: Readonly<Record<string, string>>, streamId: string): string => attrs['lk.segment_id'] ?? streamId;
+
+// Лента — диалог без дублей (D-0011). Реплика Гоко идёт дельта-потоком с lk.transcription_final навсегда 'false'
+// (agents 1.8.0), поэтому её берём всегда и держим строку по сегменту. Реплика человека: каждый промежуточный
+// результат STT — отдельный закрытый поток того же сегмента, атрибут у него честный; берём только финал.
+export const acceptLine = (attrs: Readonly<Record<string, string>>, who: Who): boolean =>
+  who === 'goko' || attrs['lk.transcription_final'] === 'true';
