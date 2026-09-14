@@ -1,7 +1,7 @@
 // Сессия Гоко на телефоне: сессия через game-server (sessionStorage), комната LiveKit по её токену, режим
 // «Голос / Чат» атрибутом goko.mode, микрофон, чат и лента диалога. Комнат страница не создаёт (D-0001).
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Room, RoomEvent, Track } from 'livekit-client';
+import { ConnectionError, ConnectionErrorReason, Room, RoomEvent, Track } from 'livekit-client';
 import { CreateSessionResponse } from '@goko/protocol';
 import { client } from '../api.ts';
 import { agentReady, sendChat } from '../chat.ts';
@@ -46,6 +46,11 @@ function setRemoteAudio(room: Room, on: boolean) {
     }
   }
 }
+
+// Вход отклонён сервером LiveKit: токен истёк или неверен (401/403 при проверке соединения) либо комнаты сессии
+// уже нет (404 «requested room does not exist») — livekit-client 2.22.3 даёт на всё это NotAllowed. С тем же токеном
+// повтор бесполезен. Прочие причины (сеть, таймаут ICE, отмена) — временные: сессия остаётся, повтор по касанию.
+const loginRejected = (e: unknown): boolean => e instanceof ConnectionError && e.reason === ConnectionErrorReason.NotAllowed;
 
 const chatLineId = () => `chat-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 
@@ -124,7 +129,13 @@ export function useSession() {
     if (!info) return Promise.resolve(null);
     if (joining.current) return joining.current;
     const gen = ++generation.current;
-    const room = new Room();
+    const current = () => generation.current === gen;
+    // stopMicTrackOnMute: в «Чате» setMicrophoneEnabled(false) останавливает захват, а не только глушит трек,
+    // иначе индикатор микрофона телефона горит, а Bluetooth-гарнитура остаётся в HFP.
+    const room = new Room({ publishDefaults: { stopMicTrackOnMute: true } });
+    // Отмена чтения текстовых потоков при отключении: livekit при разрыве комнаты читателей не закрывает,
+    // и for await висел бы вечно, держа старую комнату, а строка Гоко оставалась бы незаконченной.
+    const streams = new AbortController();
     const audioHost = document.getElementById('audio') ?? document.body;
     const refreshAgent = () => setAgent([...room.remoteParticipants.values()].some((p) => agentReady(p.attributes)));
     room.on(RoomEvent.TrackSubscribed, (track, publication) => {
@@ -138,9 +149,15 @@ export function useSession() {
     room.on(RoomEvent.ParticipantConnected, refreshAgent);
     room.on(RoomEvent.ParticipantDisconnected, refreshAgent);
     room.on(RoomEvent.ParticipantAttributesChanged, refreshAgent);
-    // Только для вошедшей и не сброшенной комнаты: неудачный вход livekit тоже завершает событием Disconnected
-    // (до отказа connect), а комната после reset не должна сбрасывать вход новой сессии.
+    // Полное переподключение LiveKit: режим, выставленный во время разрыва, мог не дойти до агента — отправляем снова.
+    room.on(RoomEvent.Reconnected, () => {
+      if (roomRef.current === room) void sendMode(room, modeRef.current);
+    });
     room.on(RoomEvent.Disconnected, () => {
+      // Недочитанные потоки прерываются всегда; незаконченные строки Гоко закрывает finally обработчика.
+      streams.abort();
+      // Состояние — только для вошедшей и не сброшенной комнаты: неудачный вход livekit тоже завершает событием
+      // Disconnected (до отказа connect), а комната после reset не должна сбрасывать вход новой сессии.
       if (roomRef.current !== room) return;
       roomRef.current = null;
       joining.current = null;
@@ -149,52 +166,68 @@ export function useSession() {
       setAgent(false);
     });
     // Регистрировать до connect: первые реплики агента приходят сразу после входа.
+    // Ленту трогает только текущая попытка входа: после reset лента принадлежит новой сессии.
     room.registerTextStreamHandler('lk.transcription', async (reader, participant) => {
+      reader.withAbortSignal(streams.signal); // до чтения: сигнал берётся при создании итератора
       const attrs = reader.info.attributes ?? {};
       const id = lineId(attrs, reader.info.id);
       const mySids = new Set(room.localParticipant.getTrackPublications().map((p) => p.trackSid));
       const who = whoOf(attrs, mySids, participant?.identity ?? '', room.localParticipant.identity);
       if (who === 'me') {
         // Человек: промежуточные результаты STT — отдельные закрытые потоки того же сегмента; берём только финал.
-        const text = await reader.readAll();
-        if (acceptLine(attrs, who) && text.trim()) setLines((ls) => upsertLine(ls, { id, who, text, final: true }));
+        try {
+          const text = await reader.readAll();
+          if (current() && acceptLine(attrs, who) && text.trim()) setLines((ls) => upsertLine(ls, { id, who, text, final: true }));
+        } catch {
+          // поток оборвался (агент ушёл, комната отключилась): недочитанную фразу человека не показываем
+        }
         return;
       }
       // Гоко: дельта-поток, lk.transcription_final у него навсегда 'false' (agents 1.8.0) — финал = дочитанный поток.
       let text = '';
-      for await (const chunk of reader) {
-        text += chunk;
-        setLines((ls) => upsertLine(ls, { id, who, text, final: false }));
+      try {
+        for await (const chunk of reader) {
+          text += chunk;
+          if (current()) setLines((ls) => upsertLine(ls, { id, who, text, final: false }));
+        }
+      } catch {
+        // Обрыв: агент ушёл посреди реплики или комната отключилась. Строка остаётся с тем, что успело прийти.
+      } finally {
+        if (current() && text) setLines((ls) => upsertLine(ls, { id, who, text, final: true }));
       }
-      setLines((ls) => upsertLine(ls, { id, who, text, final: true }));
     });
     setLink('connecting');
     const joined = (async (): Promise<Room | null> => {
       try {
         await room.connect(info.livekit.url, info.livekit.token);
       } catch (e) {
-        if (generation.current !== gen) return null; // reset или размонтирование во время входа: состояние уже сброшено
+        if (!current()) return null; // reset или размонтирование во время входа: состояние уже сброшено
         console.warn('[!] web: вход в комнату не удался', e);
         joining.current = null;
         void room.disconnect();
-        // Токен мог истечь раньше продлённой сессии (D-0008): перезагрузка страницы создаст новую.
-        saveStored(null);
         setLink('failed');
-        setError('нет связи с Гоко: доска работает тапами, перезагрузи страницу, чтобы подключиться заново');
+        if (loginRejected(e)) {
+          // Токен истёк раньше продлённой сессии (D-0008) или комнаты уже нет: перезагрузка создаст новую сессию.
+          saveStored(null);
+          setError('нет связи с Гоко: доска работает тапами, перезагрузи страницу, чтобы подключиться заново');
+        } else {
+          // Временный сбой: сессия сохранена, следующее касание страницы входит заново с тем же токеном.
+          setError('нет связи с Гоко: доска работает тапами, коснись экрана, чтобы подключиться снова');
+        }
         return null;
       }
-      if (generation.current !== gen) {
+      if (!current()) {
         void room.disconnect();
         return null;
       }
       roomRef.current = room;
-      // Режим и звук — сразу после входа и одновременно: агент ждёт goko.mode перед приветствием не дольше 2 с,
-      // а startAudio на iOS работает только недалеко от жеста. Отказ startAudio — не отказ связи: в «Чате» звук
-      // не нужен, а в «Голосе» livekit сам повторяет startAudio при захвате микрофона.
-      await Promise.all([
-        sendMode(room, modeRef.current),
-        room.startAudio().catch((e: unknown) => console.warn('[!] web: браузер не дал включить звук', e)),
-      ]);
+      saveStored(info); // вход удался — сессия переживает перезагрузку вкладки
+      // Режим — сразу после входа и без ожидания: агент ждёт goko.mode перед приветствием не дольше 2 с, а
+      // setAttributes ждёт подтверждения до 5 с и не должен задерживать микрофон и чат (отказ sendMode логирует).
+      void sendMode(room, modeRef.current);
+      // startAudio на iOS работает только недалеко от жеста. Отказ — не отказ связи: в «Чате» звук не нужен,
+      // а в «Голосе» livekit сам повторяет startAudio при захвате микрофона.
+      await room.startAudio().catch((e: unknown) => console.warn('[!] web: браузер не дал включить звук', e));
       if (roomRef.current !== room) return null;
       setLink('connected');
       refreshAgent();
@@ -228,14 +261,18 @@ export function useSession() {
       modeRef.current = mode;
       setPrefs((p) => ({ ...p, mode }));
       const room = await connect();
-      if (!room) return;
-      await sendMode(room, mode);
+      // Быстрое «Голос → Чат → Голос»: после каждого ожидания выходим, если режим уже сменили снова,
+      // иначе запоздавшая ветка «Чата» выключила бы микрофон и звук уже в «Голосе».
+      if (!room || modeRef.current !== mode) return;
+      // Без ожидания, как при входе: подтверждение setAttributes до 5 с не задерживает микрофон и отписку звука.
+      void sendMode(room, mode);
       if (mode === 'chat') {
         try {
           await room.localParticipant.setMicrophoneEnabled(false);
         } catch {
           // микрофона и не было
         }
+        if (modeRef.current !== mode) return;
         setMic('off');
         setRemoteAudio(room, false);
       } else {

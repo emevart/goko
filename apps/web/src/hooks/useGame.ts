@@ -90,10 +90,13 @@ export function useGame(sessionId: string | null, onLost: () => void) {
   }, [sessionId, onLost, flash]);
 
   // «Повторить» (D-0006): переоткрытие потока сессии заново запускает серию повторов сервера.
+  // Лимит D-0012 общий на клиента: после rate_limited на тапе и «Повторить» не шлёт запрос раньше срока.
+  // Паузу самого потока соблюдает streamEvents (его reopen до своего срока ничего не делает).
   const reopen = useCallback(() => {
+    if (Date.now() < blockedUntil.current) return flash(humanText('rate_limited'));
     setRetry(false);
     stream.current?.reopen();
-  }, []);
+  }, [flash]);
 
   // Ход человека — место того, чей черёд, у человека (в партии двух людей — всегда, D-0005).
   const humanTurn = Boolean(state && state.status === 'playing' && state.seats[state.toPlay].controller === 'human' && !state.pendingEngineMove);
@@ -118,9 +121,11 @@ export function useGame(sessionId: string | null, onLost: () => void) {
 
   // Действие над текущей партией. Без партии или после её конца — фраза без запроса; иначе fn получает
   // id партии и состояние уже проверенными, и действиям не нужны gameId! и state!.
+  // Между session.game новой партии и её первым state.updated gameId уже новый, а state ещё старый: в этом окне
+  // запрос ушёл бы в новую партию с ревизией старой, поэтому тоже «партии ещё нет».
   const act = useCallback(
     async (fn: (id: string, g: GameState, o: CallOptions) => Promise<unknown>, needTurn: boolean) => {
-      if (!gameId || !state) return flash('партии ещё нет');
+      if (!gameId || !state || state.id !== gameId) return flash('партии ещё нет');
       if (state.status === 'finished') return flash('партия окончена');
       if (needTurn && !humanTurn) return flash(hasEngine(state) ? 'сейчас ход Гоко' : 'сейчас не твой ход');
       await request((o) => fn(gameId, state, o));
