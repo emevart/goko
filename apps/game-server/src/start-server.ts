@@ -138,7 +138,8 @@ function readConfig(env: Record<string, string | undefined>, root: string): { co
       port,
       hostname: optional('HOST') ?? '127.0.0.1',
       // Только за своим прокси (Caddy): иначе X-Forwarded-For подставляет сам клиент (D-0012).
-      trustProxy: env.TRUST_PROXY === '1',
+      // Включает ровно 1, пробелы по краям не мешают: «1 » из .env не должен молча выключить доверие.
+      trustProxy: optional('TRUST_PROXY')?.trim() === '1',
     },
     errors: [],
   };

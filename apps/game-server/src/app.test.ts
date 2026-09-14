@@ -1221,6 +1221,25 @@ describe('createApp: лимиты частоты (D-0012)', () => {
     expect((await get(['8.8.8.8, '])).status).toBe(429);
   });
 
+  it('ключ по адресу: IPv6 — префикс /64, IPv4-mapped — как IPv4; и из X-Forwarded-For, и из сокета', async () => {
+    const proxied = await make({ trustProxy: true, rateLimits: { api: { limit: 1, windowMs: MIN }, create: loose } });
+    const viaProxy = (xff: string) => proxied.app.request('/api/games', { headers: { ...H, 'x-forwarded-for': xff } }, from('127.0.0.1'));
+    expect((await viaProxy('2001:db8:1:2::a')).status).toBe(200);
+    expect((await viaProxy('2001:db8:1:2:ffff::b')).status).toBe(429);
+    expect((await viaProxy('2001:db8:1:3::a')).status).toBe(200);
+    expect((await viaProxy('::ffff:203.0.113.60')).status).toBe(200);
+    expect((await viaProxy('203.0.113.60')).status).toBe(429);
+    expect((await viaProxy('203.0.113.61')).status).toBe(200);
+
+    const direct = await make({ rateLimits: { api: { limit: 1, windowMs: MIN }, create: loose } });
+    const bySocket = (address: string) => direct.app.request('/api/games', { headers: H }, from(address));
+    expect((await bySocket('::ffff:192.0.2.77')).status).toBe(200);
+    expect((await bySocket('192.0.2.77')).status).toBe(429);
+    expect((await bySocket('2001:db8:5:6::1')).status).toBe(200);
+    expect((await bySocket('2001:db8:5:6::2')).status).toBe(429);
+    expect((await bySocket('2001:db8:5:7::1')).status).toBe(200);
+  });
+
   it('длинный адрес из заголовка не раздувает память: ключ обрезан до 64 символов', async () => {
     const { app } = await make({ trustProxy: true, rateLimits: { api: { limit: 1, windowMs: MIN }, create: loose } });
     const long = 'a'.repeat(64);

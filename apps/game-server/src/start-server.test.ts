@@ -386,11 +386,11 @@ describe('startServer: конфигурация из env', () => {
     expect(rec.serviceDeps).toHaveLength(1);
   });
 
-  it('TRUST_PROXY=1: лимит частоты по последнему адресу X-Forwarded-For; без него, пустой или другой — по адресу сокета', async () => {
+  it('TRUST_PROXY=1 (и 1 с пробелами): лимит частоты по последнему адресу X-Forwarded-For; без него, пустой, из пробелов или другой — по адресу сокета', async () => {
     say();
     const send = (app: { request: (path: string, init: RequestInit, env: unknown) => Response | Promise<Response> }, xff: string) =>
       app.request('/api/games', { headers: { 'x-app-key': BASE_ENV.APP_KEY, 'x-forwarded-for': xff } }, { incoming: { socket: { remoteAddress: '127.0.0.1' } } });
-    for (const [value, trusted] of [['1', true], [undefined, false], ['', false], ['true', false]] as const) {
+    for (const [value, trusted] of [['1', true], [' 1 ', true], ['1\t', true], [undefined, false], ['', false], ['   ', false], ['true', false], ['0', false], ['11', false], ['1 1', false]] as const) {
       const { deps } = harness();
       const started = await startServer({ ...deps, env: { ...deps.env, TRUST_PROXY: value } });
       if (!started) throw new Error('сервер не запустился');

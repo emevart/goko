@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { API_RATE, CREATE_RATE, MAX_RATE_KEYS, RateLimiter } from './rate-limit.ts';
+import { API_RATE, CREATE_RATE, MAX_RATE_KEYS, RateLimiter, addressKey } from './rate-limit.ts';
 
 // Часы — простая переменная: окно считается только от переданного времени.
 function clock(start = 1_000_000) {
@@ -126,5 +126,47 @@ describe('RateLimiter', () => {
     expect(() => new RateLimiter({ limit: 1, windowMs: 0 })).toThrow('RateLimiter');
     expect(() => new RateLimiter({ limit: 1.5, windowMs: 1000 })).toThrow('RateLimiter');
     expect(() => new RateLimiter({ limit: 1, windowMs: 1000 }, { maxKeys: 0 })).toThrow('RateLimiter: maxKeys must be a positive integer');
+  });
+});
+
+describe('addressKey: ключ лимитера по адресу', () => {
+  it('IPv4 — адрес целиком', () => {
+    expect(addressKey('203.0.113.7')).toBe('203.0.113.7');
+    expect(addressKey('203.0.113.8')).toBe('203.0.113.8');
+  });
+
+  it('IPv6 — префикс /64 в каноническом виде: адреса одной /64 делят ключ, соседняя /64 — другой ключ', () => {
+    expect(addressKey('2001:db8:1:2:aaaa:bbbb:cccc:dddd')).toBe('2001:db8:1:2::/64');
+    expect(addressKey('2001:DB8:1:2::1')).toBe('2001:db8:1:2::/64');
+    expect(addressKey('2001:0db8:0001:0002:0:0:0:ffff')).toBe('2001:db8:1:2::/64');
+    expect(addressKey('2001:db8:1:3::1')).toBe('2001:db8:1:3::/64');
+    expect(addressKey('2001:db8::1')).toBe('2001:db8:0:0::/64');
+    expect(addressKey('2001:db8:1::2:3:4:5')).toBe('2001:db8:1:0::/64');
+    expect(addressKey('::1')).toBe('0:0:0:0::/64');
+    expect(addressKey('::')).toBe('0:0:0:0::/64');
+    expect(addressKey('1:2:3:4:5::')).toBe('1:2:3:4::/64');
+    expect(addressKey('fe80::1%eth0')).toBe('fe80:0:0:0::/64');
+    // IPv4 в конце адреса (NAT64) на префикс не влияет.
+    expect(addressKey('64:ff9b::192.0.2.1')).toBe('64:ff9b:0:0::/64');
+  });
+
+  it('IPv4-mapped IPv6 — как IPv4, в точечной и в шестнадцатеричной записи; похожие адреса остаются IPv6', () => {
+    expect(addressKey('::ffff:203.0.113.7')).toBe('203.0.113.7');
+    expect(addressKey('::FFFF:cb00:7107')).toBe('203.0.113.7');
+    expect(addressKey('0:0:0:0:0:ffff:203.0.113.7')).toBe('203.0.113.7');
+    expect(addressKey('::ffff:0.0.0.0')).toBe('0.0.0.0');
+    expect(addressKey('::ffff:255.255.255.255')).toBe('255.255.255.255');
+    // ::ffff:0:a.b.c.d (IPv4-translated), ::a.b.c.d (IPv4-compatible) и ffff не на своём месте — IPv6.
+    expect(addressKey('::ffff:0:cb00:7107')).toBe('0:0:0:0::/64');
+    expect(addressKey('::203.0.113.7')).toBe('0:0:0:0::/64');
+    expect(addressKey('1::ffff:203.0.113.7')).toBe('1:0:0:0::/64');
+    expect(addressKey('::1:ffff:203.0.113.7')).toBe('0:0:0:0::/64');
+  });
+
+  it('не адрес — строка как есть', () => {
+    expect(addressKey('unknown')).toBe('unknown');
+    expect(addressKey('203.0.113.7:443')).toBe('203.0.113.7:443');
+    expect(addressKey('[2001:db8::1]')).toBe('[2001:db8::1]');
+    expect(addressKey('')).toBe('');
   });
 });

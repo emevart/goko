@@ -89,7 +89,8 @@ describe('doctor: боевой запуск', () => {
     'без ENGINE_KEY и WEB_HOST не говорит «можно работать» и называет обе переменные',
     () => {
       const { WEB_HOST: _webHost, ...withoutWebHost } = SPIKE;
-      const { lines, status } = runDoctor(withoutWebHost);
+      // Значение TRUST_PROXY не 1: предупреждение без значения.
+      const { lines, status } = runDoctor({ ...withoutWebHost, TRUST_PROXY: `${MARKER}-proxy` });
       const joined = lines.join('\n');
       // Итог: обе недостающие переменные, и та, что ломает спайк, и та, что ломает движок.
       expect(lines).toContain('[!] doctor: инструменты на месте, но не запустится без WEB_HOST, ENGINE_KEY, APP_KEY');
@@ -104,6 +105,7 @@ describe('doctor: боевой запуск', () => {
       expect(lines).toContain('[!] KATAGO_BIN не задан: движок будет недоступен, тесты движка пропускаются');
       expect(lines).toContain('[!] основная сеть не найдена (KATAGO_MODEL или apps/go-engine/models/README.md)');
       expect(lines).toContain('[!] человеческая сеть не найдена (KATAGO_HUMAN_MODEL или apps/go-engine/models/README.md)');
+      expect(lines).toContain('[!] TRUST_PROXY не 1: за Caddy в проде нужен 1');
       // Инструменты на месте — иначе вердикт был бы другим, и строка про env потеряла бы смысл.
       expect(lines).toContain('[OK] npm');
       expect(lines).toContain('[OK] git');
@@ -128,10 +130,13 @@ describe('doctor: боевой запуск', () => {
           KATAGO_MODEL: anyFile,
           KATAGO_HUMAN_MODEL: anyFile,
         },
-        { extraEnv: { WEB_HOST: `${MARKER}.invalid` } },
+        // TRUST_PROXY из окружения с пробелами: разбор .env сам обрезал бы значение без кавычек.
+        { extraEnv: { WEB_HOST: `${MARKER}.invalid`, TRUST_PROXY: ' 1 ' } },
       );
       const joined = lines.join('\n');
       expect(lines).toContain('[OK] doctor: можно работать');
+      expect(lines).toContain('[OK] TRUST_PROXY включён');
+      expect(joined).not.toContain('Caddy');
       expect(lines).toContain('[OK] AGENT_NAME задан');
       expect(lines).toContain('[OK] KATAGO_BIN найден');
       expect(lines).toContain('[OK] основная сеть на месте (KATAGO_MODEL)');
@@ -183,6 +188,8 @@ describe('doctor: боевой запуск', () => {
       expect(lines).toContain('[!] env отсутствуют: APP_KEY, LIVEKIT_API_KEY, LIVEKIT_API_SECRET — game-server выходит с кодом 2 (см. infra/.env.example)');
       // Имена в итоге без повторов: LIVEKIT_* нужны и спайку, и game-server.
       expect(lines).toContain('[!] doctor: инструменты на месте, но не запустится без LIVEKIT_API_KEY, LIVEKIT_API_SECRET, OPENAI_API_KEY, ENGINE_KEY, APP_KEY');
+      // Пустой TRUST_PROXY — предупреждение, не ошибка и не блокер в итоге.
+      expect(lines).toContain('[!] TRUST_PROXY не 1: за Caddy в проде нужен 1');
       expect(status).toBe(0);
     },
     60_000,

@@ -23,7 +23,7 @@ import {
 import { errorDetail } from './error-detail.ts';
 import type { EventBus } from './events.ts';
 import { type RoomCreator, createSessionRoom, mintToken } from './livekit.ts';
-import { API_RATE, CREATE_RATE, type RateRule, RateLimiter } from './rate-limit.ts';
+import { API_RATE, CREATE_RATE, type RateRule, RateLimiter, addressKey } from './rate-limit.ts';
 import type { GameService } from './service.ts';
 import type { SessionManager } from './sessions.ts';
 
@@ -92,13 +92,14 @@ const CREATE_PATH = /^\/api\/(sessions|games|sessions\/[^/]+\/games)$/;
 // Ключ лимитера: адрес сокета от @hono/node-server (c.env.incoming). За прокси все соединения
 // приходят с его адреса, поэтому при trustProxy берётся последний адрес X-Forwarded-For: его дописал
 // сам прокси, а первые клиент мог подставить любые. Без сокета (app.request в тестах) — общий ключ.
+// Адрес сводится addressKey: IPv6 — к префиксу /64, IPv4-mapped — к IPv4.
 function clientKey(c: Context, trustProxy: boolean): string {
   if (trustProxy) {
     const forwarded = c.req.header('x-forwarded-for')?.split(',').at(-1)?.trim();
-    if (forwarded) return forwarded.slice(0, MAX_CLIENT_KEY_LENGTH);
+    if (forwarded) return addressKey(forwarded).slice(0, MAX_CLIENT_KEY_LENGTH);
   }
   const address = (c.env as { incoming?: { socket?: { remoteAddress?: unknown } } } | undefined)?.incoming?.socket?.remoteAddress;
-  return typeof address === 'string' && address !== '' ? address : 'unknown';
+  return typeof address === 'string' && address !== '' ? addressKey(address) : 'unknown';
 }
 
 // Пустое тело (POST без JSON) — это {}: схемы подставят defaults. Непустое, но не JSON — bad_request.

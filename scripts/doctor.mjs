@@ -22,6 +22,11 @@ export function envValue(env, name) {
   return value === undefined || value.trim() === '' ? undefined : value;
 }
 
+// Как game-server: включает ровно 1, пробелы по краям не мешают.
+export function trustProxyEnabled(env) {
+  return envValue(env, 'TRUST_PROXY')?.trim() === '1';
+}
+
 export function checkEnvNames(env, required) {
   const present = required.filter((k) => envValue(env, k) !== undefined);
   const missing = required.filter((k) => !present.includes(k));
@@ -96,6 +101,11 @@ function main() {
   // как «агент запустился, но молчит».
   if (envValue(env, 'AGENT_NAME') === undefined) warn("AGENT_NAME не задан: спайк возьмёт продовое имя 'goko', на ПК нужен 'goko-dev'");
   else ok('AGENT_NAME задан');
+
+  // За Caddy без TRUST_PROXY=1 все телефоны делят один счёт лимита частоты (D-0012). Не ошибка:
+  // в dev прокси нет. Значение не печатается.
+  if (trustProxyEnabled(env)) ok('TRUST_PROXY включён');
+  else warn('TRUST_PROXY не 1: за Caddy в проде нужен 1');
 
   const kb = envValue(env, 'KATAGO_BIN');
   if (kb === undefined) warn('KATAGO_BIN не задан: движок будет недоступен, тесты движка пропускаются');

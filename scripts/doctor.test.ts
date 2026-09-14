@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import util from 'node:util';
 import { describe, expect, it } from 'vitest';
-import { REQUIRED_ENV, checkEnvNames, checkNodeVersion, envValue, readDotEnv, verdict } from './doctor.mjs';
+import { REQUIRED_ENV, checkEnvNames, checkNodeVersion, envValue, readDotEnv, trustProxyEnabled, verdict } from './doctor.mjs';
 
 describe('doctor', () => {
   it('finds missing env names without printing values', () => {
@@ -44,6 +44,11 @@ describe('doctor', () => {
   it('вердикт не печатает значений переменных, только имена', () => {
     const line = verdict({ failed: false, blockers: ['ENGINE_KEY', 'OPENAI_API_KEY'] });
     expect(line).toBe('[!] doctor: инструменты на месте, но не запустится без ENGINE_KEY, OPENAI_API_KEY');
+  });
+
+  it('TRUST_PROXY включён только значением 1 (пробелы по краям не мешают), как его читает game-server', () => {
+    for (const value of ['1', ' 1 ', '1\t']) expect(trustProxyEnabled({ TRUST_PROXY: value }), JSON.stringify(value)).toBe(true);
+    for (const value of [undefined, '', '  ', '0', 'true', 'yes', '11', '1 1']) expect(trustProxyEnabled({ TRUST_PROXY: value }), JSON.stringify(value)).toBe(false);
   });
 
   it('пустое значение переменной считается отсутствующим', () => {
