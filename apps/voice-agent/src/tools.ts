@@ -54,6 +54,8 @@ const SCORING_NOTE = 'Гоко ещё считает очки: итог назо
 // ждём слов человека; партия менялась — модель не знает, что в ней, и сначала смотрит позицию.
 const NOT_APPLIED_TAIL = 'Не повторяй ход сам: скажи человеку и дождись его слов';
 const CHANGED_TAIL = 'Не повторяй ход сам: посмотри позицию и скажи человеку';
+// Перечитать партию после таймаута или обрыва не вышло: записан ли ход, неизвестно.
+const NOT_APPLIED_PASS_TAIL = 'Не повторяй пас сам: скажи человеку и дождись его слов';
 const UNDO_UNKNOWN_TEXT = 'отмена могла пройти. Не повторяй отмену сам: посмотри позицию и скажи человеку';
 
 // Коми по протоколу — x.5 от 0,5 до 13,5 (иначе сервер ответит bad_request без понятной человеку причины).
@@ -91,14 +93,18 @@ function isNetworkError(e: unknown): boolean {
 // или Гоко в партии нет) или предпоследним, а за ним ход Гоко. Иначе null: хода нет или после него были
 // другие ходы. Пас человека перед ходом Гоко бывает и старым (пас, Гоко ответил, пас не дошёл), поэтому
 // такой пас засчитывается, только если ходов стало не меньше чем на два больше, чем в последнем своём
-// ответе по этой партии (knownMoves; null — своих ответов не было).
-function appliedMove(g: GameState, coord: string, knownMoves: number | null): PlayResponse | null {
+// ответе по этой партии (known; null — своих ответов не было). Любой пас засчитывается, только если он
+// цвета known.humanColor (humanColorOf последнего своего ответа): в партии двух людей (D-0005) пас бывает у
+// обоих, а сервер пасует за того, чей ход. Ход по координате так не путается: чужой камень на ту же точку
+// в конце партии не встанет.
+function appliedMove(g: GameState, coord: string, known: { moves: number; humanColor: Color } | null): PlayResponse | null {
   // Не предикат типа: ложный ответ предиката сузил бы last до undefined, хотя ход там есть, просто чужой.
-  const byHuman = (m: Move): boolean => m.coord === coord && g.seats[m.color].controller === 'human';
+  const byHuman = (m: Move): boolean =>
+    m.coord === coord && g.seats[m.color].controller === 'human' && (coord !== 'pass' || m.color === known?.humanColor);
   const last = g.moves.at(-1);
   const prev = g.moves.at(-2);
   if (last && byHuman(last)) return { state: g, move: last, ...(g.pendingEngineMove ? { replyTimedOut: true } : {}) };
-  const newEnough = coord !== 'pass' || (knownMoves !== null && g.moves.length >= knownMoves + 2);
+  const newEnough = coord !== 'pass' || (known !== null && g.moves.length >= known.moves + 2);
   if (prev && last && byHuman(prev) && g.seats[last.color].controller === 'engine' && newEnough) return { state: g, move: prev, reply: last };
   return null;
 }
@@ -179,9 +185,12 @@ export function createToolFns(deps: ToolDeps) {
   // Последняя ревизия партии и число ходов в ней из ответов сервера инструментам. События потока сюда не
   // пишутся: state.updated о записанном ходе приходит раньше таймаута, и сверка в sendMove приняла бы
   // записанный ход за незаписанный.
-  let seen: { gameId: string; revision: number; moves: number } | null = null;
+  // humanColor — за кого пасовал бы инструмент по этой партии: в партии двух людей тот, чей ход, иначе человек.
+  let seen: { gameId: string; revision: number; moves: number; humanColor: Color } | null = null;
   function note(g: GameState): GameState {
-    if (!seen || seen.gameId !== g.id || seen.revision < g.revision) seen = { gameId: g.id, revision: g.revision, moves: g.moves.length };
+    if (!seen || seen.gameId !== g.id || seen.revision < g.revision) {
+      seen = { gameId: g.id, revision: g.revision, moves: g.moves.length, humanColor: humanColorOf(g) };
+    }
     return g;
   }
 
@@ -190,7 +199,7 @@ export function createToolFns(deps: ToolDeps) {
   // партия перечитывается: та же ревизия — хода нет; иначе ход ищется в конце партии (appliedMove), а не
   // нашёлся — партия менялась, и модель сначала смотрит позицию.
   async function sendMove(gameId: string, coord: string, call: () => Promise<PlayResponse>): Promise<PlayResponse | Fail> {
-    const before = seen?.gameId === gameId ? { revision: seen.revision, moves: seen.moves } : null;
+    const before = seen?.gameId === gameId ? { revision: seen.revision, moves: seen.moves, humanColor: seen.humanColor } : null;
     let prefix: string;
     try {
       const res = await call();
@@ -204,10 +213,11 @@ export function createToolFns(deps: ToolDeps) {
     try {
       g = note(await client.getGame(gameId, opts));
     } catch (e) {
-      return reasonOf(e);
+      // Партию не видно: ход мог и дойти, модель всё равно его не повторяет.
+      return fail(`${reasonOf(e).reason}. ${coord === 'pass' ? NOT_APPLIED_PASS_TAIL : NOT_APPLIED_TAIL}`);
     }
     if (g.revision === before?.revision) return fail(notAppliedText(prefix, g, coord));
-    return appliedMove(g, coord, before?.moves ?? null) ?? fail(changedText(prefix, g, coord));
+    return appliedMove(g, coord, before) ?? fail(changedText(prefix, g, coord));
   }
 
   function moveResult(res: PlayResponse) {

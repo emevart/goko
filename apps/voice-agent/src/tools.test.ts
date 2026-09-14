@@ -317,8 +317,38 @@ describe('таймаут клиента на ходе, пасе и поправ�
     client.getGame = async () => {
       throw new TypeError('fetch failed');
     };
-    expect(await fns.playMove({ coord: 'D4' })).toEqual({ ok: false, reason: NETWORK_TEXT });
+    expect(await fns.playMove({ coord: 'D4' })).toEqual({ ok: false, reason: `${NETWORK_TEXT}. ${NOT_APPLIED_TAIL}` });
     expect(client.calls.map((c) => c.method)).toEqual(['play']);
+  });
+
+  it.each([
+    ['play_move', 'play', (f: ToolFns) => f.playMove({ coord: 'E5' }), () => new ClientTimeoutError('play', 15_000), () => new ClientTimeoutError('getGame', 10_000), `сервер не отвечает. ${NOT_APPLIED_TAIL}`],
+    ['pass', 'pass', (f: ToolFns) => f.pass(), () => new TypeError('fetch failed'), () => new TypeError('fetch failed'), 'нет связи с сервером. Не повторяй пас сам: скажи человеку и дождись его слов'],
+    ['correct_last_move', 'correct', (f: ToolFns) => f.correctLastMove({ coord: 'D5' }), () => new HttpError(502, 'Bad Gateway'), () => new TypeError('terminated'), `нет связи с сервером. ${NOT_APPLIED_TAIL}`],
+  ])('%s: после таймаута или обрыва перечитать не вышло — к причине добавлено «не повторяй» (круг 2)', async (_name, method, run, callErr, readErr, reason) => {
+    const { fns, client } = await withGame({ replies: ['K10', 'D10'] });
+    await fns.playMove({ coord: 'D4' });
+    client.failNext(callErr());
+    client.getGame = async () => {
+      throw readErr();
+    };
+    expect(await run(fns)).toEqual({ ok: false, reason });
+    expect(client.calls.at(-1)?.method).toBe(method);
+    expect(gameOf(client).moves.map((m) => m.coord)).toEqual(['D4', 'K10']);
+  });
+
+  it('таймаут паса, пока в известной партии думал Гоко: записанный пас человека засчитан (круг 2)', async () => {
+    const { fns, client } = await withGame();
+    client.replyTimedOut = true;
+    expect(await fns.pass()).toMatchObject({ ok: true, myMove: null, toPlay: 'W' }); // свой ответ: ход белых
+    const g = gameOf(client);
+    g.moves = [...g.moves, { n: 2, color: 'W', coord: 'K10', captured: 0, at: 't' }];
+    g.toPlay = 'B';
+    g.pendingEngineMove = false;
+    g.revision++;
+    client.replyTimedOut = true;
+    client.failNext(new ClientTimeoutError('pass', 15_000), 'after');
+    expect(await fns.pass()).toMatchObject({ ok: true, myMove: null, toPlay: 'W', note: 'Гоко ещё думает: свой ход он назовёт сам, когда решит' });
   });
 
   it('ревизия перечитанной партии запоминается: следующий незаписанный пас не принят за записанный', async () => {
@@ -471,13 +501,13 @@ describe('таймаут клиента на ходе, пасе и поправ�
     expect(client.calls.map((c) => c.method)).toEqual(['pass', 'getGame', 'play', 'correct', 'getGame', 'pass', 'getGame']);
   });
 
-  it('сеть на ходе, перечитать тоже не вышло — «нет связи с сервером»; ход не повторён', async () => {
+  it('сеть на ходе, перечитать тоже не вышло — «нет связи с сервером», не повторять; ход не повторён', async () => {
     const { fns, client } = await withGame();
     client.failNext(new TypeError('terminated'));
     client.getGame = async () => {
       throw new TypeError('terminated');
     };
-    expect(await fns.playMove({ coord: 'D4' })).toEqual({ ok: false, reason: NETWORK_TEXT });
+    expect(await fns.playMove({ coord: 'D4' })).toEqual({ ok: false, reason: `${NETWORK_TEXT}. ${NOT_APPLIED_TAIL}` });
     expect(client.calls.map((c) => c.method)).toEqual(['play']);
   });
 });
@@ -798,6 +828,35 @@ describe('человек против человека (D-0005)', () => {
     t.state.humanColor = null;
     return t;
   }
+  const PASS_CHANGED =
+    'сервер не отвечает, а партия за это время изменилась: паса в конце партии не видно, сейчас ход: чёрные. Не повторяй ход сам: посмотри позицию и скажи человеку';
+  it('таймаут паса чёрных, а последним стоит пас белых — это не наш пас (круг 2)', async () => {
+    const { fns, client } = hvh();
+    expect(await fns.pass()).toMatchObject({ ok: true, toPlay: 'B' }); // белые спасовали голосом: свой ответ, ход чёрных
+    // С экрана: чёрные D5, белые снова пас. Теперь пасуют голосом чёрные, пас до сервера не дошёл.
+    await client.play('g1', { coord: 'D5', via: 'tap' });
+    await client.pass('g1', { via: 'tap' });
+    client.failNext(new ClientTimeoutError('pass', 15_000));
+    expect(await fns.pass()).toEqual({ ok: false, reason: PASS_CHANGED });
+    expect(gameOf(client).moves.map((m) => m.coord)).toEqual(['D4', 'pass', 'D5', 'pass']);
+  });
+  it('таймаут паса, своих ответов по партии не было, последним стоит пас — чей он, неизвестно: не засчитан (круг 2)', async () => {
+    const { fns, client } = hvh();
+    await client.pass('g1', { via: 'tap' }); // белые спасовали с экрана
+    client.failNext(new ClientTimeoutError('pass', 15_000));
+    expect(await fns.pass()).toEqual({ ok: false, reason: PASS_CHANGED });
+  });
+  it('таймаут паса в известной партии: свой пас записан — ответ по перечитанной партии (круг 2)', async () => {
+    const { fns, client } = hvh();
+    await fns.getPosition(); // свой ответ: ход белых
+    client.failNext(new ClientTimeoutError('pass', 15_000), 'after');
+    expect(await fns.pass()).toEqual({ ok: true, myMove: null, myMoveSpoken: null, toPlay: 'B' });
+  });
+  it('таймаут хода без своих ответов: ход записан — засчитан, координата сама говорит, чей он (круг 2)', async () => {
+    const { fns, client } = hvh();
+    client.failNext(new ClientTimeoutError('play', 15_000), 'after');
+    expect(await fns.playMove({ coord: 'K10' })).toMatchObject({ ok: true, yourMove: 'K10', myMove: null, toPlay: 'B' });
+  });
   it('ход без ответа движка', async () => {
     const { fns, client, state } = hvh();
     expect(await fns.playMove({ coord: 'K10' })).toEqual({ ok: true, yourMove: 'K10', yourMoveSpoken: 'ка десять', myMove: null, myMoveSpoken: null, captured: 0, myCaptured: 0, toPlay: 'B', moveNumber: 2 });
