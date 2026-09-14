@@ -11,9 +11,11 @@
     "check": "npm run typecheck && npm test",
     "build:web": "npm run build --workspace apps/web",
     "smoke": "node scripts/smoke.mjs",
-    "dev": "node scripts/dev.mjs"
+    "dev": "node scripts/dev.mjs",
+    "chat": "node scripts/chat.mjs"
   },
   "devDependencies": {
+    "@livekit/rtc-node": "^0.13.34",
     "@types/node": "^22.19.0",
     "typescript": "^5.9.3",
     "vite": "^8.2.2",
