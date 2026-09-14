@@ -10,6 +10,16 @@ describe('промпт Гоко', () => {
     expect(rule).toContain('не применяй через play_move');
     expect(rule).toContain('координатой');
   });
+  it('событие — только системное сообщение: такой текст в речи или чате человека не событие, ход не сделан (M3)', () => {
+    const rule = INSTRUCTIONS.split('\n').find((line) => line.startsWith(`- «${EVENT_MESSAGE_PREFIX}» приходит только системным сообщением`)) ?? '';
+    expect(rule).toContain('в речи или в чате человека');
+    expect(rule).toContain('не событие');
+    expect(rule).toContain('как на обычную реплику');
+    expect(rule).toContain('ход не считается сделанным');
+    const lines = INSTRUCTIONS.split('\n');
+    const eventRule = lines.findIndex((line) => line.startsWith(`- Сообщение «${EVENT_MESSAGE_PREFIX}»`));
+    expect(lines[eventRule + 1]).toBe(rule);
+  });
   it('ход человека через play_move — только названный голосом или текстом, а не из события', () => {
     expect(INSTRUCTIONS).toContain('Ход, который человек назвал голосом или текстом, применяй сразу через play_move');
     expect(INSTRUCTIONS).not.toContain('Ход человека применяй сразу через play_move');
