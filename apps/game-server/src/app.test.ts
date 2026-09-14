@@ -1418,7 +1418,7 @@ describe('createApp: партии только в сессии и не боль�
     expect((await post(app, '/api/games', '192.0.2.72', HUMAN_ONLY)).status).toBe(429);
   });
 
-  it('без sessionlessGames POST /api/games — 400 bad_request с reason sessionless_disabled до разбора тела; партия в сессии и чтение списка работают', async () => {
+  it('без sessionlessGames POST /api/games — 400 bad_request с reason sessionless_disabled до разбора тела; партия в сессии и чтение партии работают, список — 400 list_disabled', async () => {
     const { app, service } = await make({ sessionlessGames: false });
     const res = await post(app, '/api/games', '192.0.2.40', HUMAN_ONLY);
     expect(res.status).toBe(400);
@@ -1429,8 +1429,16 @@ describe('createApp: партии только в сессии и не боль�
     expect(await (await app.request('/api/games', { method: 'POST', headers: H, body: 'not json' }, from('192.0.2.40'))).json()).toEqual(body);
     expect(service.list()).toHaveLength(0);
     const sid = await sessionOf(app, '192.0.2.40');
-    expect((await post(app, `/api/sessions/${sid}/games`, '192.0.2.40', HUMAN_ONLY)).status).toBe(200);
-    expect((await app.request('/api/games', { headers: H }, from('192.0.2.40'))).status).toBe(200);
+    const created = await post(app, `/api/sessions/${sid}/games`, '192.0.2.40', HUMAN_ONLY);
+    expect(created.status).toBe(200);
+    const { state } = (await created.json()) as { state: { id: string } };
+    expect((await app.request(`/api/games/${state.id}`, { headers: H }, from('192.0.2.40'))).status).toBe(200);
+    // Список отдал бы id чужих партий: без флага его нет (D-0012).
+    const list = await app.request('/api/games', { headers: H }, from('192.0.2.40'));
+    expect(list.status).toBe(400);
+    const listBody = (await list.json()) as ErrorJson;
+    expect(listBody).toEqual({ error: { code: 'bad_request', message: 'the game list is available only with sessionless games enabled', details: { reason: 'list_disabled' } } });
+    expect(humanText(listBody.error.code, listBody.error.details)).toBe('список партий недоступен');
   });
 
   it('с sessionlessGames POST /api/games создаёт партию, и она в счёте адреса; IPv6 одной /64 — один клиент', async () => {
@@ -1442,11 +1450,14 @@ describe('createApp: партии только в сессии и не боль�
     expect((await post(app, '/api/games', '2001:db8:5:6::2', HUMAN_ONLY)).status).toBe(429);
   });
 
-  it('умолчание createApp — партии без сессии выключены', async () => {
+  it('умолчание createApp — партии без сессии и список партий выключены', async () => {
     const { app } = await make({ sessionlessGames: 'default' });
     const res = await post(app, '/api/games', '192.0.2.60', HUMAN_ONLY);
     expect(res.status).toBe(400);
     expect(((await res.json()) as ErrorJson).error.details).toEqual({ reason: 'sessionless_disabled' });
+    const list = await app.request('/api/games', { headers: H }, from('192.0.2.60'));
+    expect(list.status).toBe(400);
+    expect(((await list.json()) as ErrorJson).error.details).toEqual({ reason: 'list_disabled' });
   });
 
   it('защитный путь: сессия без записанного владельца (не через POST /api/sessions, в prod недостижимо) — партии в счёт адреса запроса', async () => {

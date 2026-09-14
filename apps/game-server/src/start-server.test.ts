@@ -402,7 +402,7 @@ describe('startServer: конфигурация из env', () => {
     }
   });
 
-  it('ALLOW_SESSIONLESS_GAMES=1 (и 1 с пробелами) разрешает POST /api/games; без него, пустой, из пробелов или другой — 400 sessionless_disabled; партия в сессии создаётся всегда', async () => {
+  it('ALLOW_SESSIONLESS_GAMES=1 (и 1 с пробелами) разрешает POST /api/games и GET /api/games; без него, пустой, из пробелов или другой — 400 sessionless_disabled и list_disabled; партия в сессии создаётся всегда', async () => {
     say();
     const headers = { 'x-app-key': BASE_ENV.APP_KEY, 'content-type': 'application/json' };
     const body = JSON.stringify({ black: { controller: 'human' }, white: { controller: 'human' }, settings: { boardSize: 9 } });
@@ -413,6 +413,9 @@ describe('startServer: конфигурация из env', () => {
       const res = await started.app.request('/api/games', { method: 'POST', headers, body });
       expect(res.status, `ALLOW_SESSIONLESS_GAMES=${value}`).toBe(allowed ? 200 : 400);
       if (!allowed) expect(((await res.json()) as { error: { details?: unknown } }).error.details).toEqual({ reason: 'sessionless_disabled' });
+      const list = await started.app.request('/api/games', { headers });
+      expect(list.status, `GET /api/games при ALLOW_SESSIONLESS_GAMES=${value}`).toBe(allowed ? 200 : 400);
+      if (!allowed) expect(((await list.json()) as { error: { details?: unknown } }).error.details).toEqual({ reason: 'list_disabled' });
       const created = await started.app.request('/api/sessions', { method: 'POST', headers });
       const { session } = (await created.json()) as { session: { id: string } };
       expect((await started.app.request(`/api/sessions/${session.id}/games`, { method: 'POST', headers, body })).status).toBe(200);

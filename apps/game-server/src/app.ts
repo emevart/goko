@@ -369,7 +369,12 @@ export function createApp(deps: AppDeps): Hono {
     if (deps.sessionlessGames !== true) throw new ApiError('bad_request', 'games are created only inside a session', { reason: 'sessionless_disabled' });
     return c.json(await service.create(await parseBody(c, NewGameRequest), { clientKey: clientKey(c, trustProxy) }));
   });
-  app.get('/api/games', (c) => c.json({ games: service.list() }));
+  // Список отдаёт id всех партий: с ним один адрес вернул бы в счёт чужие партии. Нужен только dev и smoke,
+  // поэтому доступен под тем же флагом, что партии без сессии (D-0012).
+  app.get('/api/games', (c) => {
+    if (deps.sessionlessGames !== true) throw new ApiError('bad_request', 'the game list is available only with sessionless games enabled', { reason: 'list_disabled' });
+    return c.json({ games: service.list() });
+  });
   app.get('/api/games/:id', (c) => c.json(service.get(c.req.param('id'))));
   app.post('/api/games/:id/play', async (c) => c.json(await service.play(c.req.param('id'), await parseBody(c, PlayRequest))));
   app.post('/api/games/:id/pass', async (c) => c.json(await service.pass(c.req.param('id'), await parseBody(c, PassRequest))));
