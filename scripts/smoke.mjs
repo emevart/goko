@@ -16,6 +16,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createClient } from '@goko/protocol';
+import { coordToIndex } from '@goko/go-core';
 import { STOP_CEILING_MS, hasExited, isWindows, loadRootEnv, startLogged, stopWithCeiling, withoutEmpty } from './processes.mjs';
 
 export const SMOKE_APP_KEY = 'smoke';
@@ -234,6 +235,21 @@ export function smokeFinisher({ stopAll, dataDir, fail, warn, failures, log = (l
   return finish;
 }
 
+// Кандидаты хода человека и цели поправки в сценарии партии 1. Фейковый движок отвечает случайной
+// легальной точкой, поэтому фиксированная координата изредка занята его же ответом — берём первую
+// свободную по актуальной доске сервера вместо одной жёстко заданной точки.
+const HUMAN_MOVE_CANDIDATES = ['K10', 'L10', 'M10', 'K4', 'L4', 'M4'];
+const CORRECTION_CANDIDATES = ['K4', 'L4', 'M4', 'K10', 'L10', 'M10'];
+
+// Первая свободная координата из списка кандидатов по строке доски (indexToCoord/coordToIndex —
+// как в packages/go-core: строка board — это board[row * size + col]).
+function firstFreeCoord(board, size, candidates) {
+  for (const coord of candidates) {
+    if (board.charAt(coordToIndex(coord, size)) === '.') return coord;
+  }
+  throw new Error(`нет свободной координаты среди кандидатов: ${candidates.join(' ')}`);
+}
+
 // Ошибка операции: проверяем code, status и details, а не текст — message английский и для разработчика.
 async function errorOf(promise) {
   try {
@@ -330,13 +346,19 @@ async function main() {
     let s = await settled(id, p1);
     check(p1.move.coord === 'D4' && s.moves.length === 2, `D4 сыгран, ответ Гоко ${s.moves[1]?.coord}`);
 
-    const p2 = await client.play(id, { coord: 'K10' });
+    const boardSize = s.settings.boardSize;
+    const moveCoord = firstFreeCoord(s.board, boardSize, HUMAN_MOVE_CANDIDATES);
+    const p2 = await client.play(id, { coord: moveCoord });
     s = await settled(id, p2);
-    check(p2.move.n === 3 && s.moves.length === 4, `K10 сыгран, ответ ${s.moves[3]?.coord}`);
+    check(p2.move.n === 3 && p2.move.coord === moveCoord && s.moves.length === 4, `${moveCoord} сыгран, ответ ${s.moves[3]?.coord}`);
 
-    const c1 = await client.correct(id, { coord: 'K4' });
+    const correctionCoord = firstFreeCoord(s.board, boardSize, CORRECTION_CANDIDATES);
+    const c1 = await client.correct(id, { coord: correctionCoord });
     s = await settled(id, c1);
-    check(c1.move.n === 3 && c1.move.coord === 'K4' && s.moves.length === 4 && s.moves[2]?.coord === 'K4', `correct K10 -> K4, новый ответ ${s.moves[3]?.coord}`);
+    check(
+      c1.move.n === 3 && c1.move.coord === correctionCoord && s.moves.length === 4 && s.moves[2]?.coord === correctionCoord,
+      `correct ${moveCoord} -> ${correctionCoord}, новый ответ ${s.moves[3]?.coord}`,
+    );
 
     const u1 = await client.undo(id);
     check(u1.removed.length === 2 && u1.state.moves.length === 2 && u1.state.toPlay === 'B', 'undo снял пару ходов, ход чёрных');
