@@ -421,6 +421,8 @@ describe('таймауты клиента', () => {
     expect(out.value).not.toBeInstanceOf(ClientTimeoutError);
     expect(f.signals[0]?.aborted).toBe(true);
     expect(vi.getTimerCount()).toBe(0);
+    // И после внешней отмены на внешнем сигнале не остаётся слушателя клиента.
+    expect(getEventListeners(ac.signal, 'abort')).toEqual([]);
   });
 
   it('внешний signal отменяет и чтение тела, которое на signal не реагирует', async () => {

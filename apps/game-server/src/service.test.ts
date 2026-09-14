@@ -3292,6 +3292,14 @@ describe('GameService: сдача проверяет место (B7) и заня
     expect(byEngine.state.result).toMatchObject({ winner: 'B', reason: 'resign' });
   });
 
+  it('сдача за место external (снапшот стадии 2) — unsupported_controller, партия не меняется', async () => {
+    const seed = newGame({ id: 'withexternal', createdAt: new Date().toISOString(), settings: GameSettings.parse({ boardSize: 9 }), seats: { B: { controller: 'human' }, W: { controller: 'external' } } });
+    const { service } = await make(createFakeEngine(), { store: memoryStore([seed]) });
+    await expect(service.resign('withexternal', { color: 'W', via: 'api' })).rejects.toMatchObject({ code: 'unsupported_controller', status: 400 });
+    expect(service.get('withexternal')).toMatchObject({ status: 'playing', revision: 0 });
+    expect((await service.resign('withexternal', { color: 'B', via: 'api' })).state.result).toMatchObject({ winner: 'W', reason: 'resign' });
+  });
+
   it('сдача своего места проходит, как и раньше', async () => {
     const { service } = await make(createFakeEngine());
     const g = await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false });
