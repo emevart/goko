@@ -100,6 +100,18 @@ export class ClientTimeoutError extends Error {
   }
 }
 
+// Поток событий молчал дольше сторожа простоя (STREAM_IDLE_MS в client.ts): соединение считается оборванным.
+// Наследник TypeError — того же рода, что обрыв сети у fetch: переподключение вызывающих срабатывает как при обрыве.
+export class StreamIdleError extends TypeError {
+  readonly idleMs: number;
+
+  constructor(idleMs: number) {
+    super(`sse stream idle: no bytes in ${idleMs} ms`);
+    this.name = 'StreamIdleError';
+    this.idleMs = idleMs;
+  }
+}
+
 // Ответ не по протоколу (прокси, падение): статус и сырое тело.
 export class HttpError extends Error {
   readonly status: number;
