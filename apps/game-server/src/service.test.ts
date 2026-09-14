@@ -3595,6 +3595,78 @@ describe('GameService: лимит партий и старые снапшоты 
     await expect(service.play(z, { coord: 'D4', waitForReply: false, via: 'api' })).rejects.toMatchObject({ code: 'too_many_games', details: { max: MAX_ACTIVE_GAMES } });
   });
 
+  it('обход через устаревание закрыт: партии, накопленные по 3 за порог STALE_GAME_MS, возвращаются в счёт не больше лимита клиента', async () => {
+    let clock = NOW.getTime();
+    const { service } = await make(createFakeEngine(), { now: () => new Date(clock) });
+    const ids: string[] = [];
+    // Каждый круг: три партии клиента A, затем порог — все устарели и в счёте не идут.
+    while (ids.length < MAX_ACTIVE_GAMES) {
+      for (let i = 0; i < MAX_GAMES_PER_CLIENT && ids.length < MAX_ACTIVE_GAMES; i++) ids.push((await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, { clientKey: 'A' })).state.id);
+      clock += STALE_GAME_MS + 1;
+    }
+    const plays = await Promise.allSettled(ids.map((id) => service.play(id, { coord: 'D4', waitForReply: false, via: 'api' })));
+    expect(plays.filter((p) => p.status === 'fulfilled')).toHaveLength(MAX_GAMES_PER_CLIENT);
+    const rejected = plays.flatMap((p) => (p.status === 'rejected' ? [p.reason] : []));
+    expect(rejected).toHaveLength(MAX_ACTIVE_GAMES - MAX_GAMES_PER_CLIENT);
+    for (const reason of rejected) expect(reason).toMatchObject({ code: 'too_many_games', details: { max: MAX_GAMES_PER_CLIENT, scope: 'client' } });
+    expect(service.list().filter((g) => g.moveCount > 0)).toHaveLength(MAX_GAMES_PER_CLIENT);
+    // Другой клиент создаёт партию: общий лимит не занят.
+    await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, { clientKey: 'B' });
+  });
+
+  it('возврат к устаревшей партии в пределах лимита: она снова в счёте с момента возврата и устаревает через STALE_GAME_MS без активности', async () => {
+    let clock = NOW.getTime();
+    const { service } = await make(createFakeEngine(), { now: () => new Date(clock), maxActiveGames: 2, maxGamesPerClient: 1 });
+    const old = (await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, { clientKey: 'A' })).state.id;
+    clock += STALE_GAME_MS + 1;
+    const other = (await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false })).state.id;
+    // Открытие потока — возврат без хода: old снова в счёте, в том числе клиента A.
+    service.resume(old);
+    await expect(service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false })).rejects.toMatchObject({ code: 'too_many_games', details: { max: 2 } });
+    await service.resign(other, { color: 'B', via: 'api' });
+    await expect(service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, { clientKey: 'A' })).rejects.toMatchObject({ details: { scope: 'client' } });
+    // Ровно STALE_GAME_MS после возврата — ещё в счёте, на 1 мс позже — устарела снова.
+    clock += STALE_GAME_MS;
+    await expect(service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, { clientKey: 'A' })).rejects.toMatchObject({ details: { scope: 'client' } });
+    clock += 1;
+    await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, { clientKey: 'A' });
+    // Ход в вернувшейся устаревшей партии проходит лимиты заново: клиент A занят новой партией.
+    await expect(service.play(old, { coord: 'D4', waitForReply: false, via: 'api' })).rejects.toMatchObject({ details: { max: 1, scope: 'client' } });
+  });
+
+  it('устаревшая партия сверх лимита: поток не ставит задачу движка, действие — 429; в пределах лимита поток ставит задачу', async () => {
+    const engine = createFakeEngine({ script: ['E5'] });
+    const store = memoryStore([seedEngineGame('staleengine', STALE_GAME_MS + 1)]);
+    const { service } = await make(engine, { store, now: () => NOW, maxActiveGames: 1, maxGamesPerClient: 1 });
+    const fresh = (await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false })).state.id;
+    service.resume('staleengine');
+    await expect(service.resign('staleengine', { color: 'W', via: 'api' })).rejects.toMatchObject({ code: 'too_many_games', details: { max: 1 } });
+    await tick(20);
+    expect(engine.calls).toMatchObject({ genmove: 0 });
+    expect(service.get('staleengine')).toMatchObject({ status: 'playing', moves: [] });
+    await service.resign(fresh, { color: 'B', via: 'api' });
+    service.resume('staleengine');
+    await untilTick(() => service.get('staleengine').moves.length === 1);
+  });
+
+  it('граница STALE_GAME_MS ровно: активная партия при полном лимите принимает действия, устаревшая на 1 мс — 429', async () => {
+    let clock = NOW.getTime();
+    const { service } = await make(createFakeEngine(), { now: () => new Date(clock), maxActiveGames: 3 });
+    const create = async () => (await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false })).state.id;
+    const a = await create();
+    const b = await create();
+    // Ровно на пороге a и b ещё в счёте: с c лимит 3 полон, а ход в активной a проходит.
+    clock += STALE_GAME_MS;
+    await create();
+    await expect(create()).rejects.toMatchObject({ code: 'too_many_games' });
+    await service.play(a, { coord: 'D4', waitForReply: false, via: 'api' });
+    // Через 1 мс b устарела: лимит снова полон с d, и возврат к b отклонён.
+    clock += 1;
+    await create();
+    await expect(service.play(b, { coord: 'D4', waitForReply: false, via: 'api' })).rejects.toMatchObject({ code: 'too_many_games', details: { max: 3 } });
+    expect(service.get(b).moves).toHaveLength(0);
+  });
+
   it('close дожидается и записи отметки, поставленной во время close', async () => {
     const base = memoryMarks();
     const gates: Array<() => void> = [];

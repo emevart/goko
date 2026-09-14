@@ -152,8 +152,11 @@ export class GameService {
   // до действия человека или открытия потока (resume).
   private readonly gaveUp = new Set<string>();
   // Партии, брошенные сменой партии в сессии (D-0012): не в лимитах и без задачи init, как устаревшие.
-  // Возврат человека (resume, humanAction) снимает отметку. Записи на диск идут цепочкой, close её ждёт.
+  // Возврат человека (resume, humanAction) в пределах лимита снимает отметку. Записи на диск идут цепочкой, close её ждёт.
   private readonly abandoned = new Set<string>();
+  // Время последнего возврата к партии вне счёта, прошедшего лимиты: для порога устаревания это активность.
+  // Только память; записей не больше, чем партий в памяти.
+  private readonly returnedAt = new Map<string, number>();
   private marksWrite: Promise<void> = Promise.resolve();
   private closed = false;
 
@@ -224,7 +227,8 @@ export class GameService {
 
   // Действие человека на партии (мутирующий запрос, открытие потока событий): исчерпанная серия
   // повторов начинается заново. Во время идущей серии и для незнакомой партии ничего не делает.
-  // Брошенная сменой партия сверх лимита (D-0012) остаётся брошенной: поток открыт, но задача не ставится.
+  // Партия вне счёта (брошенная сменой или устаревшая) сверх лимита (D-0012) остаётся вне счёта: поток открыт,
+  // но задача не ставится.
   resume(id: string): void {
     if (this.reactivate(id)) return;
     if (!this.gaveUp.delete(id)) return;
@@ -237,7 +241,7 @@ export class GameService {
   // движок не зовётся. Отклонённая операция (not_your_turn, nothing_to_undo, отказ записи) задачу
   // ставит здесь, и серия идёт заново. resume (открытие потока) ставит задачу сразу: операции нет.
   private async humanAction<T>(id: string, human: boolean, op: () => Promise<T>): Promise<T> {
-    // Возврат к брошенной партии сверх лимита — отказ до операции: партия не меняется и остаётся брошенной.
+    // Возврат к партии вне счёта сверх лимита — отказ до операции: партия не меняется и остаётся вне счёта.
     const refused = human ? this.reactivate(id) : undefined;
     if (refused) throw refused;
     const resumed = human && this.gaveUp.delete(id);
@@ -499,7 +503,7 @@ export class GameService {
   // Лимит незавершённых партий (D-0012). Партия, чей create ещё пишет снапшот, уже занимает место;
   // устаревшая (без активности дольше порога на момент create) и брошенная сменой — нет. replaced — текущая
   // партия сессии, в которой идёт create: новая партия её заменит, поэтому своей замене она не мешает.
-  // Отказ возвращается, а не бросается: create его бросает, resume молча оставляет партию брошенной.
+  // Отказ возвращается, а не бросается: create его бросает, resume молча оставляет партию вне счёта.
   private activeLimitError(replaced?: string): ApiError | undefined {
     const max = this.deps.maxActiveGames ?? MAX_ACTIVE_GAMES;
     const now = (this.deps.now?.() ?? new Date()).getTime();
@@ -529,8 +533,10 @@ export class GameService {
   }
 
   // Не в счёте лимитов и без задачи init: без активности дольше порога или брошена сменой партии (D-0012).
+  // Возврат к партии вне счёта в пределах лимита — тоже активность.
   private isStale(state: GameState, now: number): boolean {
-    return this.abandoned.has(state.id) || lastActivity(state) < now - (this.deps.staleGameMs ?? STALE_GAME_MS);
+    const active = Math.max(lastActivity(state), this.returnedAt.get(state.id) ?? 0);
+    return this.abandoned.has(state.id) || active < now - (this.deps.staleGameMs ?? STALE_GAME_MS);
   }
 
   // Прежняя идущая партия сессии брошена: отметка в памяти сразу, на диск — в очередь записей.
@@ -540,17 +546,21 @@ export class GameService {
     this.persistMark(id, true);
   }
 
-  // Человек вернулся к брошенной партии: она снова в счёте, если проходит те же лимиты, что create (D-0012), —
-  // сначала общий, затем клиента, в чей счёт шла партия. Иначе возврат пустил бы один адрес по кругу
-  // «новая партия в сессии → открыть поток брошенной» на весь общий лимит. Сверх лимита отметка остаётся,
-  // и отказ возвращается вызывающему. Партия без записи клиента (создана до рестарта) проходит только общий лимит.
+  // Человек вернулся к партии вне счёта — брошенной сменой или устаревшей: она снова в счёте, если проходит те же
+  // лимиты, что create (D-0012), — сначала общий, затем клиента, в чей счёт шла партия. Иначе один адрес набрал бы
+  // весь общий лимит по кругу: «новая партия в сессии → поток брошенной» или по 3 партии за порог устаревания,
+  // затем возврат ко всем. Сверх лимита партия остаётся вне счёта, и отказ возвращается вызывающему. Партия без
+  // записи клиента (создана до рестарта) проходит только общий лимит. Партия в счёте проверку не проходит.
   private reactivate(id: string): ApiError | undefined {
-    if (!this.abandoned.has(id)) return undefined;
+    const state = this.games.get(id);
+    const now = (this.deps.now?.() ?? new Date()).getTime();
+    if (state === undefined || state.status === 'finished' || !this.isStale(state, now)) return undefined;
     const clientKey = this.clientByGame.get(id);
     const refused = this.activeLimitError() ?? (clientKey === undefined ? undefined : this.clientLimitError(clientKey));
     if (refused) return refused;
-    this.abandoned.delete(id);
-    this.persistMark(id, false);
+    // В счёте сразу, до хода: одновременные возвраты видят друг друга.
+    this.returnedAt.set(id, now);
+    if (this.abandoned.delete(id)) this.persistMark(id, false);
     return undefined;
   }
 
