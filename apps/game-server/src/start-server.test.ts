@@ -10,6 +10,7 @@ import type { RoomCreator } from './livekit.ts';
 import { EventBus } from './events.ts';
 import { createFakeEngine } from './fake-engine.ts';
 import { GameStore } from './store.ts';
+import { SESSION_TTL_MS } from './sessions.ts';
 import { INIT_EXIT_CODE, type Listen, SHUTDOWN_MS, type StartDeps, createListen, startServer } from './start-server.ts';
 
 const SECRET = 'secret-of-at-least-32-characters-long';
@@ -306,6 +307,7 @@ describe('startServer: конфигурация из env', () => {
     if (!started) throw new Error('сервер не запустился');
     expect(rec.listens).toEqual([{ port: 8787, hostname: '127.0.0.1' }]);
     expect(rec.serviceDeps[0]?.store.dir).toBe(path.join(REPO_ROOT, 'data/games'));
+    expect(rec.serviceDeps[0]?.staleGameMs).toBe(SESSION_TTL_MS);
     expect(rec.roomOptions).toEqual([{ url: 'wss://lk.test', apiKey: 'devkey', apiSecret: SECRET }]);
     vi.useFakeTimers({ toFake: ['Date'] });
     const headers = { 'x-app-key': BASE_ENV.APP_KEY };
@@ -353,6 +355,8 @@ describe('startServer: конфигурация из env', () => {
     expect(rec.listens).toEqual([{ port: 18787, hostname: '0.0.0.0' }]);
     expect(rec.serviceDeps[0]?.store.dir).toBe(dir);
     expect(rec.serviceDeps[0]?.log).toBe(deps.log);
+    // Порог устаревшей партии — тот же SESSION_TTL_MS.
+    expect(rec.serviceDeps[0]?.staleGameMs).toBe(60_000);
     const headers = { 'x-app-key': BASE_ENV.APP_KEY };
     expect((await started.app.request('/api/sessions', { method: 'POST', headers })).status).toBe(200);
     expect(rec.rooms[0]?.agents[0]?.agentName).toBe('goko-dev');

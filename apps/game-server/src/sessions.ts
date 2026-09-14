@@ -5,6 +5,9 @@
 import { ApiError, type Session } from '@goko/protocol';
 import { newId } from './ids.ts';
 
+// Срок сессии без событий по умолчанию (SESSION_TTL_MS, D-0001); тот же порог у устаревшей партии (D-0012).
+export const SESSION_TTL_MS = 2 * 3600 * 1000;
+
 // onRemove — после удаления сессии (remove или истечение срока): сервис снимает привязки её партий.
 export type SessionManagerOptions = { max: number; ttlMs: number; now?: () => number; onRemove?: (id: string) => void };
 

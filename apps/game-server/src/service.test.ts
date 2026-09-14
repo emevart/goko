@@ -18,7 +18,9 @@ import {
   MAX_ID_ATTEMPTS,
   RETRIES_EXHAUSTED_MESSAGE,
   SCORE_BUDGET_MS,
+  STALE_GAME_MS,
 } from './service.ts';
+import { SESSION_TTL_MS } from './sessions.ts';
 import { GameStore, type SnapshotStore } from './store.ts';
 import { type GuardedService, type MemoryStore, closeWithin, guardService, memoryStore, track } from './test-helpers.ts';
 
@@ -368,7 +370,7 @@ describe('GameService: партия человек против движка', (
     const g = await first.service.create({ ...HUMAN_BLACK, ...S9, waitForReply: true });
     await first.service.play(g.state.id, { coord: 'D4', waitForReply: false, via: 'api' });
     const closing = first.service.close(); // ответ движка не успел
-    // Раздумье досчитывается уже после close: ход к закрытой партии не применяется.
+    // close обрывает раздумье сигналом: даже когда часы доходят до срока ответа, хода к закрытой партии нет.
     await thinkThrough(slow, 1, 100);
     await closing;
 
@@ -394,9 +396,9 @@ describe('GameService: партия человек против движка', (
     expect(list.map((x) => x.id)).toEqual([b.state.id, a.state.id]);
     // Время создания взято у переданных часов, а не у системных: иначе две партии
     // подряд легли бы в одну миллисекунду и порядок держался бы на удаче.
-    // Сколько раз часы прочитаны до create (init читает их для срока хранения снапшотов), тесту не важно.
+    // Сколько раз часы прочитаны (init — для срока хранения, create — ещё и для лимита), тесту не важно.
     expect(list.map((x) => x.createdAt)).toEqual([b.state.createdAt, a.state.createdAt]);
-    expect(Date.parse(b.state.createdAt) - Date.parse(a.state.createdAt)).toBe(1000);
+    expect(Date.parse(b.state.createdAt)).toBeGreaterThan(Date.parse(a.state.createdAt));
     expect(a.state.createdAt.startsWith('2026-09-07T10:00:')).toBe(true);
     expect(list[1]).toMatchObject({ result: { winner: 'W', reason: 'resign' }, moveCount: 0 });
     expect(list[0]?.result).toBeUndefined();
@@ -1749,7 +1751,8 @@ describe('GameService: фоновые задачи, дедлайны и мьют
     const id = 'enginevsengine';
     const seed = newGame({ id, createdAt: '2026-09-07T10:00:00.000Z', settings: GameSettings.parse({ boardSize: 9 }), seats: { B: { controller: 'engine', rank: '10k' }, W: { controller: 'engine', rank: '10k' } } });
     const engine = createFakeEngine({ script: ['C3', 'D4', 'E5', 'F6'] });
-    const { service } = await make(engine, { store: memoryStore([seed]) });
+    // Часы сервиса — время снапшота: иначе партия старше порога и init не поставил бы ей задачу.
+    const { service } = await make(engine, { store: memoryStore([seed]), now: () => new Date('2026-09-07T10:00:00.000Z') });
     // Коммит хода движка зовёт kick, пока запись задачи ещё в карте: следующий ход ставит только
     // kick после завершения задачи.
     await untilTick(() => service.get(id).moves.length >= 4);
@@ -3190,6 +3193,76 @@ describe('GameService: лимит партий и старые снапшоты 
     expect(service.list().map((g) => g.id)).toEqual(['fresh']);
     expect(real.removed).toEqual(['old2']);
     expect(lines.filter((l) => l.startsWith('[!]') && l.includes('old1'))).toHaveLength(1);
+  });
+
+  const HOUR = 3600 * 1000;
+  const seedEngineGame = (id: string, createdAgo: number): GameState =>
+    newGame({ id, createdAt: at(createdAgo), settings: GameSettings.parse({ boardSize: 9 }), seats: { B: { controller: 'engine', rank: '10k' }, W: { controller: 'human' } } });
+  // Два паса подряд: партия ждёт автосчёта.
+  const seedPassed = (id: string, passAgo: number): GameState => {
+    const created = newGame({ id, createdAt: at(DAY), settings: GameSettings.parse({ boardSize: 9 }), seats: seat });
+    return applyMove(applyMove(created, 'B', 'pass', at(passAgo)).state, 'W', 'pass', at(passAgo)).state;
+  };
+
+  it('незавершённая партия без активности дольше STALE_GAME_MS в лимите не считается; порог — последняя активность в момент create', async () => {
+    expect(STALE_GAME_MS).toBe(SESSION_TTL_MS);
+    expect(SESSION_TTL_MS).toBe(2 * HOUR);
+    let clock = NOW.getTime();
+    const store = memoryStore([
+      seedGame('stale', 3 * DAY),
+      // Последний ход чуть старше порога.
+      seedGame('stalemove', 3 * DAY, { moveAgo: 2 * HOUR + 1 }),
+      // Ровно на пороге — ещё не устарела.
+      seedGame('edge', 2 * HOUR),
+      // Создана давно, но ход свежий: активность по ходу.
+      seedGame('moved', 3 * DAY, { moveAgo: HOUR }),
+    ]);
+    const { service } = await make(createFakeEngine(), { store, now: () => new Date(clock), maxActiveGames: 3 });
+    await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false });
+    await expect(service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false })).rejects.toMatchObject({ code: 'too_many_games', details: { max: 3 } });
+    // Часы ушли на час: edge и moved устарели уже во время работы сервера.
+    clock += HOUR + 1;
+    await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false });
+    await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false });
+    await expect(service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false })).rejects.toMatchObject({ code: 'too_many_games' });
+    expect(service.list()).toHaveLength(7);
+  });
+
+  it('init не ставит фоновую задачу устаревшей партии, свежей — ставит; порог берётся из staleGameMs', async () => {
+    const engine = createFakeEngine({ script: ['E5'] });
+    const store = memoryStore([
+      seedEngineGame('staleengine', 10 * 60_000 + 1),
+      seedPassed('stalescore', 10 * 60_000 + 1),
+      seedGame('stalehuman', DAY),
+      seedGame('stalefinished', DAY, { finished: true }),
+      seedEngineGame('freshengine', 10 * 60_000),
+      seedPassed('freshscore', 60_000),
+    ]);
+    const { service } = await make(engine, { store, now: () => NOW, staleGameMs: 10 * 60_000 });
+    await untilTick(() => service.get('freshengine').moves.length === 1 && service.get('freshscore').status === 'finished');
+    await tick(20);
+    expect(engine.calls).toMatchObject({ genmove: 1, score: 1 });
+    expect(service.get('staleengine')).toMatchObject({ moves: [], pendingEngineMove: true, status: 'playing' });
+    expect(service.get('stalescore')).toMatchObject({ status: 'playing', consecutivePasses: 2 });
+    // Отмечены, как отменённые, только партии, которым init поставил бы задачу.
+    expect(service.internalSizes()).toMatchObject({ gaveUp: 2, taskAborts: 0 });
+  });
+
+  it('задачу устаревшей партии ставит открытие её потока (resume) или действие человека, как после отмены', async () => {
+    const engine = createFakeEngine({ script: ['E5', 'F5'] });
+    const store = memoryStore([seedEngineGame('bystream', DAY), seedEngineGame('byaction', DAY), seedPassed('scorebystream', DAY)]);
+    const { service } = await make(engine, { store, now: () => NOW });
+    await tick(20);
+    expect(engine.calls).toMatchObject({ genmove: 0, score: 0 });
+    service.resume('bystream');
+    await untilTick(() => service.get('bystream').moves.length === 1);
+    // Ход человека на ходе Гоко отклоняется, но задачу всё равно ставит.
+    await expect(service.play('byaction', { coord: 'D4', waitForReply: false, via: 'voice' })).rejects.toMatchObject({ code: 'not_your_turn' });
+    await untilTick(() => service.get('byaction').moves.length === 1);
+    service.resume('scorebystream');
+    await untilTick(() => service.get('scorebystream').status === 'finished');
+    expect(engine.calls).toMatchObject({ genmove: 2, score: 1 });
+    expect(service.internalSizes().gaveUp).toBe(0);
   });
 });
 

@@ -34,6 +34,7 @@ import { errorDetail } from './error-detail.ts';
 import type { EventBus } from './events.ts';
 import { applyMove, finishByScore, newGame, positionOf, resign as resignGame, setRank as setRankGame, undo as undoGame } from './game.ts';
 import { newId } from './ids.ts';
+import { SESSION_TTL_MS } from './sessions.ts';
 import type { SnapshotStore } from './store.ts';
 
 // Входы операций — уже разобранные схемой тела (z.output): defaults подставлены.
@@ -65,6 +66,9 @@ export const SCORE_BUDGET_MS = 20_000;
 export const ANALYZE_BUDGET_MS = 10_000;
 // Не больше стольких незавершённых партий на сервере (D-0012): лишний create — too_many_games.
 export const MAX_ACTIVE_GAMES = 20;
+// Незавершённая партия без активности дольше срока сессии брошена (D-0012): в лимите не считается,
+// init не ставит ей фоновую задачу. Порог в сервере — SESSION_TTL_MS из env, здесь его умолчание.
+export const STALE_GAME_MS = SESSION_TTL_MS;
 // Снапшот завершённой партии живёт столько после последней активности (последний ход, иначе
 // создание); более старые init удаляет с диска (D-0012).
 export const FINISHED_RETENTION_MS = 30 * 24 * 3600 * 1000;
@@ -87,6 +91,7 @@ export type GameServiceDeps = {
   analyzeBudgetMs?: number;
   maxActiveGames?: number;
   finishedRetentionMs?: number;
+  staleGameMs?: number;
   newId?: () => string;
   log?: (line: string) => void;
 };
@@ -110,6 +115,11 @@ function lastActivity(state: GameState): number {
   return Date.parse(state.moves.at(-1)?.at ?? state.createdAt);
 }
 
+// Партии нужна фоновая задача: автосчёт после двух пасов или ход движка (то же условие, что в kick).
+function needsTask(state: GameState): boolean {
+  return state.status === 'playing' && (state.consecutivePasses >= 2 || state.pendingEngineMove);
+}
+
 export class GameService {
   private readonly deps: GameServiceDeps;
   private readonly games = new Map<string, GameState>();
@@ -129,7 +139,8 @@ export class GameService {
   private readonly wakeups = new Set<() => void>();
   // Число отказов подряд в текущей серии повторов партии; обнуляет любой удачный коммит.
   private readonly failures = new Map<string, number>();
-  // Партии, чья серия исчерпана: kick их не трогает до действия человека.
+  // Партии, чья серия исчерпана, задача отменена сменой партии или устарела к init: kick их не трогает
+  // до действия человека или открытия потока (resume).
   private readonly gaveUp = new Set<string>();
   private closed = false;
 
@@ -140,7 +151,8 @@ export class GameService {
   async init(): Promise<void> {
     // Срок хранения (D-0012): снапшот завершённой партии старше срока удаляется и в память не идёт.
     // Отказ удаления — строка [!] в лог, партия всё равно не загружается: следующий init попробует снова.
-    const cutoff = (this.deps.now?.() ?? new Date()).getTime() - (this.deps.finishedRetentionMs ?? FINISHED_RETENTION_MS);
+    const now = (this.deps.now?.() ?? new Date()).getTime();
+    const cutoff = now - (this.deps.finishedRetentionMs ?? FINISHED_RETENTION_MS);
     for (const state of await this.deps.store.load()) {
       if (state.status === 'finished' && lastActivity(state) < cutoff) {
         try {
@@ -152,7 +164,15 @@ export class GameService {
       }
       this.games.set(state.id, state);
     }
-    for (const state of this.games.values()) this.kick(state);
+    // Устаревшей партии задача не ставится (D-0012): после рестарта движок не доигрывает брошенные партии.
+    // Она отмечена, как отменённая, и её снова запустит действие человека или открытие потока (resume).
+    for (const state of this.games.values()) {
+      if (this.isStale(state, now)) {
+        if (needsTask(state)) this.gaveUp.add(state.id);
+        continue;
+      }
+      this.kick(state);
+    }
   }
 
   async close(): Promise<void> {
@@ -439,13 +459,19 @@ export class GameService {
     return { result, settled: call.settled };
   }
 
-  // Лимит незавершённых партий (D-0012). Партия, чей create ещё пишет снапшот, уже занимает место.
+  // Лимит незавершённых партий (D-0012). Партия, чей create ещё пишет снапшот, уже занимает место;
+  // устаревшая (без активности дольше порога на момент create) — нет.
   private checkActiveLimit(): void {
     const max = this.deps.maxActiveGames ?? MAX_ACTIVE_GAMES;
+    const now = (this.deps.now?.() ?? new Date()).getTime();
     let active = 0;
-    for (const state of this.games.values()) if (state.status !== 'finished') active++;
+    for (const state of this.games.values()) if (state.status !== 'finished' && !this.isStale(state, now)) active++;
     for (const id of this.pendingCreates) if (!this.games.has(id)) active++;
     if (active >= max) throw new ApiError('too_many_games', `limit of ${max} unfinished games reached`, { max });
+  }
+
+  private isStale(state: GameState, now: number): boolean {
+    return lastActivity(state) < now - (this.deps.staleGameMs ?? STALE_GAME_MS);
   }
 
   // Id партии не должен совпасть ни с существующей, ни с создаваемой (D-0009): совпавший

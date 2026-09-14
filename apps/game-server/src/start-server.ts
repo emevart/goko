@@ -12,7 +12,7 @@ import { EventBus } from './events.ts';
 import { createFakeEngine } from './fake-engine.ts';
 import { type RoomCreator, createRoomService } from './livekit.ts';
 import { GameService, type GameServiceDeps } from './service.ts';
-import { SessionManager } from './sessions.ts';
+import { SESSION_TTL_MS, SessionManager } from './sessions.ts';
 import { GameStore } from './store.ts';
 
 export type Listen = (
@@ -122,7 +122,7 @@ function readConfig(env: Record<string, string | undefined>, root: string): { co
   if (url !== '' && !isUrl(url, ['ws:', 'wss:', 'http:', 'https:'])) errors.push('LIVEKIT_URL должна быть адресом ws://, wss://, http:// или https://');
   const maxSessions = integer('MAX_SESSIONS', 3, 1, Number.MAX_SAFE_INTEGER, 'MAX_SESSIONS должна быть целым числом от 1');
   // Меньше секунды нельзя: TTL токена — целые секунды TTL сессии, и 0 секунд токен не выдать.
-  const sessionTtlMs = integer('SESSION_TTL_MS', 2 * 3600 * 1000, 1000, Number.MAX_SAFE_INTEGER, 'SESSION_TTL_MS должна быть целым числом от 1000');
+  const sessionTtlMs = integer('SESSION_TTL_MS', SESSION_TTL_MS, 1000, Number.MAX_SAFE_INTEGER, 'SESSION_TTL_MS должна быть целым числом от 1000');
   const port = integer('PORT', 8787, 1, 65535, 'PORT должна быть целым числом от 1 до 65535');
   if (errors.length > 0) return { config: null, errors };
   return {
@@ -179,7 +179,8 @@ export async function startServer(deps: StartDeps = {}): Promise<StartedServer |
   if (config.fake) log('[!] game-server: FAKE_ENGINE=1, ходы случайные, KataGo не используется');
 
   const bus = new EventBus();
-  const service = createService({ store: new GameStore(config.dataDir), engine, bus, log });
+  // Партия без активности дольше срока сессии считается брошенной: не занимает лимит и не получает задачу при init (D-0012).
+  const service = createService({ store: new GameStore(config.dataDir), engine, bus, staleGameMs: config.sessionTtlMs, log });
   try {
     await service.init();
   } catch (e) {
