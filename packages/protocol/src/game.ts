@@ -127,3 +127,22 @@ export type Via = z.infer<typeof Via>;
 
 export const By = z.enum(['human', 'engine', 'external', 'system']);
 export type By = z.infer<typeof By>;
+
+// Цвет места с данным контроллером; при двух одинаковых — чёрные. null, если такого места нет.
+export function seatColor(seats: { B: Seat; W: Seat }, controller: Controller): Color | null {
+  if (seats.B.controller === controller) return 'B';
+  if (seats.W.controller === controller) return 'W';
+  return null;
+}
+
+// Есть ли в партии Гоко. Партия двух людей разрешена (D-0005): Гоко в ней только комментирует.
+export function hasEngine(g: Pick<GameState, 'seats'>): boolean {
+  return seatColor(g.seats, 'engine') !== null;
+}
+
+// Цвет «человека» для текстов и сдачи у voice-agent и веба. В партии без движка людей двое,
+// и «ты» — тот, чей сейчас ход. Иначе место человека; без него — чёрные.
+export function humanColorOf(g: Pick<GameState, 'seats' | 'toPlay'>): Color {
+  if (!hasEngine(g) && g.seats[g.toPlay].controller === 'human') return g.toPlay;
+  return seatColor(g.seats, 'human') ?? 'B';
+}
