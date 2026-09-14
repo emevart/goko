@@ -225,6 +225,15 @@ describe('handleEvent: переподключение к той же парти�
     handleEvent({ type: 'session.game', gameId: 'g1' }, gap);
     expect(handleEvent(upd(replied(), { cause: 'sync', by: 'system' }), gap)).toBeNull();
   });
+  it('партия start_game, движок ходит первым: sync пустой доски, уже показанной потоком, ожидание не ставит', () => {
+    const s = waiting({});
+    s.toolGames.add('g1');
+    const first = fakeGame({ seats: { B: { controller: 'engine', rank: '10k' }, W: { controller: 'human' } }, moves: [], pendingEngineMove: true, revision: 1 });
+    expect(handleEvent(upd(first, { cause: 'new', by: 'system' }), s)).toBeNull(); // первый ход вернёт start_game
+    handleEvent({ type: 'session.game', gameId: 'g1' }, s);
+    expect(handleEvent(upd(first, { cause: 'sync', by: 'system' }), s)).toBeNull();
+    expect(s.awaitingReply).toBe(false);
+  });
   it('с прежним ожиданием sync того же хода его не снимает: таймаут инструмента уже случился', () => {
     const s = waiting({});
     handleEvent(upd(pending(), { cause: 'play', by: 'human', via: 'voice' }), s);
