@@ -20,6 +20,16 @@ export type StreamHandle = { done: Promise<void>; reopen: () => void };
 
 const defaultSleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
+// Исключение обработчика — ошибка страницы, а не сети. Попади оно в catch цикла, поток переподключался бы по кругу
+// (sync снова роняет обработчик), а из onConnected(false) или onLost отклонило бы done. Пишем в консоль и идём дальше.
+function callHandler(name: string, call: () => void): void {
+  try {
+    call();
+  } catch (e) {
+    console.error(`streamEvents: ${name} handler threw`, e);
+  }
+}
+
 export function streamEvents(
   client: Pick<GokoClient, 'events'>,
   sessionId: string,
@@ -55,14 +65,15 @@ export function streamEvents(
         for await (const ev of client.events({ sessionId }, current.signal)) {
           if (first) {
             first = false;
-            handlers.onConnected?.(true);
+            callHandler('onConnected', () => handlers.onConnected?.(true));
           }
-          handlers.onEvent(ev);
+          callHandler('onEvent', () => handlers.onEvent(ev));
         }
       } catch (e) {
         if (signal.aborted) return;
-        if (!reopening && e instanceof ApiError && e.code === 'not_found') {
-          handlers.onLost();
+        // not_found и во время reopen: сессии с этим id уже нет, переоткрытие получило бы тот же ответ.
+        if (e instanceof ApiError && e.code === 'not_found') {
+          callHandler('onLost', () => handlers.onLost());
           return;
         }
         wait = retryDelayMs(e);
@@ -76,7 +87,7 @@ export function streamEvents(
         attempt = 0;
         continue;
       }
-      handlers.onConnected?.(false);
+      callHandler('onConnected', () => handlers.onConnected?.(false));
       if (now() - openedAt >= STABLE_CONNECTION_MS) attempt = 0;
       const delay = RETRY_MS[Math.min(attempt, RETRY_MS.length - 1)] ?? 15_000;
       blockedUntil = wait > 0 ? now() + wait : 0;

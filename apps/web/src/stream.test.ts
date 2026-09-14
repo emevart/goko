@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ApiError, type EventsTarget, type GameEvent, type GameState, RETRY_MS, STABLE_CONNECTION_MS } from '@goko/protocol';
 import { type StreamHandle, needsRetry, streamEvents } from './stream.ts';
 
@@ -6,10 +6,17 @@ import { type StreamHandle, needsRetry, streamEvents } from './stream.ts';
 // Уже отменённый сигнал (reopen прямо из onEvent) обрывает сразу: событие abort второй раз не придёт.
 function untilAborted(signal: AbortSignal | undefined): Promise<never> {
   return new Promise((_resolve, reject) => {
-    if (signal?.aborted) reject(new DOMException('aborted', 'AbortError'));
+    if (signal?.aborted) {
+      reject(new DOMException('aborted', 'AbortError'));
+      return;
+    }
     signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')), { once: true });
   });
 }
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 describe('streamEvents', () => {
   it('отдаёт события, переподключается с паузой, останавливается по сигналу', async () => {
@@ -114,15 +121,120 @@ describe('streamEvents', () => {
   });
   it('not_found — сессия истекла: onLost и выход без повторов', async () => {
     const abort = new AbortController();
+    let connects = 0;
     const client = {
-      // eslint-disable-next-line require-yield
       async *events(): AsyncGenerator<GameEvent, void, undefined> {
+        connects++;
         throw new ApiError('not_found', 'session not found');
       },
     };
     let lost = 0;
-    await streamEvents(client, 's1', abort.signal, { onEvent: () => {}, onLost: () => lost++ }, async () => {}).done;
+    const slept: number[] = [];
+    // Пауза останавливает поток: без выхода после onLost тест упадёт на проверках, а не зависнет.
+    const pause = async (ms: number): Promise<void> => {
+      slept.push(ms);
+      abort.abort();
+    };
+    await streamEvents(client, 's1', abort.signal, { onEvent: () => {}, onLost: () => lost++ }, pause, () => 0).done;
     expect(lost).toBe(1);
+    expect(slept).toEqual([]);
+    expect(connects).toBe(1);
+  });
+  it('not_found во время reopen — сразу onLost, без переоткрытия', async () => {
+    const abort = new AbortController();
+    let connects = 0;
+    const client = {
+      async *events(): AsyncGenerator<GameEvent, void, undefined> {
+        connects++;
+        if (connects === 1) yield { type: 'session.game', gameId: 'g1' };
+        throw new ApiError('not_found', 'session not found');
+      },
+    };
+    let lost = 0;
+    const slept: number[] = [];
+    let handle: StreamHandle | null = null;
+    const pause = async (ms: number): Promise<void> => {
+      slept.push(ms);
+      abort.abort();
+    };
+    // reopen из onEvent: следующий шаг потока уже отвечает not_found.
+    handle = streamEvents(client, 's1', abort.signal, { onEvent: () => handle?.reopen(), onLost: () => lost++ }, pause, () => 0);
+    await handle.done;
+    expect(lost).toBe(1);
+    expect(connects).toBe(1);
+    expect(slept).toEqual([]);
+  });
+  it('исключение в onEvent и onConnected — не обрыв сети: поток не переподключается, ошибка в консоли', async () => {
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const abort = new AbortController();
+    let connects = 0;
+    const client = {
+      async *events(): AsyncGenerator<GameEvent, void, undefined> {
+        connects++;
+        yield { type: 'session.game', gameId: 'g1' };
+        yield { type: 'engine.thinking', gameId: 'g1', color: 'W' };
+        abort.abort();
+      },
+    };
+    const got: string[] = [];
+    const slept: number[] = [];
+    const handlers = {
+      onEvent: (ev: GameEvent) => {
+        got.push(ev.type);
+        throw new Error(`render failed on ${ev.type}`);
+      },
+      onConnected: () => {
+        throw new Error('connected handler failed');
+      },
+      onLost: () => {},
+    };
+    const pause = async (ms: number): Promise<void> => {
+      slept.push(ms);
+      abort.abort();
+    };
+    await expect(streamEvents(client, 's1', abort.signal, handlers, pause, () => 0).done).resolves.toBeUndefined();
+    expect(got).toEqual(['session.game', 'engine.thinking']);
+    expect(connects).toBe(1);
+    expect(slept).toEqual([]);
+    expect(errors).toHaveBeenCalledTimes(3);
+    expect(errors.mock.calls.map((c) => String(c[0]))).toEqual([
+      expect.stringContaining('onConnected'),
+      expect.stringContaining('onEvent'),
+      expect.stringContaining('onEvent'),
+    ]);
+  });
+  it('исключение в onConnected(false) и onLost не отклоняет done', async () => {
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const abort = new AbortController();
+    let connects = 0;
+    const client = {
+      async *events(): AsyncGenerator<GameEvent, void, undefined> {
+        connects++;
+        if (connects === 1) throw new TypeError('network error');
+        throw new ApiError('not_found', 'session not found');
+      },
+    };
+    const slept: number[] = [];
+    let lost = 0;
+    const handlers = {
+      onEvent: () => {},
+      onConnected: () => {
+        throw new Error('connected handler failed');
+      },
+      onLost: () => {
+        lost++;
+        throw new Error('lost handler failed');
+      },
+    };
+    const pause = async (ms: number): Promise<void> => {
+      slept.push(ms);
+      if (slept.length > 1) abort.abort();
+    };
+    await expect(streamEvents(client, 's1', abort.signal, handlers, pause, () => 0).done).resolves.toBeUndefined();
+    expect(slept).toEqual([1000]);
+    expect(connects).toBe(2);
+    expect(lost).toBe(1);
+    expect(errors.mock.calls.map((c) => String(c[0]))).toEqual([expect.stringContaining('onConnected'), expect.stringContaining('onLost')]);
   });
   it('reopen на живом потоке (кнопка «Повторить», D-0006): закрывает соединение и сразу открывает новое', async () => {
     const abort = new AbortController();
@@ -185,14 +297,13 @@ describe('streamEvents', () => {
     const abort = new AbortController();
     let connects = 0;
     const client = {
-      // eslint-disable-next-line require-yield
       async *events(): AsyncGenerator<GameEvent, void, undefined> {
         connects++;
         throw new TypeError('network error');
       },
     };
     const slept: number[] = [];
-    const handle = streamEvents(client, 's1', abort.signal, { onEvent: () => {}, onLost: () => {} }, (ms) => {
+    const pause = (ms: number): Promise<void> => {
       slept.push(ms);
       if (slept.length === 2) {
         handle.reopen();
@@ -200,7 +311,8 @@ describe('streamEvents', () => {
       }
       if (slept.length === 3) abort.abort();
       return Promise.resolve();
-    });
+    };
+    const handle = streamEvents(client, 's1', abort.signal, { onEvent: () => {}, onLost: () => {} }, pause, () => 0);
     await handle.done;
     expect(slept).toEqual([1000, 2000, 1000]);
     expect(connects).toBe(3);
@@ -231,7 +343,6 @@ describe('streamEvents', () => {
     const abort = new AbortController();
     let connects = 0;
     const client = {
-      // eslint-disable-next-line require-yield
       async *events(): AsyncGenerator<GameEvent, void, undefined> {
         connects++;
         throw new TypeError('network error');

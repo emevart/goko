@@ -12,7 +12,7 @@ export function upsertLine(lines: readonly Line[], line: Line): Line[] {
 }
 
 // Транскрипт моей речи публикует агент с lk.transcribed_track_id = sid моего микрофона; свою речь агент
-// помечает своим треком. Текст без трека от меня самого (lk.chat) — тоже «я».
+// помечает своим треком. Без трека — по отправителю; свои строки чата веб добавляет сам (chat.ts).
 export function whoOf(
   attrs: Readonly<Record<string, string>>,
   myTrackSids: ReadonlySet<string>,
