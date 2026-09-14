@@ -35,6 +35,8 @@ describe('handleEvent: подключение и новые партии', () =>
     expect(text).toContain('Продолжаем партию');
     expect(text).toContain('человек играет белыми');
     expect(text).toContain('сейчас ход человека');
+    expect(text).toContain('позиция уже на доске');
+    expect(text).toContain('Скажи вслух только: «Продолжаем партию, твой ход».');
     expect(s.gameId).toBe('g1');
     expect(s.humanColor).toBe('W');
   });
@@ -77,6 +79,8 @@ describe('handleEvent: подключение и новые партии', () =>
     expect(text).toContain('начал новую партию с экрана');
     expect(text).toContain('человек играет белыми');
     expect(text).toContain('5 кю');
+    expect(text).toContain('Первый ход твой, его назовёт следующее событие');
+    expect(text).toContain('Скажи вслух только: «Новая партия: ты играешь белыми, я — 5 кю, мой ход первый».');
     expect(s.awaitingReply).toBe(true);
     expect(s.gameId).toBe('g2');
   });
@@ -92,6 +96,7 @@ describe('handleEvent: подключение и новые партии', () =>
     s.lastTap = { cause: 'play', coord: 'D4' };
     const text = handleEvent(upd(fakeGame({ id: 'g2' }), { cause: 'new', by: 'system' }), s);
     expect(text).toContain('Первый ход человека');
+    expect(text).toContain('Скажи вслух только: «Новая партия: ты играешь чёрными, я — 10 кю, твой ход».');
     expect(s.awaitingReply).toBe(false);
     expect(s.lastTap).toBeNull();
   });
@@ -115,9 +120,10 @@ describe('handleEvent: подключение и новые партии', () =>
     expect(text).toContain('играют два человека');
     expect(text).toContain('сейчас ходят белые');
     expect(text).not.toContain('твой ход');
+    expect(text).toContain('Скажи вслух только: «Продолжаем партию, ходят белые».');
     expect(s.humanColor).toBeNull();
     const tap = fakeGame({ ...g, moves: [mv(1, 'B', 'D4'), mv(2, 'W', 'K10')], toPlay: 'B', revision: 2 });
-    expect(handleEvent(upd(tap, { cause: 'play', by: 'human', via: 'tap' }), s)).toContain('сыграл ка десять на экране');
+    expect(handleEvent(upd(tap, { cause: 'play', by: 'human', via: 'tap' }), s)).toBe('Человек тапом на экране сыграл ка десять, ход уже на доске. Скажи вслух только: «Ка десять».');
   });
 });
 
@@ -152,20 +158,22 @@ describe('handleEvent: переподключение к той же парти�
     handleEvent({ type: 'session.game', gameId: 'g1' }, voice);
     expect(handleEvent(upd(pending(), { cause: 'sync', by: 'system' }), voice)).toBeNull();
     expect(voice.awaitingReply).toBe(true);
-    expect(handleEvent(upd(replied(), { cause: 'engine', by: 'engine' }), voice)).toContain('Твой ход готов: ка десять');
+    expect(handleEvent(upd(replied(), { cause: 'engine', by: 'engine' }), voice)).toBe('Твой ход ка десять уже на доске. Скажи вслух только: «Ка десять».');
 
     const tap = waiting({ lastTap: true });
     handleEvent({ type: 'session.game', gameId: 'g1' }, tap);
     expect(handleEvent(upd(pending(), { cause: 'sync', by: 'system' }), tap)).toBeNull();
     expect(tap.awaitingReply).toBe(false);
-    expect(handleEvent(upd(replied(), { cause: 'engine', by: 'engine' }), tap)).toContain('сыграл дэ четыре на экране, ты ответил ка десять');
+    expect(handleEvent(upd(replied(), { cause: 'engine', by: 'engine' }), tap)).toBe(
+      'Человек тапом на экране сыграл дэ четыре, ход уже на доске. Твой ответ ка десять уже на доске. Скажи вслух только: «Ка десять».',
+    );
   });
   it('sync с pendingEngineMove без флагов ставит ожидание: ход движка озвучивается обычной фразой', () => {
     const s = waiting({});
     handleEvent({ type: 'session.game', gameId: 'g1' }, s);
     expect(handleEvent(upd(pending(), { cause: 'sync', by: 'system' }), s)).toBeNull();
     expect(s.awaitingReply).toBe(true);
-    expect(handleEvent(upd(replied(), { cause: 'engine', by: 'engine' }), s)).toContain('Твой ход готов: ка десять');
+    expect(handleEvent(upd(replied(), { cause: 'engine', by: 'engine' }), s)).toBe('Твой ход ка десять уже на доске. Скажи вслух только: «Ка десять».');
   });
   it('движок сходил во время обрыва: sync называет ход один раз той же фразой, что событие хода, и снимает флаги', () => {
     for (const flags of [{ awaitingReply: true }, { lastTap: true }, { awaitingReply: true, lastTap: true }]) {
@@ -241,7 +249,7 @@ describe('handleEvent: переподключение к той же парти�
     handleEvent({ type: 'session.game', gameId: 'g1' }, s);
     expect(handleEvent(upd(pending(), { cause: 'sync', by: 'system' }), s)).toBeNull();
     expect(s.awaitingReply).toBe(true);
-    expect(handleEvent(upd(replied(), { cause: 'engine', by: 'engine' }), s)).toContain('Твой ход готов: ка десять');
+    expect(handleEvent(upd(replied(), { cause: 'engine', by: 'engine' }), s)).toBe('Твой ход ка десять уже на доске. Скажи вслух только: «Ка десять».');
   });
   it('ход человека в разрыве без прежнего ожидания: sync нового хода ставит ожидание, ход движка озвучен событием', () => {
     const s = waiting({});
@@ -252,7 +260,7 @@ describe('handleEvent: переподключение к той же парти�
     expect(handleEvent(upd(tapped, { cause: 'sync', by: 'system' }), s)).toBeNull();
     expect(s.awaitingReply).toBe(true);
     const answered = fakeGame({ moves: [...tapped.moves, mv(4, 'W', 'G7')], toPlay: 'B', revision: 4 });
-    expect(handleEvent(upd(answered, { cause: 'engine', by: 'engine' }), s)).toBe('Твой ход готов: гэ семь. Назови его одной фразой.');
+    expect(handleEvent(upd(answered, { cause: 'engine', by: 'engine' }), s)).toBe('Твой ход гэ семь уже на доске. Скажи вслух только: «Гэ семь».');
   });
   it('отмена в разрыве, последним остался старый ход движка: sync молчит и снимает флаги', () => {
     for (const flags of [{ awaitingReply: true }, { lastTap: true }]) {
@@ -280,13 +288,17 @@ describe('handleEvent: переподключение к той же парти�
     handleEvent(upd(pending(), { cause: 'play', by: 'human', via: 'tap' }), s); // тап D4, движок думает
     handleEvent({ type: 'session.game', gameId: 'g1' }, s);
     const answered = fakeGame({ moves: [...moves, mv(4, 'W', 'G7')], toPlay: 'B', revision: 4 });
-    expect(handleEvent(upd(answered, { cause: 'sync', by: 'system' }), s)).toBe('Человек сыграл цэ три на экране, ты ответил гэ семь. Назови свой ход одной фразой.');
+    expect(handleEvent(upd(answered, { cause: 'sync', by: 'system' }), s)).toBe(
+      'Человек тапом на экране сыграл цэ три, ход уже на доске. Твой ответ гэ семь уже на доске. Скажи вслух только: «Гэ семь».',
+    );
     // Движок ещё думает над свежим тапом: ожидание остаётся, событие хода назовёт свежий тап.
     const t = waiting({ lastTap: true });
     handleEvent(upd(pending(), { cause: 'play', by: 'human', via: 'tap' }), t);
     handleEvent({ type: 'session.game', gameId: 'g1' }, t);
     expect(handleEvent(upd(fakeGame({ moves, toPlay: 'W', pendingEngineMove: true, revision: 3 }), { cause: 'sync', by: 'system' }), t)).toBeNull();
-    expect(handleEvent(upd(answered, { cause: 'engine', by: 'engine' }), t)).toBe('Человек сыграл цэ три на экране, ты ответил гэ семь. Назови свой ход одной фразой.');
+    expect(handleEvent(upd(answered, { cause: 'engine', by: 'engine' }), t)).toBe(
+      'Человек тапом на экране сыграл цэ три, ход уже на доске. Твой ответ гэ семь уже на доске. Скажи вслух только: «Гэ семь».',
+    );
   });
   it('запись seenMove другой партии (партию сменил инструмент, session.game не менял gameId) не считается показанным ходом', () => {
     const s = waiting({});
@@ -296,12 +308,14 @@ describe('handleEvent: переподключение к той же парти�
     expect(s.awaitingReply).toBe(true);
     const e = waiting({ awaitingReply: true });
     e.seenMove = { gameId: 'g0', n: 40 };
-    expect(handleEvent(upd(replied(), { cause: 'sync', by: 'system' }), e)).toBe('Твой ход готов: ка десять. Назови его одной фразой.');
+    expect(handleEvent(upd(replied(), { cause: 'sync', by: 'system' }), e)).toBe('Твой ход ка десять уже на доске. Скажи вслух только: «Ка десять».');
   });
   it('устаревший тап при первом ходе движка: ход человека не из чего взять — фраза по запомненному тапу', () => {
     const s = waiting({ lastTap: true });
     const g = fakeGame({ seats: { B: { controller: 'engine', rank: '10k' }, W: { controller: 'human' } }, moves: [mv(1, 'B', 'K10')], toPlay: 'W', revision: 1 });
-    expect(handleEvent(upd(g, { cause: 'engine', by: 'engine' }), s)).toBe('Человек сыграл дэ четыре на экране, ты ответил ка десять. Назови свой ход одной фразой.');
+    expect(handleEvent(upd(g, { cause: 'engine', by: 'engine' }), s)).toBe(
+      'Человек тапом на экране сыграл дэ четыре, ход уже на доске. Твой ответ ка десять уже на доске. Скажи вслух только: «Ка десять».',
+    );
   });
   it('sync другой партии без session.game — «продолжаем», флаги прежней партии сняты', () => {
     const s = waiting({ awaitingReply: true, lastTap: true });
@@ -323,7 +337,7 @@ describe('handleEvent: ходы', () => {
     const text = handleEvent(upd(afterReply, { cause: 'engine', by: 'engine' }), s);
     expect(text).toContain('дэ четыре');
     expect(text).toContain('ка десять');
-    expect(text).toContain('на экране');
+    expect(text).toBe('Человек тапом на экране сыграл дэ четыре, ход уже на доске. Твой ответ ка десять уже на доске. Скажи вслух только: «Ка десять».');
     expect(s.lastTap).toBeNull();
   });
   it('ответ движка на тап снимает и awaitingReply: следующий ход движка не озвучивается повторно', () => {
@@ -339,15 +353,25 @@ describe('handleEvent: ходы', () => {
     s.gameId = 'g1';
     handleEvent(upd(fakeGame({ moves: [mv(1, 'B', 'pass')], toPlay: 'W', pendingEngineMove: true }), { cause: 'pass', by: 'human', via: 'tap' }), s);
     const text = handleEvent(upd(fakeGame({ moves: [mv(1, 'B', 'pass'), mv(2, 'W', 'pass')], toPlay: 'B' }), { cause: 'engine', by: 'engine' }), s);
-    expect(text).toContain('спасовал');
-    expect(text).toContain('ответил пасом');
+    expect(text).toBe('Человек тапом на экране спасовал, пас уже записан. Твой ответ — пас, он уже сделан. Скажи вслух только: «Пас».');
+    // Тап хода, движок пасует; тап паса, движок ходит.
+    s.lastTap = { cause: 'play', coord: 'D4' };
+    expect(handleEvent(upd(fakeGame({ moves: [mv(1, 'B', 'D4'), mv(2, 'W', 'pass')], toPlay: 'B' }), { cause: 'engine', by: 'engine' }), s)).toBe(
+      'Человек тапом на экране сыграл дэ четыре, ход уже на доске. Твой ответ — пас, он уже сделан. Скажи вслух только: «Пас».',
+    );
+    s.lastTap = { cause: 'pass', coord: 'pass' };
+    expect(handleEvent(upd(fakeGame({ moves: [mv(1, 'B', 'pass'), mv(2, 'W', 'K10')], toPlay: 'B' }), { cause: 'engine', by: 'engine' }), s)).toBe(
+      'Человек тапом на экране спасовал, пас уже записан. Твой ответ ка десять уже на доске. Скажи вслух только: «Ка десять».',
+    );
   });
   it('тап без ответа движка (соперник external) озвучивается сразу', () => {
     const s = newAgentState('s1');
     s.gameId = 'g1';
     const g = fakeGame({ seats: { B: { controller: 'human' }, W: { controller: 'external' } }, moves: [mv(1, 'B', 'D4')], toPlay: 'W', pendingEngineMove: false });
-    expect(handleEvent(upd(g, { cause: 'play', by: 'human', via: 'tap' }), s)).toContain('сыграл дэ четыре на экране');
+    expect(handleEvent(upd(g, { cause: 'play', by: 'human', via: 'tap' }), s)).toBe('Человек тапом на экране сыграл дэ четыре, ход уже на доске. Скажи вслух только: «Дэ четыре».');
     expect(s.lastTap).toBeNull();
+    const passed = fakeGame({ ...g, moves: [mv(1, 'B', 'pass')] });
+    expect(handleEvent(upd(passed, { cause: 'pass', by: 'human', via: 'tap' }), s)).toBe('Человек тапом на экране спасовал, пас уже записан. Скажи вслух только: «Пас».');
   });
   it('голосовой ход и ответ на него молчат: их вернул инструмент', () => {
     const s = newAgentState('s1');
@@ -360,8 +384,12 @@ describe('handleEvent: ходы', () => {
     s.gameId = 'g1';
     s.awaitingReply = true;
     const text = handleEvent(upd(fakeGame({ moves: [mv(1, 'B', 'D4'), mv(2, 'W', 'K10')] }), { cause: 'engine', by: 'engine' }), s);
-    expect(text).toContain('Твой ход готов: ка десять');
+    expect(text).toBe('Твой ход ка десять уже на доске. Скажи вслух только: «Ка десять».');
     expect(s.awaitingReply).toBe(false);
+    s.awaitingReply = true;
+    expect(handleEvent(upd(fakeGame({ moves: [mv(1, 'B', 'D4'), mv(2, 'W', 'pass')] }), { cause: 'engine', by: 'engine' }), s)).toBe(
+      'Твой ход — пас, он уже сделан. Скажи вслух только: «Пас».',
+    );
   });
   it('humanFallback хода движка запоминается номером хода и снимается следующим обычным ходом (D-0007)', () => {
     const s = newAgentState('s1');
@@ -392,15 +420,20 @@ describe('handleEvent: ходы', () => {
     s.gameId = 'g1';
     s.awaitingReply = true;
     const text = handleEvent(upd(fakeGame({ toPlay: 'B' }), { cause: 'undo', by: 'human', via: 'tap' }), s);
-    expect(text).toContain('отменил');
-    expect(text).toContain('сейчас ход человека');
+    expect(text).toBe('Человек отменил последний ход кнопкой на экране, отмена уже на доске, сейчас ход человека. Скажи вслух только: «Ход отменён, твой ход».');
     expect(s.awaitingReply).toBe(false);
+    const engineTurn = fakeGame({ toPlay: 'W', moves: [mv(1, 'B', 'D4')] });
+    expect(handleEvent(upd(engineTurn, { cause: 'undo', by: 'human', via: 'tap' }), s)).toContain('Скажи вслух только: «Ход отменён».');
+    const twoHumans = fakeGame({ seats: { B: { controller: 'human' }, W: { controller: 'human' } }, toPlay: 'W', moves: [mv(1, 'B', 'D4')] });
+    expect(handleEvent(upd(twoHumans, { cause: 'undo', by: 'human', via: 'tap' }), s)).toContain('Скажи вслух только: «Ход отменён, ходят белые».');
   });
   it('ход внешнего соперника (стадия 2)', () => {
     const s = newAgentState('s1');
     s.gameId = 'g1';
     const text = handleEvent(upd(fakeGame({ moves: [mv(1, 'B', 'D4'), mv(2, 'W', 'K10')] }), { cause: 'play', by: 'external', via: 'api' }), s);
-    expect(text).toContain('Соперник сыграл ка десять');
+    expect(text).toBe('Соперник сыграл ка десять, ход уже на доске. Скажи вслух только: «Соперник: ка десять».');
+    const passed = handleEvent(upd(fakeGame({ moves: [mv(1, 'B', 'D4'), mv(2, 'W', 'pass')] }), { cause: 'pass', by: 'external', via: 'api' }), s);
+    expect(passed).toBe('Соперник спасовал, пас уже записан. Скажи вслух только: «Соперник: пас».');
   });
   it('sync и rank без смены партии молчат', () => {
     const s = newAgentState('s1');
@@ -415,7 +448,7 @@ describe('handleEvent: конец партии и ошибки', () => {
     const s = newAgentState('s1');
     s.gameId = 'g1';
     const ev: GameEvent = { type: 'game.finished', result: { winner: 'B', margin: 4.5, reason: 'score' } };
-    expect(handleEvent(ev, s)).toBe('Партия окончена: победа за тобой, разница 4,5 очка. Объяви результат одной фразой.');
+    expect(handleEvent(ev, s)).toBe('Партия окончена, итог уже записан: победа за тобой, разница 4,5 очка. Скажи вслух только: «Партия окончена: победа за тобой, разница 4,5 очка».');
     expect(s.announcedFinish).toBe('g1');
     expect(handleEvent(ev, s)).toBeNull();
   });
@@ -500,6 +533,9 @@ describe('handleEvent: конец партии и ошибки', () => {
     expect(text).toContain('следующая реплика человека');
     expect(text).not.toContain('повторит попытку сам');
     expect(text).not.toContain('background task');
+    expect(text).toBe(
+      'Сервер перестал повторять попытки: движок не отвечает, нужно повторить; следующая реплика человека сама запустит новую попытку. Скажи вслух только: «Движок не отвечает. Скажи или напиши что-нибудь, и я попробую снова».',
+    );
     expect(s.retriesExhausted).toBe(true);
   });
   it('отмена хода с экрана после итога: итог забыт, новый итог этой партии объявляется снова', () => {
@@ -513,7 +549,7 @@ describe('handleEvent: конец партии и ошибки', () => {
     expect(s.finished).toBeNull();
     expect(s.announcedFinish).toBeNull();
     const second: GameEvent = { type: 'game.finished', result: { winner: 'W', margin: 2.5, reason: 'score' } };
-    expect(handleEvent(second, s)).toBe('Партия окончена: победа за мной, разница 2,5 очка. Объяви результат одной фразой.');
+    expect(handleEvent(second, s)).toBe('Партия окончена, итог уже записан: победа за мной, разница 2,5 очка. Скажи вслух только: «Партия окончена: победа за мной, разница 2,5 очка».');
   });
   it('отмена голосом тоже забывает итог: ожидающий pass возьмёт новый, а не прежний', () => {
     const s = newAgentState('s1');
@@ -610,6 +646,39 @@ describe('handleEvent: конец партии и ошибки', () => {
   });
 });
 
+describe('handleEvent: реплики событий — факт, а не просьба применить ход (D-0013)', () => {
+  it('каждая реплика о ходе, отмене, партии, итоге и retries_exhausted говорит, что уже сделано, и что сказать вслух', () => {
+    const texts: (string | null)[] = [];
+    const s = () => {
+      const st = newAgentState('s1');
+      st.gameId = 'g1';
+      return st;
+    };
+    const tapped = s();
+    handleEvent(upd(fakeGame({ moves: [mv(1, 'B', 'D4')], toPlay: 'W', pendingEngineMove: true }), { cause: 'play', by: 'human', via: 'tap' }), tapped);
+    texts.push(handleEvent(upd(fakeGame({ moves: [mv(1, 'B', 'D4'), mv(2, 'W', 'K10')] }), { cause: 'engine', by: 'engine' }), tapped));
+    const timedOut = s();
+    timedOut.awaitingReply = true;
+    texts.push(handleEvent(upd(fakeGame({ moves: [mv(1, 'B', 'D4'), mv(2, 'W', 'K10')] }), { cause: 'engine', by: 'engine' }), timedOut));
+    const twoHumans = fakeGame({ seats: { B: { controller: 'human' }, W: { controller: 'human' } }, moves: [mv(1, 'B', 'D4')], toPlay: 'W' });
+    texts.push(handleEvent(upd(twoHumans, { cause: 'play', by: 'human', via: 'tap' }), s()));
+    texts.push(handleEvent(upd(fakeGame({ moves: [mv(1, 'B', 'D4'), mv(2, 'W', 'K10')] }), { cause: 'play', by: 'external', via: 'api' }), s()));
+    texts.push(handleEvent(upd(fakeGame(), { cause: 'undo', by: 'human', via: 'tap' }), s()));
+    texts.push(handleEvent(upd(fakeGame({ id: 'g2' }), { cause: 'new', by: 'system' }), s()));
+    texts.push(handleEvent(upd(fakeGame({ id: 'g2', seats: { B: { controller: 'human' }, W: { controller: 'human' } } }), { cause: 'new', by: 'system' }), s()));
+    texts.push(handleEvent(upd(fakeGame({ id: 'g3' }), { cause: 'sync', by: 'system' }), s()));
+    texts.push(handleEvent({ type: 'game.finished', result: { winner: 'W', margin: 2.5, reason: 'score' } }, s()));
+    texts.push(handleEvent({ type: 'error', gameId: 'g1', code: 'retries_exhausted', message: 'background task retries are exhausted' }, s(), () => 1));
+    expect(texts).toHaveLength(10);
+    for (const text of texts) {
+      expect(text).not.toBeNull();
+      expect(text).toMatch(/Скажи вслух только: «[^«»]+»\.$/);
+      expect(text).not.toMatch(/Назови|Объяви|Скажи одну короткую фразу/);
+      expect(text).toMatch(/уже (на доске|записан|сделан)|перестал повторять/);
+    }
+  });
+});
+
 describe('watchSession', () => {
   it('озвучивает инструкции, переподключается после обрыва, останавливается по сигналу', async () => {
     const s = newAgentState('s1');
@@ -632,7 +701,7 @@ describe('watchSession', () => {
     };
     const slept: number[] = [];
     await watchSession({ client, state: s, signal: abort.signal, speak: (t) => void spoken.push(t), now: () => 0, sleep: async (ms) => void slept.push(ms) }).done;
-    expect(spoken).toEqual(['Партия окончена: победа за тобой: я сдался. Объяви результат одной фразой.']);
+    expect(spoken).toEqual(['Партия окончена, итог уже записан: победа за тобой: я сдался. Скажи вслух только: «Партия окончена: победа за тобой: я сдался».']);
     expect(connects).toBe(2);
     expect(targets).toEqual([{ sessionId: 's1' }, { sessionId: 's1' }]);
     expect(slept).toEqual([RETRY_MS[0]]);
@@ -795,7 +864,7 @@ describe('watchSession', () => {
     };
     await watchSession({ client, state: s, signal: abort.signal, speak: (t) => void spoken.push(t), now: () => 0, sleep: async () => {} }).done;
     expect(connects).toBe(2);
-    expect(spoken).toEqual(['Твой ход готов: ка десять. Назови его одной фразой.']);
+    expect(spoken).toEqual(['Твой ход ка десять уже на доске. Скажи вслух только: «Ка десять».']);
   });
   it('retries_exhausted, реплика человека, переоткрытие: ход движка, ради которого открывали поток, озвучен (D-0006, I1)', async () => {
     const s = newAgentState('s1');
@@ -840,7 +909,7 @@ describe('watchSession', () => {
     expect(connects).toBe(2);
     expect(spoken).toHaveLength(2);
     expect(spoken[0]).toContain(humanText('retries_exhausted'));
-    expect(spoken[1]).toBe('Твой ход готов: ка десять. Назови его одной фразой.');
+    expect(spoken[1]).toBe('Твой ход ка десять уже на доске. Скажи вслух только: «Ка десять».');
   });
   it('реплика человека во время паузы переподключения ничего не делает', async () => {
     const s = newAgentState('s1');
@@ -1138,7 +1207,7 @@ describe('watchSession', () => {
     expect(connects).toBe(1);
     expect(slept).toEqual([]);
     expect(logs).toEqual(['[X] voice-agent: событие state.updated пропущено, обработка упала: Error: broken state']);
-    expect(spoken).toEqual(['Партия окончена: победа за тобой: я сдался. Объяви результат одной фразой.']);
+    expect(spoken).toEqual(['Партия окончена, итог уже записан: победа за тобой: я сдался. Скажи вслух только: «Партия окончена: победа за тобой: я сдался».']);
   });
   describe('зависшая реплика не держит остановку (Minor 2)', () => {
     // Несколько оборотов цикла событий без таймеров: успевают все микрозадачи после abort.

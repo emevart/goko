@@ -1,5 +1,8 @@
 // Озвучивание событий SSE (раздел 9 спеки). handleEvent — чистая функция: событие + память агента ->
-// инструкция для generateReply или null. watchSession — цикл чтения потока сессии с переподключением
+// текст события для реплики или null. Текст — факт (D-0013): что уже на доске и что сказать вслух. Он уходит
+// в историю разговора сообщением «Событие с экрана» (event-speech.ts), ответ модели — без инструментов.
+// Просьб «назови ход» и формулировок, похожих на ход человека, который надо применить, в тексте нет:
+// модель ставила такой ход сама через play_move. watchSession — цикл чтения потока сессии с переподключением
 // и переоткрытием после retries_exhausted (D-0006).
 // Паузы переподключения (RETRY_MS, STABLE_CONNECTION_MS, retryAfterMs) — общие с вебом, из @goko/protocol (задача 1).
 import {
@@ -23,7 +26,9 @@ export const ERROR_REPEAT_MS = 30_000;
 export const SESSION_EXPIRED_INSTRUCTIONS =
   'Сессия на сервере закончилась: истекла или сервер перезапущен. Скажи одной фразой, что эту игру отсюда не продолжить и нужно перезагрузить страницу.';
 
-const ONE_PHRASE = 'Скажи одну короткую фразу.';
+const capitalize = (text: string): string => text.charAt(0).toUpperCase() + text.slice(1);
+// Конец каждого текста события: дословная реплика. Кавычки внутри реплики не ставим.
+const sayOnly = (phrase: string): string => `Скажи вслух только: «${phrase}».`;
 
 function whoseTurn(g: GameState): string {
   if (!hasEngine(g)) return `сейчас ходят ${colorName(g.toPlay)}`;
@@ -42,11 +47,21 @@ function resetTurnFlags(state: AgentState) {
   state.awaitingReply = false;
 }
 
-function describeMove(coord: string): string {
-  return coord === 'pass' ? 'спасовал' : `сыграл ${speakMove(coord)}`;
+// Чей ход вслух: «твой ход» человеку, «мой ход» — ход Гоко, в партии двух людей — цвет.
+function turnSpoken(g: GameState): string {
+  if (!hasEngine(g)) return `ходят ${colorName(g.toPlay)}`;
+  return g.toPlay === humanColorOf(g) ? 'твой ход' : 'мой ход';
 }
 
-// Ход движка, которого ждали: после тапа — оба хода, после таймаута инструмента — «Твой ход готов». Флаги снимаются.
+// Ход человека тапом — уже на доске: «Человек тапом на экране сыграл дэ четыре, ход уже на доске.»
+function tapFact(coord: string): string {
+  return coord === 'pass' ? 'Человек тапом на экране спасовал, пас уже записан.' : `Человек тапом на экране сыграл ${speakMove(coord)}, ход уже на доске.`;
+}
+
+// Ход Гоко вслух: «Ка десять», «Пас».
+const moveSpoken = (coord: string): string => capitalize(speakMove(coord));
+
+// Ход движка, которого ждали: после тапа — оба хода, после таймаута инструмента — только ход Гоко. Флаги снимаются.
 // Не ждали (ответ на голосовой ход уже вернул инструмент) — null. Общая фраза для события engine и для sync,
 // в разрыве перед которым движок сходил. Ход человека — по позиции (prev, предпоследний ход): в разрыве потока
 // человек мог тапнуть ещё раз, и запомненный тап устарел. Без предыдущего хода — по запомненному тапу.
@@ -54,11 +69,12 @@ function engineReplyText(state: AgentState, last: Move, prev: Move | undefined):
   const tap = state.lastTap;
   const awaiting = state.awaitingReply;
   resetTurnFlags(state);
+  const said = sayOnly(moveSpoken(last.coord));
   if (tap) {
-    const reply = last.coord === 'pass' ? 'ответил пасом' : `ответил ${speakMove(last.coord)}`;
-    return `Человек ${describeMove((prev ?? tap).coord)} на экране, ты ${reply}. Назови свой ход одной фразой.`;
+    const reply = last.coord === 'pass' ? 'Твой ответ — пас, он уже сделан.' : `Твой ответ ${speakMove(last.coord)} уже на доске.`;
+    return `${tapFact((prev ?? tap).coord)} ${reply} ${said}`;
   }
-  if (awaiting) return `Твой ход готов: ${speakMove(last.coord)}. Назови его одной фразой.`;
+  if (awaiting) return `${last.coord === 'pass' ? 'Твой ход — пас, он уже сделан.' : `Твой ход ${speakMove(last.coord)} уже на доске.`} ${said}`;
   return null;
 }
 
@@ -92,7 +108,7 @@ function onStateUpdated(ev: Extract<GameEvent, { type: 'state.updated' }>, state
     case 'sync':
       if (fresh) {
         resetTurnFlags(state);
-        return `Продолжаем партию: ${seatsText(g)}, сделано ходов: ${g.moves.length}, ${whoseTurn(g)}. ${ONE_PHRASE} Ход не называй, пока его не вернул инструмент.`;
+        return `Продолжаем партию, позиция уже на доске: ${seatsText(g)}, сделано ходов: ${g.moves.length}, ${whoseTurn(g)}. Ходов не называй. ${sayOnly(`Продолжаем партию, ${turnSpoken(g)}`)}`;
       }
       // Переподключение к знакомой партии: сверяем ожидание хода движка с присланной позицией (I1).
       // Движок ещё думает — ответ впереди. Прежнее ожидание остаётся. Без него ждём, только если ход человека
@@ -117,27 +133,33 @@ function onStateUpdated(ev: Extract<GameEvent, { type: 'state.updated' }>, state
       if (state.toolGames.has(g.id)) return null;
       const engineColor = seatColor(g.seats, 'engine');
       if (engineColor === null) {
-        return `Человек начал с экрана новую партию двух людей: ты в ней не играешь, только комментируешь и выполняешь просьбы за того, чей ход. ${ONE_PHRASE}`;
+        return `Человек начал с экрана новую партию двух людей, она уже на доске: ты в ней не играешь, только комментируешь и выполняешь просьбы за того, чей ход. ${sayOnly(`Новая партия, ${turnSpoken(g)}`)}`;
       }
       const engineSeat = g.seats[engineColor];
+      const rank = engineSeat.rank ? speakRank(engineSeat.rank) : null;
       state.awaitingReply = g.pendingEngineMove;
-      return `Человек начал новую партию с экрана: ${seatsText(g)}, Гоко — ${engineSeat.rank ? speakRank(engineSeat.rank) : 'без ранга'}. ${g.pendingEngineMove ? 'Первый ход твой, его назовёт следующее событие: пока не выдумывай.' : 'Первый ход человека.'} ${ONE_PHRASE}`;
+      const spoken = `Новая партия: ты играешь ${colorNameInstrumental(humanColorOf(g))}${rank ? `, я — ${rank}` : ''}, ${g.pendingEngineMove ? 'мой ход первый' : 'твой ход'}`;
+      return `Человек начал новую партию с экрана, она уже на доске: ${seatsText(g)}, Гоко — ${rank ?? 'без ранга'}. ${g.pendingEngineMove ? 'Первый ход твой, его назовёт следующее событие: пока не выдумывай.' : 'Первый ход человека.'} ${sayOnly(spoken)}`;
     }
     case 'play':
     case 'pass':
     case 'correct': {
-      if (ev.by === 'external' && last) return `Соперник ${describeMove(last.coord)}. ${ONE_PHRASE}`;
+      if (ev.by === 'external' && last) {
+        const fact = last.coord === 'pass' ? 'Соперник спасовал, пас уже записан.' : `Соперник сыграл ${speakMove(last.coord)}, ход уже на доске.`;
+        return `${fact} ${sayOnly(`Соперник: ${speakMove(last.coord)}`)}`;
+      }
       if (ev.via !== 'tap' || !last) return null; // голосовой ход уже вернул инструмент
       if (g.pendingEngineMove) {
         state.lastTap = { cause: ev.cause, coord: last.coord };
         return null;
       }
-      return `Человек ${describeMove(last.coord)} на экране. ${ONE_PHRASE}`;
+      return `${tapFact(last.coord)} ${sayOnly(moveSpoken(last.coord))}`;
     }
     case 'undo':
       resetTurnFlags(state);
       if (ev.via !== 'tap') return null;
-      return `Человек отменил последний ход кнопкой на экране, ${whoseTurn(g)}. ${ONE_PHRASE}`;
+      // Ход Гоко после отмены назовёт событие хода движка: вслух — только «Ход отменён».
+      return `Человек отменил последний ход кнопкой на экране, отмена уже на доске, ${whoseTurn(g)}. ${sayOnly(hasEngine(g) && g.toPlay !== humanColorOf(g) ? 'Ход отменён' : `Ход отменён, ${turnSpoken(g)}`)}`;
     case 'engine': {
       if (!last) return null;
       // humanFallback есть только здесь (D-0007): get_position скажет о таком ходе, пока он на доске.
@@ -180,7 +202,8 @@ export function handleEvent(ev: GameEvent, state: AgentState, now: () => number 
       state.announcedFinish = state.gameId;
       resetTurnFlags(state);
       if (state.gameId !== null && state.awaitingFinish === state.gameId) return null; // итог вернёт инструмент pass
-      return `Партия окончена: ${describeResult(ev.result, state.humanColor)}. Объяви результат одной фразой.`;
+      const result = describeResult(ev.result, state.humanColor);
+      return `Партия окончена, итог уже записан: ${result}. ${sayOnly(`Партия окончена: ${result}`)}`;
     }
     case 'error': {
       // Событие прошлой партии, проскочившее при смене текущей: не озвучиваем и флаги не трогаем.
@@ -191,7 +214,8 @@ export function handleEvent(ev: GameEvent, state: AgentState, now: () => number 
       // (голосом или в чате) — инструкция ниже обещает человеку ровно это. Реплика — сразу.
       if (ev.code === 'retries_exhausted') {
         state.retriesExhausted = true;
-        return `Сервер перестал повторять попытки: ${humanText(ev.code)}. Передай это одной фразой от первого лица; следующая реплика человека сама запустит новую попытку.`;
+        const reason = humanText(ev.code);
+        return `Сервер перестал повторять попытки: ${reason}; следующая реплика человека сама запустит новую попытку. ${sayOnly(`${capitalize(reason.split(',')[0] ?? reason)}. Скажи или напиши что-нибудь, и я попробую снова`)}`;
       }
       const t = now();
       if (t - state.lastErrorAt < ERROR_REPEAT_MS) return null;
@@ -206,7 +230,7 @@ export function handleEvent(ev: GameEvent, state: AgentState, now: () => number 
 export type WatchOptions = {
   client: Pick<GokoClient, 'events'>;
   state: AgentState;
-  speak: (instructions: string) => Promise<void> | void;
+  speak: (text: string) => Promise<void> | void; // текст события; реплику строит event-speech.ts
   signal: AbortSignal;
   log?: (line: string) => void;
   delaysMs?: readonly number[]; // паузы по попыткам, последняя — потолок; по умолчанию RETRY_MS
