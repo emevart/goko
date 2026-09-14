@@ -347,7 +347,8 @@ export function createApp(deps: AppDeps): Hono {
     const req = await parseBody(c, NewGameRequest);
     // currentGameId ставит наблюдатель по session.game; сессия, истёкшая пока движок думал, не превращает
     // уже созданную партию в 404.
-    // Сессия, созданная до рестарта или другим путём, владельца не имеет: счёт по адресу запроса.
+    // Защитный путь: владелец пишется при POST /api/sessions, а сессии рестарт не переживают, поэтому в prod
+    // сессии без владельца нет. Сессия, появившаяся другим путём (тесты, будущие маршруты), — счёт по адресу запроса.
     return c.json(await service.create(req, { sessionId: sid, clientKey: sessionOwners.get(sid) ?? clientKey(c, trustProxy) }));
   });
 

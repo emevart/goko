@@ -202,7 +202,11 @@ export class GameService {
     // Идущие вызовы движка отменяются: остановка не ждёт раздумья, результат после close не применяется.
     for (const controller of this.taskAborts.values()) controller.abort();
     await Promise.allSettled([...this.engineTasks.values(), ...this.scoringTasks.values()]);
-    await this.marksWrite;
+    // Обработчик запроса может поставить запись отметки, пока close ждёт: цепочка читается заново, пока растёт.
+    for (let last: Promise<void> | undefined; last !== this.marksWrite; ) {
+      last = this.marksWrite;
+      await last;
+    }
   }
 
   // Сессия удалена или истекла: привязки её партий снимаются, события в её канал больше не идут.
@@ -220,8 +224,9 @@ export class GameService {
 
   // Действие человека на партии (мутирующий запрос, открытие потока событий): исчерпанная серия
   // повторов начинается заново. Во время идущей серии и для незнакомой партии ничего не делает.
+  // Брошенная сменой партия сверх лимита (D-0012) остаётся брошенной: поток открыт, но задача не ставится.
   resume(id: string): void {
-    this.reactivate(id);
+    if (this.reactivate(id)) return;
     if (!this.gaveUp.delete(id)) return;
     const state = this.games.get(id);
     if (state) this.kick(state);
@@ -232,7 +237,9 @@ export class GameService {
   // движок не зовётся. Отклонённая операция (not_your_turn, nothing_to_undo, отказ записи) задачу
   // ставит здесь, и серия идёт заново. resume (открытие потока) ставит задачу сразу: операции нет.
   private async humanAction<T>(id: string, human: boolean, op: () => Promise<T>): Promise<T> {
-    if (human) this.reactivate(id);
+    // Возврат к брошенной партии сверх лимита — отказ до операции: партия не меняется и остаётся брошенной.
+    const refused = human ? this.reactivate(id) : undefined;
+    if (refused) throw refused;
     const resumed = human && this.gaveUp.delete(id);
     try {
       return await op();
@@ -273,8 +280,8 @@ export class GameService {
     }
     const withRank = (seat: NewGameInput['black']) => (seat.controller === 'engine' && !seat.rank ? { ...seat, rank: DEFAULT_RANK } : seat);
     const replaced = opts.sessionId === undefined ? undefined : this.currentGameBySession.get(opts.sessionId);
-    this.checkActiveLimit(replaced);
-    if (opts.clientKey !== undefined) this.checkClientLimit(opts.clientKey, replaced);
+    const refused = this.activeLimitError(replaced) ?? (opts.clientKey === undefined ? undefined : this.clientLimitError(opts.clientKey, replaced));
+    if (refused) throw refused;
     const id = this.freeId();
     const state = newGame({
       id,
@@ -492,19 +499,20 @@ export class GameService {
   // Лимит незавершённых партий (D-0012). Партия, чей create ещё пишет снапшот, уже занимает место;
   // устаревшая (без активности дольше порога на момент create) и брошенная сменой — нет. replaced — текущая
   // партия сессии, в которой идёт create: новая партия её заменит, поэтому своей замене она не мешает.
-  private checkActiveLimit(replaced?: string): void {
+  // Отказ возвращается, а не бросается: create его бросает, resume молча оставляет партию брошенной.
+  private activeLimitError(replaced?: string): ApiError | undefined {
     const max = this.deps.maxActiveGames ?? MAX_ACTIVE_GAMES;
     const now = (this.deps.now?.() ?? new Date()).getTime();
     let active = 0;
     for (const state of this.games.values()) if (state.id !== replaced && state.status !== 'finished' && !this.isStale(state, now)) active++;
     for (const id of this.pendingCreates) if (!this.games.has(id)) active++;
-    if (active >= max) throw new ApiError('too_many_games', `limit of ${max} unfinished games reached`, { max });
+    return active >= max ? new ApiError('too_many_games', `limit of ${max} unfinished games reached`, { max }) : undefined;
   }
 
   // Лимит незавершённых партий на клиента (D-0012), счёт как у общего: создаваемая уже в счёте, завершённая,
   // устаревшая и брошенная сменой — нет, заменяемая текущая партия сессии — тоже нет. Брошенная не вычищается:
-  // возврат к ней вернёт её в счёт.
-  private checkClientLimit(clientKey: string, replaced?: string): void {
+  // возврат к ней пройдёт этот же лимит и вернёт её в счёт.
+  private clientLimitError(clientKey: string, replaced?: string): ApiError | undefined {
     const max = this.deps.maxGamesPerClient ?? MAX_GAMES_PER_CLIENT;
     const now = (this.deps.now?.() ?? new Date()).getTime();
     let active = 0;
@@ -517,7 +525,7 @@ export class GameService {
       if (key !== clientKey || id === replaced) continue;
       if (state ? !this.isStale(state, now) : this.pendingCreates.has(id)) active++;
     }
-    if (active >= max) throw new ApiError('too_many_games', `limit of ${max} unfinished games per client reached`, { max, scope: 'client' });
+    return active >= max ? new ApiError('too_many_games', `limit of ${max} unfinished games per client reached`, { max, scope: 'client' }) : undefined;
   }
 
   // Не в счёте лимитов и без задачи init: без активности дольше порога или брошена сменой партии (D-0012).
@@ -532,9 +540,18 @@ export class GameService {
     this.persistMark(id, true);
   }
 
-  // Человек вернулся к брошенной партии: она снова в счёте. Лимит не проверяется — партия не создаётся.
-  private reactivate(id: string): void {
-    if (this.abandoned.delete(id)) this.persistMark(id, false);
+  // Человек вернулся к брошенной партии: она снова в счёте, если проходит те же лимиты, что create (D-0012), —
+  // сначала общий, затем клиента, в чей счёт шла партия. Иначе возврат пустил бы один адрес по кругу
+  // «новая партия в сессии → открыть поток брошенной» на весь общий лимит. Сверх лимита отметка остаётся,
+  // и отказ возвращается вызывающему. Партия без записи клиента (создана до рестарта) проходит только общий лимит.
+  private reactivate(id: string): ApiError | undefined {
+    if (!this.abandoned.has(id)) return undefined;
+    const clientKey = this.clientByGame.get(id);
+    const refused = this.activeLimitError() ?? (clientKey === undefined ? undefined : this.clientLimitError(clientKey));
+    if (refused) return refused;
+    this.abandoned.delete(id);
+    this.persistMark(id, false);
+    return undefined;
   }
 
   // Отказ записи — строка [!], память уже верна. После рестарта незаписанная отметка значит, что партия
