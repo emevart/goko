@@ -1,19 +1,27 @@
 #!/usr/bin/env bash
 # Деплой на VPS: синхронизация репозитория, подстановка домена в livekit.yaml, compose up, статика.
-# Использование: infra/scripts/deploy.sh [--host goko] [--web-dir apps/web/dist]
+# Использование: infra/scripts/deploy.sh [--host goko] [--web-dir apps/web/dist] [--build-web]
+#   --build-web: собрать apps/web (npm run build:web) и выложить apps/web/dist как статику
 # Синхронизация идёт через rsync; если rsync нет (Git Bash на Windows) — через tar по ssh.
 set -euo pipefail
 trap 'echo "[X] deploy: ошибка на строке $LINENO" >&2' ERR
 HOST=goko
 WEB_DIR=""
+BUILD_WEB=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --host) HOST="$2"; shift 2;;
     --web-dir) WEB_DIR="$2"; shift 2;;
+    --build-web) BUILD_WEB=1; shift;;
     *) echo "unknown arg $1"; exit 2;;
   esac
 done
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+
+if [ "$BUILD_WEB" = 1 ]; then
+  (cd "$ROOT" && npm run build:web)
+  WEB_DIR="apps/web/dist"
+fi
 
 # .env живёт только на VPS: без него деплой обрывался бы уже после синхронизации
 if ! ssh "$HOST" test -r /opt/goko/.env; then
@@ -81,6 +89,8 @@ if [ -z "${ACME_EMAIL:-}" ]; then
   echo "[!]         письма об истечении сертификата уйдут в никуда. Впиши почту в /opt/goko/.env"
 fi
 sed "s/__TURN_DOMAIN__/${LK_HOST}/" /opt/goko/src/infra/livekit.yaml > /opt/goko/livekit.yaml
+# Снапшоты партий пишет node (uid 1000) в контейнере game-server; bootstrap создал /opt/goko/data от root.
+install -d -o 1000 -g 1000 /opt/goko/data/games
 cd /opt/goko/src/infra
 docker compose --env-file /opt/goko/.env up -d --build --remove-orphans
 docker compose --env-file /opt/goko/.env ps

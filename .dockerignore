@@ -1,0 +1,12 @@
+.git
+node_modules
+**/node_modules
+data
+apps/web/dist
+apps/go-engine/models
+apps/go-engine/bin
+.env
+.env.*
+docs
+spike
+*.log

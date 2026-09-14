@@ -26,6 +26,38 @@ RUN mkdir models \
  && echo "${MAIN_NET_SHA256}  models/main.txt.gz" | sha256sum -c - \
  && curl -fsSL -o models/human.bin.gz "${HUMAN_NET_URL}" \
  && echo "${HUMAN_NET_SHA256}  models/human.bin.gz" | sha256sum -c -
-COPY config/analysis.cfg /opt/katago/analysis.cfg
-# Стадия 1 добавит слой с Node и обёрткой; для замера стадии 0 достаточно этого образа.
-CMD ["/opt/katago/katago", "version"]
+COPY apps/go-engine/config/analysis.cfg /opt/katago/analysis.cfg
+# Сервис engine работает под node: бинарник, обёртка и сети должны читаться всеми,
+# даже если релизный zip кладёт файлы с правами 600.
+RUN chmod -R a+rX /opt/katago
+
+# Стадия engine: Node 22 с обёрткой поверх бинарника и сетей из стадии katago.
+FROM node:22-slim AS engine
+ENV NODE_ENV=production
+# libzip4 — имя пакета в Debian bookworm (в Ubuntu noble — libzip4t64); libgomp1 нужен eigen-сборке KataGo (OpenMP).
+RUN apt-get update && apt-get install -y --no-install-recommends libzip4 libgomp1 && rm -rf /var/lib/apt/lists/*
+COPY --from=katago /opt/katago /opt/katago
+WORKDIR /app
+# logDir = analysis_logs в analysis.cfg относительный: KataGo пишет в рабочий каталог /app/analysis_logs.
+# Каталог принадлежит node, compose монтирует сюда том engine_logs (новый том наследует владельца).
+RUN mkdir analysis_logs && chown node:node analysis_logs
+COPY package.json package-lock.json ./
+COPY packages/go-core/package.json packages/go-core/
+COPY packages/protocol/package.json packages/protocol/
+COPY apps/go-engine/package.json apps/go-engine/
+COPY apps/game-server/package.json apps/game-server/
+COPY apps/voice-agent/package.json apps/voice-agent/
+COPY apps/web/package.json apps/web/
+RUN npm ci --omit=dev --workspace apps/go-engine --include-workspace-root=false
+COPY packages/go-core/src packages/go-core/src
+COPY packages/protocol/src packages/protocol/src
+COPY apps/go-engine/src apps/go-engine/src
+COPY apps/go-engine/config apps/go-engine/config
+ENV KATAGO_BIN=/opt/katago/katago \
+    KATAGO_MODEL=/opt/katago/models/main.txt.gz \
+    KATAGO_HUMAN_MODEL=/opt/katago/models/human.bin.gz \
+    KATAGO_CONFIG=/opt/katago/analysis.cfg \
+    ENGINE_HOST=0.0.0.0 ENGINE_PORT=8788
+EXPOSE 8788
+USER node
+CMD ["node", "apps/go-engine/src/main.ts"]
