@@ -331,9 +331,10 @@ describe('таймауты клиента', () => {
     vi.useRealTimers();
   });
 
-  it('умолчания: play, pass, correct и новая партия 15 с, analyze 15 с, score 25 с, остальные 5 с', () => {
+  it('умолчания: создание сессии, play, pass, correct и новая партия 15 с, analyze 15 с, score 25 с, остальные 5 с', () => {
     expect(CLIENT_TIMEOUTS).toEqual({
-      create_session: 5_000,
+      // Выше 10 с ожидания createRoom на сервере: клиент видит код сервера, а не свой таймаут.
+      create_session: 15_000,
       session_new_game: 15_000,
       create_game: 15_000,
       get_game: 5_000,
@@ -465,6 +466,50 @@ describe('таймауты клиента', () => {
     await expect(client.getGame('g1')).rejects.toBeInstanceOf(ApiError);
     expect(f.calls).toHaveLength(2);
     for (const call of f.calls) expect(getEventListeners(call.init.signal as AbortSignal, 'abort')).toEqual([]);
+  });
+
+  it('долгоживущий внешний сигнал: слушатель снимается после ответа, ошибки и таймаута, AbortSignal.any не используется', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const any = vi.spyOn(AbortSignal, 'any');
+    try {
+      const f = fakeFetch([
+        () => Response.json(state),
+        () => Response.json({ error: { code: 'not_found', message: 'no game' } }, { status: 404 }),
+        (call) =>
+          new Promise<Response>((_resolve, reject) => {
+            const signal = call.init.signal ?? undefined;
+            signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
+          }),
+      ]);
+      const client = createClient({ baseUrl: 'http://api.test', appKey: 'k', fetch: f.fetch, timeoutMs: { get_game: 50 } });
+      const session = new AbortController();
+      expect((await client.getGame('g1', { signal: session.signal })).id).toBe('g1');
+      expect(getEventListeners(session.signal, 'abort')).toEqual([]);
+      await expect(client.getGame('g1', { signal: session.signal })).rejects.toBeInstanceOf(ApiError);
+      expect(getEventListeners(session.signal, 'abort')).toEqual([]);
+      const timed = capture(client.getGame('g1', { signal: session.signal }));
+      await tick();
+      // Пока вызов идёт, слушатель на внешнем сигнале ровно один.
+      expect(getEventListeners(session.signal, 'abort')).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(50);
+      expect((await settleWithin(timed)).value).toMatchObject({ code: 'client_timeout', operation: 'get_game' });
+      expect(getEventListeners(session.signal, 'abort')).toEqual([]);
+      // Сигнал запроса отменён таймаутом, внешний — нет.
+      expect(f.calls[2]?.init.signal?.aborted).toBe(true);
+      expect(session.signal.aborted).toBe(false);
+      expect(any).not.toHaveBeenCalled();
+    } finally {
+      any.mockRestore();
+    }
+  });
+
+  it('отмена внешнего сигнала после вызова не трогает уже завершённый запрос', async () => {
+    const f = fakeFetch(() => Response.json(state));
+    const client = createClient({ baseUrl: 'http://api.test', appKey: 'k', fetch: f.fetch });
+    const session = new AbortController();
+    expect((await client.getGame('g1', { signal: session.signal })).id).toBe('g1');
+    session.abort();
+    expect(f.calls[0]?.init.signal?.aborted).toBe(false);
   });
 
   it('ClientTimeoutError: английское сообщение для разработчика, код client_timeout', () => {

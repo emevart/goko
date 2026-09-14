@@ -24,9 +24,10 @@ import { parseSseStream } from './sse.ts';
 
 // Потолок ожидания ответа по операциям (раздел 5 спеки), в миллисекундах. Операции, которые
 // ждут ответ движка (play, pass, correct_last_move, новая партия), и analyze — 15 с: выше 8 с
-// ожидания хода и 10 с бюджета analyze на сервере; score — 25 с при бюджете сервера 20 с.
+// ожидания хода и 10 с бюджета analyze на сервере; score — 25 с при бюджете сервера 20 с;
+// create_session — 15 с при 10 с ожидания createRoom на сервере.
 export const CLIENT_TIMEOUTS = {
-  create_session: 5_000,
+  create_session: 15_000,
   session_new_game: 15_000,
   create_game: 15_000,
   get_game: 5_000,
@@ -69,29 +70,33 @@ export function createClient(opts: ClientOptions) {
 
   // Вызов целиком (заголовки и чтение тела) ограничен потолком операции и внешним сигналом.
   // Гонка с промисом отмены, а не только signal в fetch: тело, которое не приходит и на signal
-  // не реагирует, иначе держало бы вызов вечно.
+  // не реагирует, иначе держало бы вызов вечно. Сигнал запроса — свой контроллер, внешний сигнал
+  // лишь переносится в него слушателем, который снимается в finally: AbortSignal.any оставлял бы
+  // запись на долгоживущем внешнем сигнале (сигнал сессии воркера) после каждого вызова.
   async function bounded<T>(op: ClientOperation, callOpts: CallOptions | undefined, work: (signal: AbortSignal) => Promise<T>): Promise<T> {
     const external = callOpts?.signal;
     external?.throwIfAborted();
     const ms = opts.timeoutMs?.[op] ?? CLIENT_TIMEOUTS[op];
-    const timeoutError = new ClientTimeoutError(op, ms);
-    const timer = new AbortController();
-    const signal = external ? AbortSignal.any([external, timer.signal]) : timer.signal;
+    const controller = new AbortController();
+    const signal = controller.signal;
+    // Причина отмены — ClientTimeoutError по дедлайну или причина внешнего сигнала, что случится первым.
     let onAbort = (): void => {};
     const aborted = new Promise<never>((_resolve, reject) => {
-      onAbort = () => reject(timer.signal.aborted ? timeoutError : signal.reason);
+      onAbort = () => reject(signal.reason);
       signal.addEventListener('abort', onAbort, { once: true });
     });
-    const handle = setTimeout(() => timer.abort(timeoutError), ms);
+    const onExternalAbort = (): void => controller.abort(external?.reason);
+    external?.addEventListener('abort', onExternalAbort, { once: true });
+    const handle = setTimeout(() => controller.abort(new ClientTimeoutError(op, ms)), ms);
     try {
       return await Promise.race([work(signal), aborted]);
     } catch (e) {
-      if (timer.signal.aborted) throw timeoutError;
-      if (external?.aborted) throw external.reason;
+      if (signal.aborted) throw signal.reason;
       throw e;
     } finally {
       clearTimeout(handle);
       signal.removeEventListener('abort', onAbort);
+      external?.removeEventListener('abort', onExternalAbort);
     }
   }
 
