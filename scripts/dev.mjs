@@ -44,7 +44,9 @@ export function devPlan(parentEnv, exists, makeKey = () => randomBytes(24).toStr
     procs.push({ name: 'game-server', cmd: node, args: ['apps/game-server/src/main.ts'], env: { ...env, FAKE_ENGINE: '1', AGENT_NAME: DEV_AGENT_NAME, ALLOW_SESSIONLESS_GAMES: '1' } });
   }
 
-  if (exists('apps/web/package.json')) procs.push({ name: 'web', cmd: 'npm', args: ['run', 'dev', '--workspace', 'apps/web'], env, shell: isWindows });
+  // web — vite через node без оболочки: npm на Windows — это npm.cmd, cmd.exe на Ctrl+C спрашивает
+  // «Завершить выполнение пакетного файла?», и web не останавливается. vite.config.ts берётся из apps/web.
+  if (exists('apps/web/package.json')) procs.push({ name: 'web', cmd: node, args: ['node_modules/vite/bin/vite.js', 'apps/web', '--host', '127.0.0.1', '--port', '5173', '--strictPort'], env });
   else notes.push('[!] apps/web ещё нет: веб не запускаем');
   if (exists('apps/voice-agent/package.json')) procs.push({ name: 'voice-agent', cmd: node, args: ['apps/voice-agent/src/main.ts', 'dev'], env: { ...env, AGENT_NAME: DEV_AGENT_NAME } });
   else notes.push('[!] apps/voice-agent ещё нет: агента не запускаем');

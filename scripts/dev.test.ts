@@ -37,6 +37,14 @@ describe('dev: план запуска', () => {
     expect(plan.procs[2]?.env.AGENT_NAME).toBe(DEV_AGENT_NAME);
   });
 
+  it('web — vite через node без cmd.exe: Ctrl+C не спрашивает про пакетный файл', () => {
+    const plan = devPlan(secretEnv, (rel) => rel === 'apps/web/package.json');
+    const web = plan.procs.find((p) => p.name === 'web');
+    expect(web?.cmd).toBe(process.execPath);
+    expect(web?.args).toEqual(['node_modules/vite/bin/vite.js', 'apps/web', '--host', '127.0.0.1', '--port', '5173', '--strictPort']);
+    expect(web?.shell).toBeUndefined();
+  });
+
   it('строки для терминала не содержат значений переменных', () => {
     const plan = devPlan({ ...secretEnv, KATAGO_BIN: '/opt/katago', ENGINE_KEY: 'secret-engine' }, () => true);
     const printed = [...plan.notes, plan.ready].join('\n');
