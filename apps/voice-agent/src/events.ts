@@ -55,6 +55,15 @@ function onStateUpdated(ev: Extract<GameEvent, { type: 'state.updated' }>, state
   state.retriesExhausted = false; // был коммит или открытие потока: серия повторов перезапущена (D-0006)
   const last = g.moves.at(-1);
 
+  // Отмена хода вернула законченную партию в игру (кнопкой на экране или инструментом — via не важен):
+  // прежний итог устарел. Иначе game.finished промолчал бы о новом итоге (announcedFinish), а ожидающий
+  // pass взял бы старый (finished). Только undo: запоздавшее событие хода после resign инструментом
+  // тоже приходит с идущей партией, и сброс на нём дал бы второе объявление итога.
+  if (ev.cause === 'undo' && g.status === 'playing') {
+    if (state.finished?.gameId === g.id) state.finished = null;
+    if (state.announcedFinish === g.id) state.announcedFinish = null;
+  }
+
   if (g.status === 'finished') {
     resetTurnFlags(state);
     return null; // объявит game.finished

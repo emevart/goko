@@ -254,6 +254,56 @@ describe('handleEvent: конец партии и ошибки', () => {
     expect(text).not.toContain('background task');
     expect(s.retriesExhausted).toBe(true);
   });
+  it('отмена хода с экрана после итога: итог забыт, новый итог этой партии объявляется снова', () => {
+    const s = newAgentState('s1');
+    s.gameId = 'g1';
+    const first: GameEvent = { type: 'game.finished', result: { winner: 'B', margin: 4.5, reason: 'score' } };
+    expect(handleEvent(first, s)).not.toBeNull();
+    expect(s.finished).toEqual({ gameId: 'g1', result: first.result });
+    const undone = fakeGame({ moves: [mv(1, 'B', 'D4')], toPlay: 'B', status: 'playing' });
+    expect(handleEvent(upd(undone, { cause: 'undo', by: 'human', via: 'tap' }), s)).toContain('отменил');
+    expect(s.finished).toBeNull();
+    expect(s.announcedFinish).toBeNull();
+    const second: GameEvent = { type: 'game.finished', result: { winner: 'W', margin: 2.5, reason: 'score' } };
+    expect(handleEvent(second, s)).toBe('Партия окончена: победа за мной, разница 2,5 очка. Объяви результат одной фразой.');
+  });
+  it('отмена голосом тоже забывает итог: ожидающий pass возьмёт новый, а не прежний', () => {
+    const s = newAgentState('s1');
+    s.gameId = 'g1';
+    s.announcedFinish = 'g1';
+    s.finished = { gameId: 'g1', result: { winner: 'B', margin: 4.5, reason: 'score' } };
+    const undone = fakeGame({ moves: [mv(1, 'B', 'D4')], toPlay: 'B' });
+    // Событие отмены инструментом может обогнать его ответ: сброс не зависит от via.
+    expect(handleEvent(upd(undone, { cause: 'undo', by: 'human', via: 'voice' }), s)).toBeNull();
+    expect(s.finished).toBeNull();
+    expect(s.announcedFinish).toBeNull();
+    s.awaitingFinish = 'g1';
+    const result = { winner: 'W' as const, margin: 1.5, reason: 'score' as const };
+    expect(handleEvent({ type: 'game.finished', result }, s)).toBeNull();
+    expect(s.finished).toEqual({ gameId: 'g1', result });
+  });
+  it('итог не забывается без отмены, при законченной партии и для другой партии', () => {
+    const s = newAgentState('s1');
+    s.gameId = 'g1';
+    const old = { gameId: 'g1', result: { winner: 'B' as const, reason: 'resign' as const } };
+    s.announcedFinish = 'g1';
+    s.finished = old;
+    // Запоздавшее событие хода той же партии (партия ещё идёт) после resign инструментом: итог уже сказан.
+    handleEvent(upd(fakeGame({ moves: [mv(1, 'B', 'D4'), mv(2, 'W', 'K10')] }), { cause: 'engine', by: 'engine' }), s);
+    expect(s.announcedFinish).toBe('g1');
+    expect(s.finished).toBe(old);
+    expect(handleEvent({ type: 'game.finished', result: old.result }, s)).toBeNull();
+    // Отмена, после которой партия всё ещё окончена.
+    handleEvent(upd(fakeGame({ status: 'finished', result: old.result }), { cause: 'undo', by: 'human', via: 'tap' }), s);
+    expect(s.announcedFinish).toBe('g1');
+    expect(s.finished).toEqual(old);
+    // Отмена в другой партии не трогает итог прежней.
+    s.announcedFinish = 'g0';
+    s.finished = { ...old, gameId: 'g0' };
+    handleEvent(upd(fakeGame({ id: 'g1' }), { cause: 'undo', by: 'human', via: 'tap' }), s);
+    expect(s.announcedFinish).toBe('g0');
+    expect(s.finished).toEqual({ ...old, gameId: 'g0' });
+  });
   it('любой state.updated снимает retriesExhausted: серию перезапустил коммит', () => {
     const s = newAgentState('s1');
     s.gameId = 'g1';
