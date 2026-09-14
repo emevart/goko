@@ -3,7 +3,8 @@ name: goko
 #   set -a; . /opt/goko/.env; set +a; docker compose --env-file /opt/goko/.env ...
 # Парсер --env-file читает строку «KEY=   # комментарий» как значение «# комментарий»; переменные оболочки важнее файла.
 
-# Ротация логов Docker для сервисов приложения: voice-agent пишет расшифровки реплик, храниться бессрочно они не должны.
+# Ротация логов Docker для всех сервисов: voice-agent пишет расшифровки реплик, храниться бессрочно они не должны;
+# caddy и livekit пишут строки на каждое соединение, без max-size json-file рос бы до заполнения диска.
 x-logging: &logging
   driver: json-file
   options:
@@ -15,6 +16,7 @@ services:
     image: caddy:2
     network_mode: host
     restart: unless-stopped
+    logging: *logging
     environment:
       WEB_HOST: ${WEB_HOST}
       LK_HOST: ${LK_HOST}
@@ -37,6 +39,7 @@ services:
     image: ${LIVEKIT_IMAGE:-livekit/livekit-server:v1.13.6}
     network_mode: host
     restart: unless-stopped
+    logging: *logging
     command: --config /etc/livekit.yaml
     environment:
       LIVEKIT_KEYS: "${LIVEKIT_API_KEY}: ${LIVEKIT_API_SECRET}"
