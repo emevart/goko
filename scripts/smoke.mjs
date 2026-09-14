@@ -31,7 +31,7 @@ export const LIVEKIT_STUB = Object.freeze({
 
 // Переменные родителя, которые game-server в smoke не получает никогда: ключи LiveKit и OpenAI, и то, что
 // smoke задаёт сам: ключи приложения и движка свои, оба процесса локальные (иначе чужой SESSION_TTL_MS или MAX_SESSIONS из .env уронил бы запуск).
-const SERVER_OWNED = ['APP_KEY', 'ENGINE_KEY', 'PORT', 'HOST', 'DATA_DIR', 'FAKE_ENGINE', 'ENGINE_URL', 'AGENT_NAME', 'MAX_SESSIONS', 'SESSION_TTL_MS'];
+const SERVER_OWNED = ['APP_KEY', 'ENGINE_KEY', 'PORT', 'HOST', 'DATA_DIR', 'FAKE_ENGINE', 'ENGINE_URL', 'AGENT_NAME', 'MAX_SESSIONS', 'SESSION_TTL_MS', 'ALLOW_SESSIONLESS_GAMES'];
 const isForeignSecret = (name) => name.startsWith('LIVEKIT_') || name.startsWith('OPENAI_');
 
 // Окружение game-server для smoke. parentEnv — process.env (после .env) или {} для сервера в процессе.
@@ -43,7 +43,8 @@ const isForeignSecret = (name) => name.startsWith('LIVEKIT_') || name.startsWith
 export function gameServerEnv(parentEnv, { port, dataDir, real = false, engineUrl = '', engineKey = '' }) {
   const env = withoutEmpty(parentEnv);
   for (const name of Object.keys(env)) if (isForeignSecret(name) || SERVER_OWNED.includes(name)) delete env[name];
-  Object.assign(env, LIVEKIT_STUB, { APP_KEY: SMOKE_APP_KEY, PORT: String(port), HOST: '127.0.0.1', DATA_DIR: dataDir, AGENT_NAME: 'goko-smoke' });
+  // ALLOW_SESSIONLESS_GAMES=1: сценарий smoke создаёт партии через POST /api/games (create_game без сессии, D-0012).
+  Object.assign(env, LIVEKIT_STUB, { APP_KEY: SMOKE_APP_KEY, PORT: String(port), HOST: '127.0.0.1', DATA_DIR: dataDir, AGENT_NAME: 'goko-smoke', ALLOW_SESSIONLESS_GAMES: '1' });
   if (real) {
     env.ENGINE_URL = engineUrl;
     env.ENGINE_KEY = engineKey;

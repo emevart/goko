@@ -61,6 +61,8 @@ type MakeOptions = {
   engineKey?: string;
   rateLimits?: AppDeps['rateLimits'];
   trustProxy?: boolean;
+  maxGamesPerClient?: number;
+  sessionlessGames?: boolean;
 };
 
 async function make(opts: MakeOptions = {}) {
@@ -69,7 +71,9 @@ async function make(opts: MakeOptions = {}) {
   // Снапшоты в памяти: тесты ждут фоновый коммит по оборотам очереди, а настоящая запись на диск
   // под нагрузкой не укладывается ни в какое их число.
   const store = memoryStore();
-  const service = new GameService({ store, engine: opts.engine ?? engine, bus, replyTimeoutMs: 500 });
+  // Лимит на клиента по умолчанию высокий, а партии без сессии включены: прежние тесты создают партии
+  // клиентом протокола без адреса сокета (общий ключ unknown) и через POST /api/games. Новые тесты задают оба явно.
+  const service = new GameService({ store, engine: opts.engine ?? engine, bus, replyTimeoutMs: 500, maxGamesPerClient: opts.maxGamesPerClient ?? 1000 });
   opened.push(guardService(service));
   await service.init();
   const sessions = new SessionManager({ max: opts.maxSessions ?? 3, ttlMs: opts.ttlMs ?? 60_000, now: opts.now });
@@ -89,6 +93,7 @@ async function make(opts: MakeOptions = {}) {
     engineKey: opts.engineKey,
     rateLimits: opts.rateLimits,
     trustProxy: opts.trustProxy,
+    sessionlessGames: opts.sessionlessGames ?? true,
     log: (line) => logs.push(line),
   });
   // Клиент протокола поверх app.request: без сети.
@@ -1275,5 +1280,98 @@ describe('createApp: лимиты частоты (D-0012)', () => {
       server.close();
       if ('closeAllConnections' in server) server.closeAllConnections();
     }
+  });
+});
+
+describe('createApp: партии только в сессии и не больше трёх незавершённых на клиента (D-0012)', () => {
+  const H = { 'x-app-key': KEY, 'content-type': 'application/json' };
+  const from = (remoteAddress: string) => ({ incoming: { socket: { remoteAddress } } });
+  type App = Awaited<ReturnType<typeof make>>['app'];
+  type ErrorJson = { error: { code: string; message: string; details?: Record<string, unknown> } };
+  const post = (app: App, path: string, address: string, body?: unknown) =>
+    app.request(path, { method: 'POST', headers: H, ...(body ? { body: JSON.stringify(body) } : {}) }, from(address));
+  const sessionOf = async (app: App, address: string): Promise<string> => {
+    const res = await post(app, '/api/sessions', address);
+    expect(res.status).toBe(200);
+    return ((await res.json()) as { session: { id: string } }).session.id;
+  };
+  const gameIn = async (app: App, sid: string, address: string): Promise<string> => {
+    const res = await post(app, `/api/sessions/${sid}/games`, address, HUMAN_ONLY);
+    expect(res.status).toBe(200);
+    return ((await res.json()) as { state: { id: string } }).state.id;
+  };
+
+  it('новая партия в сессии бросает прежнюю: «Новая партия» подряд не упирается в лимит; ходы в брошенных возвращают их в счёт, и лишний create — 429 со scope client и своим текстом; сдача освобождает место', async () => {
+    const { app } = await make({ maxGamesPerClient: 2, ttlMs: 60 * MIN });
+    const sid = await sessionOf(app, '203.0.113.7');
+    const ids: string[] = [];
+    for (let i = 0; i < 4; i++) ids.push(await gameIn(app, sid, '203.0.113.7'));
+    // Возврат к брошенной партии лимит не проверяет: обе в счёте вместе с текущей, это три при лимите 2.
+    expect((await post(app, `/api/games/${ids[0]}/play`, '203.0.113.7', { coord: 'D4' })).status).toBe(200);
+    expect((await post(app, `/api/games/${ids[1]}/play`, '203.0.113.7', { coord: 'D4' })).status).toBe(200);
+    const refused = await post(app, `/api/sessions/${sid}/games`, '203.0.113.7', HUMAN_ONLY);
+    expect(refused.status).toBe(429);
+    const body = (await refused.json()) as ErrorJson;
+    expect(body.error).toEqual({ code: 'too_many_games', message: 'limit of 2 unfinished games per client reached', details: { max: 2, scope: 'client' } });
+    expect(humanText(body.error.code, body.error.details)).toBe('у тебя слишком много незаконченных партий, новую можно начать позже');
+    const other = await sessionOf(app, '203.0.113.8');
+    await gameIn(app, other, '203.0.113.8');
+    expect((await post(app, `/api/games/${ids[0]}/resign`, '203.0.113.7', { color: 'B' })).status).toBe(200);
+    await gameIn(app, sid, '203.0.113.7');
+  });
+
+  it('партии сессии идут в счёт владельца сессии, даже когда их создаёт voice-agent со своего адреса', async () => {
+    const { app } = await make({ maxGamesPerClient: 1, ttlMs: 60 * MIN });
+    const agent = '172.18.0.5'; // адрес контейнера voice-agent в сети compose: мимо Caddy, без X-Forwarded-For
+    const sid = await sessionOf(app, '198.51.100.20');
+    const first = await gameIn(app, sid, agent);
+    // Замена текущей партии сессии проходит и при лимите 1.
+    await gameIn(app, sid, '198.51.100.20');
+    // Ход агента в первой партии возвращает её в счёт владельца.
+    expect((await post(app, `/api/games/${first}/play`, agent, { coord: 'D4' })).status).toBe(200);
+    const refused = await post(app, `/api/sessions/${sid}/games`, agent, HUMAN_ONLY);
+    expect(refused.status).toBe(429);
+    expect(((await refused.json()) as ErrorJson).error.details).toEqual({ max: 1, scope: 'client' });
+    // Сессия другого телефона — свой счёт, хотя партии создаёт тот же агент.
+    const other = await sessionOf(app, '198.51.100.21');
+    await gameIn(app, other, agent);
+  });
+
+  it('владелец сессии за Caddy — последний адрес X-Forwarded-For при её создании', async () => {
+    const { app } = await make({ trustProxy: true, maxGamesPerClient: 1, ttlMs: 60 * MIN });
+    const viaProxy = (path: string, xff: string, body?: unknown) =>
+      app.request(path, { method: 'POST', headers: { ...H, 'x-forwarded-for': xff }, ...(body ? { body: JSON.stringify(body) } : {}) }, from('127.0.0.1'));
+    const a = ((await (await viaProxy('/api/sessions', '6.6.6.6, 203.0.113.60')).json()) as { session: { id: string } }).session.id;
+    const b = ((await (await viaProxy('/api/sessions', '6.6.6.6, 203.0.113.61')).json()) as { session: { id: string } }).session.id;
+    const g1 = await gameIn(app, a, '172.18.0.5');
+    await gameIn(app, a, '172.18.0.5');
+    expect((await post(app, `/api/games/${g1}/play`, '172.18.0.5', { coord: 'D4' })).status).toBe(200);
+    expect((await post(app, `/api/sessions/${a}/games`, '172.18.0.5', HUMAN_ONLY)).status).toBe(429);
+    // Владелец b — 203.0.113.61; по первому адресу X-Forwarded-For обе сессии делили бы счёт 6.6.6.6.
+    await gameIn(app, b, '172.18.0.5');
+  });
+
+  it('без sessionlessGames POST /api/games — 400 bad_request с reason sessionless_disabled до разбора тела; партия в сессии и чтение списка работают', async () => {
+    const { app, service } = await make({ sessionlessGames: false });
+    const res = await post(app, '/api/games', '192.0.2.40', HUMAN_ONLY);
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as ErrorJson;
+    expect(body).toEqual({ error: { code: 'bad_request', message: 'games are created only inside a session', details: { reason: 'sessionless_disabled' } } });
+    expect(humanText(body.error.code, body.error.details)).toBe('партии создаются только внутри сессии');
+    // Тело не разбирается: мусор получает тот же ответ, а не ошибку схемы.
+    expect(await (await app.request('/api/games', { method: 'POST', headers: H, body: 'not json' }, from('192.0.2.40'))).json()).toEqual(body);
+    expect(service.list()).toHaveLength(0);
+    const sid = await sessionOf(app, '192.0.2.40');
+    expect((await post(app, `/api/sessions/${sid}/games`, '192.0.2.40', HUMAN_ONLY)).status).toBe(200);
+    expect((await app.request('/api/games', { headers: H }, from('192.0.2.40'))).status).toBe(200);
+  });
+
+  it('с sessionlessGames POST /api/games создаёт партию, и она в счёте адреса; IPv6 одной /64 — один клиент', async () => {
+    const { app } = await make({ sessionlessGames: true, maxGamesPerClient: 1 });
+    expect((await post(app, '/api/games', '192.0.2.41', HUMAN_ONLY)).status).toBe(200);
+    expect((await post(app, '/api/games', '192.0.2.41', HUMAN_ONLY)).status).toBe(429);
+    expect((await post(app, '/api/games', '192.0.2.42', HUMAN_ONLY)).status).toBe(200);
+    expect((await post(app, '/api/games', '2001:db8:5:6::1', HUMAN_ONLY)).status).toBe(200);
+    expect((await post(app, '/api/games', '2001:db8:5:6::2', HUMAN_ONLY)).status).toBe(429);
   });
 });

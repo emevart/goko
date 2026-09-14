@@ -46,6 +46,9 @@ export type AppDeps = {
   rateLimits?: { api: RateRule; create: RateRule };
   // TRUST_PROXY=1: адрес клиента — последний в X-Forwarded-For (его дописывает Caddy), иначе адрес сокета.
   trustProxy?: boolean;
+  // ALLOW_SESSIONLESS_GAMES=1: POST /api/games создаёт партию без сессии (dev, smoke). Без флага партии создаются
+  // только внутри сессии (D-0012): публичный APP_KEY иначе давал бы партии мимо MAX_SESSIONS.
+  sessionlessGames?: boolean;
   log?: (line: string) => void;
 };
 
@@ -283,10 +286,14 @@ export function createApp(deps: AppDeps): Hono {
   // currentGameId переключается здесь же, по session.game: порядок совпадает с порядком событий
   // в потоке, а не с порядком ответов (ответ с ходом движка приходит позже).
   const watchers = new Map<string, () => void>();
+  // Владелец сессии — ключ адреса, создавшего её (D-0012): партии сессии идут в его счёт, даже когда их
+  // создаёт voice-agent со своего адреса. Запись живёт, пока жив наблюдатель сессии.
+  const sessionOwners = new Map<string, string>();
   const isAlive = (sid: string) => sessions.list().some((s) => s.id === sid);
   const unwatch = (sid: string) => {
     watchers.get(sid)?.();
     watchers.delete(sid);
+    sessionOwners.delete(sid);
   };
   const pruneWatchers = () => {
     for (const sid of [...watchers.keys()]) if (!isAlive(sid)) unwatch(sid);
@@ -327,6 +334,7 @@ export function createApp(deps: AppDeps): Hono {
       deps.log?.(`[X] game-server: сессия ${session.id} не создана: ${redact(e instanceof Error ? e.message : String(e))}`);
       throw new ApiError('internal', 'could not prepare the LiveKit room for the session');
     }
+    sessionOwners.set(session.id, clientKey(c, trustProxy));
     watch(session.id);
     return c.json({ session, livekit: { url: deps.livekit.url, token } });
   });
@@ -339,7 +347,8 @@ export function createApp(deps: AppDeps): Hono {
     const req = await parseBody(c, NewGameRequest);
     // currentGameId ставит наблюдатель по session.game; сессия, истёкшая пока движок думал, не превращает
     // уже созданную партию в 404.
-    return c.json(await service.create(req, { sessionId: sid }));
+    // Сессия, созданная до рестарта или другим путём, владельца не имеет: счёт по адресу запроса.
+    return c.json(await service.create(req, { sessionId: sid, clientKey: sessionOwners.get(sid) ?? clientKey(c, trustProxy) }));
   });
 
   app.get('/api/sessions/:sid/events', (c) => {
@@ -355,7 +364,10 @@ export function createApp(deps: AppDeps): Hono {
   });
 
   // ---- партии ----
-  app.post('/api/games', async (c) => c.json(await service.create(await parseBody(c, NewGameRequest))));
+  app.post('/api/games', async (c) => {
+    if (deps.sessionlessGames !== true) throw new ApiError('bad_request', 'games are created only inside a session', { reason: 'sessionless_disabled' });
+    return c.json(await service.create(await parseBody(c, NewGameRequest), { clientKey: clientKey(c, trustProxy) }));
+  });
   app.get('/api/games', (c) => c.json({ games: service.list() }));
   app.get('/api/games/:id', (c) => c.json(service.get(c.req.param('id'))));
   app.post('/api/games/:id/play', async (c) => c.json(await service.play(c.req.param('id'), await parseBody(c, PlayRequest))));

@@ -83,6 +83,7 @@ type Config = {
   port: number;
   hostname: string;
   trustProxy: boolean;
+  sessionlessGames: boolean;
 };
 
 // Пустая или из пробелов переменная — то же, что не заданная: так читается infra/.env.example,
@@ -140,6 +141,8 @@ function readConfig(env: Record<string, string | undefined>, root: string): { co
       // Только за своим прокси (Caddy): иначе X-Forwarded-For подставляет сам клиент (D-0012).
       // Включает ровно 1, пробелы по краям не мешают: «1 » из .env не должен молча выключить доверие.
       trustProxy: optional('TRUST_PROXY')?.trim() === '1',
+      // POST /api/games без сессии — только dev и smoke (D-0012); в prod compose переменной нет.
+      sessionlessGames: optional('ALLOW_SESSIONLESS_GAMES')?.trim() === '1',
     },
     errors: [],
   };
@@ -181,7 +184,9 @@ export async function startServer(deps: StartDeps = {}): Promise<StartedServer |
 
   const bus = new EventBus();
   // Партия без активности дольше срока сессии считается брошенной: не занимает лимит и не получает задачу при init (D-0012).
-  const service = createService({ store: new GameStore(config.dataDir), engine, bus, staleGameMs: config.sessionTtlMs, log });
+  // Одно хранилище и для снапшотов, и для отметок брошенных партий (D-0012): отметки лежат рядом с <id>.json.
+  const store = new GameStore(config.dataDir);
+  const service = createService({ store, marks: store, engine, bus, staleGameMs: config.sessionTtlMs, log });
   try {
     await service.init();
   } catch (e) {
@@ -206,6 +211,7 @@ export async function startServer(deps: StartDeps = {}): Promise<StartedServer |
     inFlight,
     engineKey: config.engineKey,
     trustProxy: config.trustProxy,
+    sessionlessGames: config.sessionlessGames,
     log,
   });
 

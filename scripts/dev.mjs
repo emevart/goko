@@ -35,12 +35,13 @@ export function devPlan(parentEnv, exists, makeKey = () => randomBytes(24).toStr
     if (!env.ENGINE_KEY) notes.push('[!] ENGINE_KEY не задан: game-server и go-engine получат разовый ключ на этот запуск');
     const enginePort = env.ENGINE_PORT ?? '8788';
     procs.push({ name: 'go-engine', cmd: node, args: ['apps/go-engine/src/main.ts'], env: { ...env, ENGINE_KEY: /** @type {string} */ (engineKey), ENGINE_PORT: enginePort } });
-    const serverEnv = { ...env, ENGINE_KEY: /** @type {string} */ (engineKey), ENGINE_URL: `http://127.0.0.1:${enginePort}`, AGENT_NAME: DEV_AGENT_NAME };
+    // dev и smoke разрешают партии без сессии (curl, отладка); в prod compose флага нет (D-0012).
+    const serverEnv = { ...env, ENGINE_KEY: /** @type {string} */ (engineKey), ENGINE_URL: `http://127.0.0.1:${enginePort}`, AGENT_NAME: DEV_AGENT_NAME, ALLOW_SESSIONLESS_GAMES: '1' };
     delete serverEnv.FAKE_ENGINE;
     procs.push({ name: 'game-server', cmd: node, args: ['apps/game-server/src/main.ts'], env: serverEnv });
   } else {
     notes.push('[!] KATAGO_BIN не задан: game-server с FAKE_ENGINE=1, ходы случайные');
-    procs.push({ name: 'game-server', cmd: node, args: ['apps/game-server/src/main.ts'], env: { ...env, FAKE_ENGINE: '1', AGENT_NAME: DEV_AGENT_NAME } });
+    procs.push({ name: 'game-server', cmd: node, args: ['apps/game-server/src/main.ts'], env: { ...env, FAKE_ENGINE: '1', AGENT_NAME: DEV_AGENT_NAME, ALLOW_SESSIONLESS_GAMES: '1' } });
   }
 
   if (exists('apps/web/package.json')) procs.push({ name: 'web', cmd: 'npm', args: ['run', 'dev', '--workspace', 'apps/web'], env, shell: isWindows });

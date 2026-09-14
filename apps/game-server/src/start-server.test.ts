@@ -94,7 +94,7 @@ function harness(opts: HarnessOptions = {}): { deps: StartDeps; rec: Recorder } 
     finishServiceClose: () => serviceDone?.(),
   };
   const deps: StartDeps = {
-    env: { ...BASE_ENV, DATA_DIR: dir },
+    env: { ...BASE_ENV, DATA_DIR: dir, ALLOW_SESSIONLESS_GAMES: '1' },
     listen: (app, port, hostname, onReady, onError) => {
       rec.events.push('listen');
       rec.listens.push({ port, hostname });
@@ -354,6 +354,8 @@ describe('startServer: конфигурация из env', () => {
     if (!started) throw new Error('сервер не запустился');
     expect(rec.listens).toEqual([{ port: 18787, hostname: '0.0.0.0' }]);
     expect(rec.serviceDeps[0]?.store.dir).toBe(dir);
+    // Отметки брошенных партий лежат в том же каталоге, что и снапшоты (D-0012).
+    expect(rec.serviceDeps[0]?.marks).toBe(rec.serviceDeps[0]?.store);
     expect(rec.serviceDeps[0]?.log).toBe(deps.log);
     // Порог устаревшей партии — тот же SESSION_TTL_MS.
     expect(rec.serviceDeps[0]?.staleGameMs).toBe(60_000);
@@ -397,6 +399,23 @@ describe('startServer: конфигурация из env', () => {
       for (let i = 0; i < 60; i++) expect((await send(started.app, `10.0.0.9, 203.0.113.1`)).status).toBe(200);
       expect((await send(started.app, '203.0.113.1')).status, `TRUST_PROXY=${value}`).toBe(429);
       expect((await send(started.app, '203.0.113.2')).status, `TRUST_PROXY=${value}`).toBe(trusted ? 200 : 429);
+    }
+  });
+
+  it('ALLOW_SESSIONLESS_GAMES=1 (и 1 с пробелами) разрешает POST /api/games; без него, пустой, из пробелов или другой — 400 sessionless_disabled; партия в сессии создаётся всегда', async () => {
+    say();
+    const headers = { 'x-app-key': BASE_ENV.APP_KEY, 'content-type': 'application/json' };
+    const body = JSON.stringify({ black: { controller: 'human' }, white: { controller: 'human' }, settings: { boardSize: 9 } });
+    for (const [value, allowed] of [['1', true], [' 1 ', true], [undefined, false], ['', false], ['   ', false], ['0', false], ['true', false], ['11', false]] as const) {
+      const { deps } = harness();
+      const started = await startServer({ ...deps, env: { ...deps.env, ALLOW_SESSIONLESS_GAMES: value } });
+      if (!started) throw new Error('сервер не запустился');
+      const res = await started.app.request('/api/games', { method: 'POST', headers, body });
+      expect(res.status, `ALLOW_SESSIONLESS_GAMES=${value}`).toBe(allowed ? 200 : 400);
+      if (!allowed) expect(((await res.json()) as { error: { details?: unknown } }).error.details).toEqual({ reason: 'sessionless_disabled' });
+      const created = await started.app.request('/api/sessions', { method: 'POST', headers });
+      const { session } = (await created.json()) as { session: { id: string } };
+      expect((await started.app.request(`/api/sessions/${session.id}/games`, { method: 'POST', headers, body })).status).toBe(200);
     }
   });
 
