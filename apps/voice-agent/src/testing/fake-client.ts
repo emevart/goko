@@ -52,8 +52,9 @@ export type FakeClient = ToolClient & {
   signals: Array<AbortSignal | undefined>; // сигнал каждого вызова по порядку: инструменты передают deps.signal
   game: GameState | null;
   replyTimedOut: boolean; // следующий play/pass/correct вернёт replyTimedOut без ответа движка
-  // Следующий вызов бросает err. 'before' (по умолчанию) — до всякой работы; 'after' — только play, pass и
-  // correct: ход и ответ движка уже записаны, а вызов бросает (таймаут клиента после записи на сервере).
+  // Следующий вызов любого метода бросает err. 'before' (по умолчанию) — до всякой работы; 'after' — только
+  // play, pass и correct: ход и ответ движка уже записаны, а вызов бросает (таймаут клиента после записи на
+  // сервере). 'after', а следующим позван другой метод — ошибка самого теста.
   failNext(err: Error, when?: 'before' | 'after'): void;
 };
 
@@ -75,7 +76,7 @@ export function createFakeClient(opts: FakeClientOptions = {}): FakeClient {
     },
     async newGame(sessionId: string, req: NewGameRequest, o?: CallOptions): Promise<NewGameResponse> {
       record('newGame', o, sessionId, req);
-      throwPending();
+      throwPendingAny();
       const komi = req.settings?.komi ?? 7.5;
       self.game = fakeGame({
         id: `g${++n}`,
@@ -96,7 +97,7 @@ export function createFakeClient(opts: FakeClientOptions = {}): FakeClient {
     },
     async correct(id: string, req: CorrectRequest, o?: CallOptions): Promise<PlayResponse> {
       record('correct', o, id, req);
-      throwPending();
+      throwPendingBefore();
       const g = need();
       g.moves = g.moves.slice(0, -2);
       return humanMove(req.coord);
@@ -107,7 +108,7 @@ export function createFakeClient(opts: FakeClientOptions = {}): FakeClient {
     },
     async resign(id: string, req: ResignRequest, o?: CallOptions): Promise<StateResponse> {
       record('resign', o, id, req);
-      throwPending();
+      throwPendingAny();
       const g = need();
       g.status = 'finished';
       g.result = { winner: req.color === 'B' ? 'W' : 'B', reason: 'resign' };
@@ -116,17 +117,21 @@ export function createFakeClient(opts: FakeClientOptions = {}): FakeClient {
     },
     async undo(id: string, req: UndoRequest = {}, o?: CallOptions): Promise<UndoResponse> {
       record('undo', o, id, req);
-      throwPending();
+      throwPendingAny();
       const g = need();
       if (g.moves.length === 0) throw new ApiError('nothing_to_undo', 'nothing to undo');
       const removed = g.moves.slice(-2);
       g.moves = g.moves.slice(0, -2);
       g.toPlay = seatColor(g.seats, 'human') ?? 'B';
+      // Как у сервера после счёта: партия снова идёт, итога нет.
+      g.status = 'playing';
+      delete g.result;
       g.revision++;
       return { state: g, removed };
     },
     async getGame(id: string, o?: CallOptions): Promise<GameState> {
       record('getGame', o, id);
+      throwPendingAny();
       const g = need();
       if (pollsLeft > 0) pollsLeft--;
       if (pollsLeft === 0) {
@@ -138,11 +143,12 @@ export function createFakeClient(opts: FakeClientOptions = {}): FakeClient {
     },
     async ascii(id: string, o?: CallOptions): Promise<string> {
       record('ascii', o, id);
+      throwPendingAny();
       return opts.ascii ?? '# g1 rev 2 playing toPlay B moves 2\n   A B C\n 3 . . .\n 2 . . .\n 1 . . .\n';
     },
     async analyze(id: string, req = {}, o?: CallOptions): Promise<Analysis> {
       record('analyze', o, id, req);
-      throwPending();
+      throwPendingAny();
       return {
         visits: 50,
         winrateB: 0.7,
@@ -166,7 +172,7 @@ export function createFakeClient(opts: FakeClientOptions = {}): FakeClient {
     },
     async setRank(id: string, req: SetRankRequest, o?: CallOptions): Promise<StateResponse> {
       record('setRank', o, id, req);
-      throwPending();
+      throwPendingAny();
       const g = need();
       g.seats[req.color] = { ...g.seats[req.color], rank: req.rank };
       g.revision++;
@@ -181,12 +187,22 @@ export function createFakeClient(opts: FakeClientOptions = {}): FakeClient {
     self.signals.push(o?.signal);
     o?.signal?.throwIfAborted();
   }
-  function throwPending() {
+  // Ход, пас и поправка: 'before' бросается здесь, 'after' — в throwPendingAfter после записи хода.
+  function throwPendingBefore() {
     if (pending && !pendingAfter) {
       const e = pending;
       pending = null;
       throw e;
     }
+  }
+  // Остальные методы: 'after' им не положен.
+  function throwPendingAny() {
+    if (pending && pendingAfter) {
+      pending = null;
+      pendingAfter = false;
+      throw new Error('fake client: failNext(err, "after") works only for play, pass and correct');
+    }
+    throwPendingBefore();
   }
   function throwPendingAfter() {
     if (pending && pendingAfter) {
@@ -214,7 +230,7 @@ export function createFakeClient(opts: FakeClientOptions = {}): FakeClient {
     return move;
   }
   function humanMove(coord: string): PlayResponse {
-    throwPending();
+    throwPendingBefore();
     const res = applyHumanMove(coord);
     throwPendingAfter();
     return res;

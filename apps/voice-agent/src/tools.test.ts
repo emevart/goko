@@ -1,13 +1,15 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { ApiError, ClientTimeoutError, type GameState, HttpError, humanText } from '@goko/protocol';
 import { type AgentState, newAgentState } from './state.ts';
 import { createFakeClient, fakeGame } from './testing/fake-client.ts';
 import {
   ASSESSMENT_VISITS,
   FINISH_POLL_MS,
+  FINISH_TICK_MS,
   FINISH_WAIT_MS,
   KOMI_TEXT,
   NETWORK_TEXT,
+  type ToolFns,
   createToolFns,
   createTools,
 } from './tools.ts';
@@ -123,7 +125,7 @@ describe('play_move / correct_last_move', () => {
   it('ход и ответ движка с произношением', async () => {
     const { fns, client } = await withGame({ replies: ['K10'] });
     const res = await fns.playMove({ coord: 'D4' });
-    expect(res).toEqual({ ok: true, yourMove: 'D4', myMove: 'K10', myMoveSpoken: 'ка десять', captured: 0, myCaptured: 0, toPlay: 'B', moveNumber: 2 });
+    expect(res).toEqual({ ok: true, yourMove: 'D4', yourMoveSpoken: 'дэ четыре', myMove: 'K10', myMoveSpoken: 'ка десять', captured: 0, myCaptured: 0, toPlay: 'B', moveNumber: 2 });
     expect(client.calls[0]).toMatchObject({ method: 'play', args: ['g1', { coord: 'D4', via: 'voice' }] });
   });
   it('нелегальный ход — причина из humanText по details.reason, не message', async () => {
@@ -167,16 +169,18 @@ describe('play_move / correct_last_move', () => {
     expect(state.announcedFinish).toBe('g1');
     expect(state.awaitingReply).toBe(false);
   });
-  it('сеть и ответ не по протоколу — «нет связи с сервером» без перечитывания; таймаут чтения — «сервер не отвечает»', async () => {
+  it('сеть, обрыв тела (terminated) и ответ не по протоколу на чтении — «нет связи с сервером»; таймаут чтения — «сервер не отвечает»', async () => {
     const { fns, client } = await withGame();
     client.failNext(new TypeError('fetch failed'));
-    expect(await fns.playMove({ coord: 'D4' })).toEqual({ ok: false, reason: NETWORK_TEXT });
+    expect(await fns.getAssessment()).toEqual({ ok: false, reason: NETWORK_TEXT });
     client.failNext(new HttpError(502, '<html>Bad Gateway</html>'));
-    expect(await fns.playMove({ coord: 'D4' })).toEqual({ ok: false, reason: NETWORK_TEXT });
+    expect(await fns.getPosition()).toBe(NETWORK_TEXT);
+    client.failNext(new TypeError('terminated'));
+    expect(await fns.resign()).toEqual({ ok: false, reason: NETWORK_TEXT });
     client.failNext(new ClientTimeoutError('analyze', 15_000));
     expect(await fns.getAssessment()).toEqual({ ok: false, reason: humanText('client_timeout') });
     expect(humanText('client_timeout')).not.toBe(NETWORK_TEXT);
-    expect(client.calls.map((c) => c.method)).toEqual(['play', 'play', 'getGame', 'analyze']);
+    expect(client.calls.map((c) => c.method)).toEqual(['getGame', 'analyze', 'getGame', 'ascii', 'getGame', 'getGame', 'analyze']);
   });
   it('ошибка кода пробрасывается: её увидит лог воркера, а не человек', async () => {
     const { fns, client } = await withGame();
@@ -257,6 +261,7 @@ describe('play_move / correct_last_move', () => {
 
 describe('таймаут клиента на ходе, пасе и поправке: перечитывание вместо повтора', () => {
   const NOT_APPLIED_TAIL = 'Не повторяй ход сам: скажи человеку и дождись его слов';
+  const CHANGED_TAIL = 'Не повторяй ход сам: посмотри позицию и скажи человеку';
 
   it('ход не записан: партия перечитана тем же сигналом, ход не повторён, модель слышит, чей ход на самом деле', async () => {
     const { fns, client, state, controller } = await withGame();
@@ -274,7 +279,7 @@ describe('таймаут клиента на ходе, пасе и поправ�
   it('ход записан, ответ не дошёл: результат по перечитанной партии — с ответом Гоко или с note, пока он думает', async () => {
     const { fns, client, state } = await withGame({ replies: ['K10'] });
     client.failNext(new ClientTimeoutError('play', 15_000), 'after');
-    expect(await fns.playMove({ coord: 'D4' })).toEqual({ ok: true, yourMove: 'D4', myMove: 'K10', myMoveSpoken: 'ка десять', captured: 0, myCaptured: 0, toPlay: 'B', moveNumber: 2 });
+    expect(await fns.playMove({ coord: 'D4' })).toEqual({ ok: true, yourMove: 'D4', yourMoveSpoken: 'дэ четыре', myMove: 'K10', myMoveSpoken: 'ка десять', captured: 0, myCaptured: 0, toPlay: 'B', moveNumber: 2 });
     expect(state.awaitingReply).toBe(false);
     client.replyTimedOut = true;
     client.failNext(new ClientTimeoutError('play', 15_000), 'after');
@@ -300,7 +305,7 @@ describe('таймаут клиента на ходе, пасе и поправ�
     expect(await fns.pass()).toEqual({ ok: true, myMove: 'K10', myMoveSpoken: 'ка десять', toPlay: 'B' });
     await fns.playMove({ coord: 'D4' });
     client.failNext(new ClientTimeoutError('correct', 15_000), 'after');
-    expect(await fns.correctLastMove({ coord: 'D5' })).toEqual({ ok: true, yourMove: 'D5', myMove: 'K4', myMoveSpoken: 'ка четыре', captured: 0, myCaptured: 0, toPlay: 'B', moveNumber: 4 });
+    expect(await fns.correctLastMove({ coord: 'D5' })).toEqual({ ok: true, yourMove: 'D5', yourMoveSpoken: 'дэ пять', myMove: 'K4', myMoveSpoken: 'ка четыре', captured: 0, myCaptured: 0, toPlay: 'B', moveNumber: 4 });
     expect(client.calls.map((c) => c.method)).toEqual(['pass', 'getGame', 'play', 'correct', 'getGame']);
     expect(gameOf(client).moves.map((m) => m.coord)).toEqual(['pass', 'K10', 'D5', 'K4']);
   });
@@ -340,7 +345,7 @@ describe('таймаут клиента на ходе, пасе и поправ�
     client.game = fakeGame({ id: 'g2' });
     state.gameId = 'g2';
     client.failNext(new ClientTimeoutError('play', 15_000), 'after');
-    expect(await fns.playMove({ coord: 'E5' })).toEqual({ ok: true, yourMove: 'E5', myMove: 'D10', myMoveSpoken: 'дэ десять', captured: 0, myCaptured: 0, toPlay: 'B', moveNumber: 2 });
+    expect(await fns.playMove({ coord: 'E5' })).toEqual({ ok: true, yourMove: 'E5', yourMoveSpoken: 'е пять', myMove: 'D10', myMoveSpoken: 'дэ десять', captured: 0, myCaptured: 0, toPlay: 'B', moveNumber: 2 });
   });
 
   it('ревизия не откатывается устаревшим чтением параллельного инструмента', async () => {
@@ -375,7 +380,7 @@ describe('таймаут клиента на ходе, пасе и поправ�
     client.failNext(new ClientTimeoutError('play', 15_000));
     expect(await fns.playMove({ coord: 'D4' })).toEqual({
       ok: false,
-      reason: `сервер не отвечает: хода D4 в партии пока нет, сейчас ход: чёрные (твой). ${NOT_APPLIED_TAIL}`,
+      reason: `сервер не отвечает, а партия за это время изменилась: хода D4 в конце партии нет, сейчас ход: чёрные (твой). ${CHANGED_TAIL}`,
     });
   });
 
@@ -384,7 +389,10 @@ describe('таймаут клиента на ходе, пасе и поправ�
     // С экрана сыграли D4, Гоко спасовал.
     await client.play('g1', { coord: 'D4', via: 'tap' });
     client.failNext(new ClientTimeoutError('pass', 15_000));
-    expect(await fns.pass()).toEqual({ ok: false, reason: `сервер не отвечает: паса в партии пока нет, сейчас ход: чёрные (твой). ${NOT_APPLIED_TAIL}` });
+    expect(await fns.pass()).toEqual({
+      ok: false,
+      reason: `сервер не отвечает, а партия за это время изменилась: паса в конце партии не видно, сейчас ход: чёрные (твой). ${CHANGED_TAIL}`,
+    });
   });
 
   it('ход не записан, а партия уже окончена — так и сказано вместо «чей ход»', async () => {
@@ -392,7 +400,84 @@ describe('таймаут клиента на ходе, пасе и поправ�
     // Пока ход шёл, человек сдался с экрана.
     await client.resign('g1', { color: 'B', via: 'tap' });
     client.failNext(new ClientTimeoutError('play', 15_000));
+    expect(await fns.playMove({ coord: 'D4' })).toEqual({
+      ok: false,
+      reason: `сервер не отвечает, а партия за это время изменилась: хода D4 в конце партии нет, партия окончена. ${CHANGED_TAIL}`,
+    });
+  });
+
+  it('ход не записан, ревизия та же, а партия окончена — фраза брифа с «партия окончена»', async () => {
+    const { fns, client } = await withGame();
+    gameOf(client).status = 'finished';
+    client.failNext(new ClientTimeoutError('play', 15_000));
     expect(await fns.playMove({ coord: 'D4' })).toEqual({ ok: false, reason: `сервер не отвечает: хода D4 в партии пока нет, партия окончена. ${NOT_APPLIED_TAIL}` });
+  });
+
+  it('пас не записан, а ревизию сменил ход Гоко после прежнего паса — по числу ходов пас не принят за записанный', async () => {
+    const { fns, client } = await withGame();
+    client.replyTimedOut = true;
+    expect(await fns.pass()).toMatchObject({ ok: true, myMove: null }); // [pass], ревизия 1, Гоко думает
+    // Гоко сходил K10: инструменты узнали бы об этом только из события потока.
+    const g = gameOf(client);
+    g.moves = [...g.moves, { n: 2, color: 'W', coord: 'K10', captured: 0, at: 't' }];
+    g.toPlay = 'B';
+    g.pendingEngineMove = false;
+    g.revision++;
+    client.failNext(new ClientTimeoutError('pass', 15_000));
+    expect(await fns.pass()).toEqual({
+      ok: false,
+      reason: `сервер не отвечает, а партия за это время изменилась: паса в конце партии не видно, сейчас ход: чёрные (твой). ${CHANGED_TAIL}`,
+    });
+    expect(gameOf(client).moves.map((m) => m.coord)).toEqual(['pass', 'K10']);
+  });
+
+  it('пас с ответом Гоко в партии, по которой своих ответов не было, — не принят за записанный: прежнее число ходов неизвестно', async () => {
+    const { fns, client, state } = await withGame({ replies: ['K10'] });
+    client.game = fakeGame({ id: 'g2' });
+    state.gameId = 'g2';
+    client.failNext(new ClientTimeoutError('pass', 15_000), 'after');
+    expect(await fns.pass()).toEqual({
+      ok: false,
+      reason: `сервер не отвечает, а партия за это время изменилась: паса в конце партии не видно, сейчас ход: чёрные (твой). ${CHANGED_TAIL}`,
+    });
+    expect(gameOf(client).moves.map((m) => m.coord)).toEqual(['pass', 'K10']);
+  });
+
+  it.each([
+    ['fetch failed', () => new TypeError('fetch failed')],
+    ['terminated', () => new TypeError('terminated')],
+    ['HttpError', () => new HttpError(502, '<html>Bad Gateway</html>')],
+  ])('сеть на ходе (%s), ход не записан — партия перечитана, ход не повторён', async (_name, err) => {
+    const { fns, client } = await withGame();
+    client.failNext(err());
+    expect(await fns.playMove({ coord: 'D4' })).toEqual({
+      ok: false,
+      reason: `${NETWORK_TEXT}: хода D4 в партии пока нет, сейчас ход: чёрные (твой). ${NOT_APPLIED_TAIL}`,
+    });
+    expect(client.calls.map((c) => c.method)).toEqual(['play', 'getGame']);
+    expect(gameOf(client).moves).toEqual([]);
+  });
+
+  it('сеть на пасе и поправке после записи — обычные ответы по перечитанной партии', async () => {
+    const { fns, client } = await withGame({ replies: ['K10', 'D10', 'K4'] });
+    client.failNext(new TypeError('terminated'), 'after');
+    expect(await fns.pass()).toEqual({ ok: true, myMove: 'K10', myMoveSpoken: 'ка десять', toPlay: 'B' });
+    await fns.playMove({ coord: 'D4' });
+    client.failNext(new HttpError(502, 'Bad Gateway'), 'after');
+    expect(await fns.correctLastMove({ coord: 'D5' })).toMatchObject({ ok: true, yourMove: 'D5', myMove: 'K4' });
+    client.failNext(new TypeError('fetch failed'));
+    await fns.pass();
+    expect(client.calls.map((c) => c.method)).toEqual(['pass', 'getGame', 'play', 'correct', 'getGame', 'pass', 'getGame']);
+  });
+
+  it('сеть на ходе, перечитать тоже не вышло — «нет связи с сервером»; ход не повторён', async () => {
+    const { fns, client } = await withGame();
+    client.failNext(new TypeError('terminated'));
+    client.getGame = async () => {
+      throw new TypeError('terminated');
+    };
+    expect(await fns.playMove({ coord: 'D4' })).toEqual({ ok: false, reason: NETWORK_TEXT });
+    expect(client.calls.map((c) => c.method)).toEqual(['play']);
   });
 });
 
@@ -500,6 +585,98 @@ describe('pass / resign / undo', () => {
     const { fns } = await withGame();
     expect(await fns.undo()).toEqual({ ok: false, reason: humanText('nothing_to_undo') });
   });
+  it.each([
+    ['таймаут', () => new ClientTimeoutError('undo', 15_000), humanText('client_timeout')],
+    ['fetch failed', () => new TypeError('fetch failed'), NETWORK_TEXT],
+    ['terminated', () => new TypeError('terminated'), NETWORK_TEXT],
+    ['HttpError', () => new HttpError(502, 'Bad Gateway'), NETWORK_TEXT],
+  ])('undo: %s — отмена могла пройти, без перечитывания и повтора', async (_name, err, prefix) => {
+    const { fns, client } = await withGame({ replies: ['K10'] });
+    await fns.playMove({ coord: 'D4' });
+    client.failNext(err());
+    expect(await fns.undo()).toEqual({
+      ok: false,
+      reason: `${prefix}: отмена могла пройти. Не повторяй отмену сам: посмотри позицию и скажи человеку`,
+    });
+    expect(client.calls.map((c) => c.method)).toEqual(['play', 'undo']);
+  });
+
+  it('итог, отмена, снова два паса — ждём новый итог, а не прежний (I1)', async () => {
+    const { fns, state, client, clock } = await withGame({ replies: ['pass', 'pass'], finishAfterPolls: 2 }, (now, s) => {
+      if (now === 1_000) s.finished = { gameId: 'g1', result: { winner: 'B', margin: 3.5, reason: 'score' } };
+    });
+    expect(await fns.pass()).toMatchObject({ finished: true, result: 'победа за тобой, разница 3,5 очка' });
+    // Сервер досчитал ту же партию; отмена после счёта возвращает её в игру без итога.
+    gameOf(client).status = 'finished';
+    gameOf(client).result = { winner: 'B', margin: 3.5, reason: 'score' };
+    expect(await fns.undo()).toMatchObject({ ok: true, removed: ['pass', 'pass'], status: 'playing' });
+    expect(state.finished).toBeNull();
+    expect(state.announcedFinish).toBeNull();
+    expect(await fns.pass()).toMatchObject({ ok: true, myMove: 'pass', finished: true, result: 'победа за мной, разница 3,5 очка' });
+    expect(clock.t).toBe(1_000 + 2 * FINISH_POLL_MS);
+    expect(state.announcedFinish).toBe('g1');
+  });
+
+  it('пас забывает прежний итог этой партии до отправки; итог другой партии не трогает (I1)', async () => {
+    const { fns, state, clock } = await withGame({ replies: ['pass'], finishAfterPolls: 2 });
+    state.finished = { gameId: 'g1', result: { winner: 'B', margin: 0.5, reason: 'score' } };
+    state.announcedFinish = 'g1';
+    expect(await fns.pass()).toMatchObject({ ok: true, finished: true, result: 'победа за мной, разница 3,5 очка' });
+    expect(clock.t).toBe(2 * FINISH_POLL_MS);
+    const other = { gameId: 'g0', result: { winner: 'W' as const, margin: 1.5, reason: 'score' as const } };
+    const { fns: fns2, state: state2 } = await withGame({ replies: ['K10', 'D10'] });
+    state2.finished = other;
+    state2.announcedFinish = 'g1';
+    expect(await fns2.pass()).toMatchObject({ ok: true, myMove: 'K10' });
+    expect(state2.announcedFinish).toBeNull();
+    expect(state2.finished).toBe(other);
+    state2.announcedFinish = 'g0';
+    await fns2.pass();
+    expect(state2.announcedFinish).toBe('g0');
+  });
+
+  it('два паса: отмена сеанса во время ожидания Retry-After — выход с причиной отмены, без опросов (M2)', async () => {
+    const { fns, state, client, clock, controller } = await withGame({ replies: ['pass'], finishAfterPolls: 100 }, (now, s) => {
+      if (now === FINISH_TICK_MS) s.blockedUntil = 60_000;
+      if (now === 5_000) controller.abort();
+    });
+    const err = await fns.pass().catch((e: unknown) => e);
+    expect((err as Error).name).toBe('AbortError');
+    expect(clock.t).toBe(5_000);
+    expect(client.calls.map((c) => c.method)).toEqual(['pass']);
+    expect(state.awaitingFinish).toBeNull();
+  });
+
+  it('два паса: пауза ожидания без внедрённого sleep тоже обрывается сигналом, таймер снят (M2)', async () => {
+    vi.useFakeTimers();
+    try {
+      const client = createFakeClient({ replies: ['pass'], finishAfterPolls: 100 });
+      const state = newAgentState('s1');
+      const controller = new AbortController();
+      const fns = createToolFns({ client, state, signal: controller.signal });
+      await fns.startGame({});
+      let outcome: unknown = 'pending';
+      void fns.pass().then(
+        () => {
+          outcome = 'resolved';
+        },
+        (e: unknown) => {
+          outcome = e;
+        },
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      expect(outcome).toBe('pending');
+      expect(vi.getTimerCount()).toBe(1);
+      const reason = new Error('session closed');
+      controller.abort(reason);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(outcome).toBe(reason);
+      expect(vi.getTimerCount()).toBe(0);
+      expect(state.awaitingFinish).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe('get_position / get_assessment / set_rank', () => {
@@ -531,10 +708,11 @@ describe('get_position / get_assessment / set_rank', () => {
       marginPoints: 6,
       winrateYou: 70,
       weakGroups: [
-        { color: 'mine', where: 'C3, C4', status: 'неустойчива' },
-        { color: 'yours', where: 'M3', status: 'мертва' },
+        { color: 'mine', where: 'C3, C4', whereSpoken: 'цэ три, цэ четыре', status: 'неустойчива' },
+        { color: 'yours', where: 'M3', whereSpoken: 'эм три', status: 'мертва' },
       ],
       bestMoves: ['K10', 'D10', 'G7'],
+      bestMovesSpoken: ['ка десять', 'дэ десять', 'гэ семь'],
       toPlay: 'you',
     });
     expect(client.calls.find((c) => c.method === 'analyze')).toMatchObject({ args: ['g1', { maxVisits: ASSESSMENT_VISITS }] });
@@ -542,6 +720,23 @@ describe('get_position / get_assessment / set_rank', () => {
   it('оценка при отставании', async () => {
     const { fns } = await withGame({ analysis: { winrateB: 0.3, scoreLeadB: -0.2 } });
     expect(await fns.getAssessment()).toMatchObject({ leader: 'even', marginPoints: 0, winrateYou: 30 });
+  });
+  it.each([
+    [0.2, 'even', 0],
+    [-0.2, 'even', 0],
+    [0.25, 'you', 0.5],
+    [-0.25, 'me', 0.5],
+    [0.3, 'you', 0.5],
+    [-0.3, 'me', 0.5],
+    [0.5, 'you', 0.5],
+    [-0.5, 'me', 0.5],
+    [0.7, 'you', 0.5],
+    [-0.7, 'me', 0.5],
+    [0.75, 'you', 1],
+    [-0.75, 'me', 1],
+  ] as const)('оценка: перевес чёрных %s — leader %s, marginPoints %s (одно округление, even ровно при нуле)', async (scoreLeadB, leader, marginPoints) => {
+    const { fns } = await withGame({ analysis: { scoreLeadB } });
+    expect(await fns.getAssessment()).toMatchObject({ leader, marginPoints });
   });
   it('set_rank меняет ранг движка в текущей партии', async () => {
     const { fns, client, state } = await withGame();
@@ -576,7 +771,7 @@ describe('человек против человека (D-0005)', () => {
   }
   it('ход без ответа движка', async () => {
     const { fns, client, state } = hvh();
-    expect(await fns.playMove({ coord: 'K10' })).toEqual({ ok: true, yourMove: 'K10', myMove: null, myMoveSpoken: null, captured: 0, myCaptured: 0, toPlay: 'B', moveNumber: 2 });
+    expect(await fns.playMove({ coord: 'K10' })).toEqual({ ok: true, yourMove: 'K10', yourMoveSpoken: 'ка десять', myMove: null, myMoveSpoken: null, captured: 0, myCaptured: 0, toPlay: 'B', moveNumber: 2 });
     expect(client.calls.map((c) => c.method)).toEqual(['play']);
     expect(state.awaitingReply).toBe(false);
   });
@@ -587,10 +782,10 @@ describe('человек против человека (D-0005)', () => {
     g.moves = [...g.moves, { n: 2, color: 'W', coord: 'K10', captured: 0, at: 't' }, { n: 3, color: 'B', coord: 'E5', captured: 0, at: 't' }];
     g.revision = 3;
     client.failNext(new ClientTimeoutError('play', 15_000));
-    const res = await fns.playMove({ coord: 'K10' });
-    expect(res).toMatchObject({ ok: false });
-    expect(res).not.toHaveProperty('myMove');
-    expect('reason' in res ? res.reason : '').toContain('Не повторяй ход сам: скажи человеку и дождись его слов');
+    expect(await fns.playMove({ coord: 'K10' })).toEqual({
+      ok: false,
+      reason: 'сервер не отвечает, а партия за это время изменилась: хода K10 в конце партии нет, сейчас ход: белые. Не повторяй ход сам: посмотри позицию и скажи человеку',
+    });
     expect(client.calls.map((c) => c.method)).toEqual(['play', 'getGame']);
   });
   it('сдаётся тот, чей ход; результат цветами', async () => {
@@ -612,11 +807,74 @@ describe('человек против человека (D-0005)', () => {
       marginPoints: 6,
       winrateBlack: 70,
       weakGroups: [
-        { color: 'white', where: 'C3, C4', status: 'неустойчива' },
-        { color: 'black', where: 'M3', status: 'мертва' },
+        { color: 'white', where: 'C3, C4', whereSpoken: 'цэ три, цэ четыре', status: 'неустойчива' },
+        { color: 'black', where: 'M3', whereSpoken: 'эм три', status: 'мертва' },
       ],
       bestMoves: ['K10', 'D10', 'G7'],
+      bestMovesSpoken: ['ка десять', 'дэ десять', 'гэ семь'],
       toPlay: 'white',
     });
+  });
+});
+
+describe('сигнал сеанса в каждом инструменте (M7)', () => {
+  const cases: Array<[string, (fns: ToolFns) => Promise<unknown>, string[]]> = [
+    ['start_game', (f) => f.startGame({}), ['newGame']],
+    ['play_move', (f) => f.playMove({ coord: 'E5' }), ['play']],
+    ['correct_last_move', (f) => f.correctLastMove({ coord: 'D5' }), ['correct']],
+    ['pass', (f) => f.pass(), ['pass']],
+    ['resign', (f) => f.resign(), ['getGame', 'resign']],
+    ['undo', (f) => f.undo(), ['undo']],
+    ['get_position', (f) => f.getPosition(), ['getGame', 'ascii']],
+    ['get_assessment', (f) => f.getAssessment(), ['getGame', 'analyze']],
+    ['set_rank', (f) => f.setRank({ rank: '5 кю' }), ['getGame', 'setRank']],
+  ];
+  it.each(cases)('%s передаёт сигнал в каждый вызов клиента', async (_name, run, methods) => {
+    const { fns, client, controller } = await withGame({ replies: ['K10', 'D10'] });
+    await fns.playMove({ coord: 'D4' });
+    client.calls.length = 0;
+    client.signals.length = 0;
+    await run(fns);
+    expect(client.calls.map((c) => c.method)).toEqual(methods);
+    expect(client.signals).toHaveLength(methods.length);
+    for (const s of client.signals) expect(s).toBe(controller.signal);
+  });
+});
+
+describe('фейковый клиент: failNext (M6)', () => {
+  const newGameReq = { black: { controller: 'human' as const }, white: { controller: 'engine' as const, rank: '10k' as const } };
+  async function ready() {
+    const client = createFakeClient({ replies: ['K10', 'D10'] });
+    await client.newGame('s1', newGameReq);
+    await client.play('g1', { coord: 'D4', via: 'tap' });
+    return client;
+  }
+  const calls: Record<string, (c: Awaited<ReturnType<typeof ready>>) => Promise<unknown>> = {
+    newGame: (c) => c.newGame('s1', newGameReq),
+    play: (c) => c.play('g1', { coord: 'E5', via: 'tap' }),
+    correct: (c) => c.correct('g1', { coord: 'E5' }),
+    pass: (c) => c.pass('g1'),
+    resign: (c) => c.resign('g1', { color: 'B' }),
+    undo: (c) => c.undo('g1'),
+    getGame: (c) => c.getGame('g1'),
+    ascii: (c) => c.ascii('g1'),
+    analyze: (c) => c.analyze('g1'),
+    setRank: (c) => c.setRank('g1', { color: 'W', rank: '5k' }),
+  };
+  it.each(Object.keys(calls))('failNext(err) срабатывает на следующем вызове %s, и только на нём', async (method) => {
+    const client = await ready();
+    const call = calls[method];
+    if (!call) throw new Error(`нет вызова ${method}`);
+    const err = new Error('boom');
+    client.failNext(err);
+    await expect(call(client)).rejects.toBe(err);
+    await expect(call(client)).resolves.toBeDefined();
+  });
+  it.each(['newGame', 'resign', 'undo', 'getGame', 'ascii', 'analyze', 'setRank'])("failNext(err, 'after') на %s — ошибка теста, а не тихий пропуск", async (method) => {
+    const client = await ready();
+    const call = calls[method];
+    if (!call) throw new Error(`нет вызова ${method}`);
+    client.failNext(new Error('boom'), 'after');
+    await expect(call(client)).rejects.toThrow('fake client: failNext(err, "after") works only for play, pass and correct');
   });
 });

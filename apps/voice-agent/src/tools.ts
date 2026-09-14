@@ -50,6 +50,11 @@ export const KOMI_TEXT = 'коми бывает только с половино
 const NO_GAME = 'партия не начата: предложи начать';
 const THINKING_NOTE = 'Гоко ещё думает: свой ход он назовёт сам, когда решит';
 const SCORING_NOTE = 'Гоко ещё считает очки: итог назовёт сам';
+// Хвосты отказов, когда ход или отмена могли дойти до сервера. Партия не менялась — ход точно не записан,
+// ждём слов человека; партия менялась — модель не знает, что в ней, и сначала смотрит позицию.
+const NOT_APPLIED_TAIL = 'Не повторяй ход сам: скажи человеку и дождись его слов';
+const CHANGED_TAIL = 'Не повторяй ход сам: посмотри позицию и скажи человеку';
+const UNDO_UNKNOWN_TEXT = 'отмена могла пройти. Не повторяй отмену сам: посмотри позицию и скажи человеку';
 
 // Коми по протоколу — x.5 от 0,5 до 13,5 (иначе сервер ответит bad_request без понятной человеку причины).
 const komiValid = (komi: number): boolean => Number.isFinite(komi) && komi >= 0.5 && komi <= 13.5 && komi % 1 === 0.5;
@@ -75,70 +80,128 @@ function turnOf(g: GameState): string {
   return hasEngine(g) ? `${colorName(g.toPlay)} (${g.toPlay === humanColorOf(g) ? 'твой' : 'мой'})` : colorName(g.toPlay);
 }
 
-// Ход человека coord в конце перечитанной партии после таймаута клиента: последним (ответа Гоко ещё нет или
-// Гоко в партии нет) или предпоследним, а за ним ход Гоко. Иначе null: хода нет или после него были другие ходы.
-function appliedMove(g: GameState, coord: string): PlayResponse | null {
+// Сеть оборвалась или ответ пришёл не по протоколу (например, страница прокси). Факты undici в Node 22:
+// соединение не открылось или закрылось до заголовков — TypeError 'fetch failed', оборвалось посреди тела
+// ответа — TypeError 'terminated'. Остальные TypeError — баги кода.
+function isNetworkError(e: unknown): boolean {
+  return e instanceof HttpError || (e instanceof TypeError && (e.message === 'fetch failed' || e.message === 'terminated'));
+}
+
+// Ход человека coord в конце перечитанной партии после таймаута или обрыва: последним (ответа Гоко ещё нет
+// или Гоко в партии нет) или предпоследним, а за ним ход Гоко. Иначе null: хода нет или после него были
+// другие ходы. Пас человека перед ходом Гоко бывает и старым (пас, Гоко ответил, пас не дошёл), поэтому
+// такой пас засчитывается, только если ходов стало не меньше чем на два больше, чем в последнем своём
+// ответе по этой партии (knownMoves; null — своих ответов не было).
+function appliedMove(g: GameState, coord: string, knownMoves: number | null): PlayResponse | null {
   // Не предикат типа: ложный ответ предиката сузил бы last до undefined, хотя ход там есть, просто чужой.
   const byHuman = (m: Move): boolean => m.coord === coord && g.seats[m.color].controller === 'human';
   const last = g.moves.at(-1);
   const prev = g.moves.at(-2);
   if (last && byHuman(last)) return { state: g, move: last, ...(g.pendingEngineMove ? { replyTimedOut: true } : {}) };
-  if (prev && last && byHuman(prev) && g.seats[last.color].controller === 'engine') return { state: g, move: prev, reply: last };
+  const newEnough = coord !== 'pass' || (knownMoves !== null && g.moves.length >= knownMoves + 2);
+  if (prev && last && byHuman(prev) && g.seats[last.color].controller === 'engine' && newEnough) return { state: g, move: prev, reply: last };
   return null;
 }
 
-// Ход после таймаута не записан. Запрос мог ещё дойти до сервера, поэтому модель не повторяет ход сама.
-function notAppliedText(g: GameState, coord: string): string {
+const turnText = (g: GameState): string => (g.status === 'finished' ? 'партия окончена' : `сейчас ход: ${turnOf(g)}`);
+
+// Ревизия та же: ход не записан. Запрос мог ещё дойти до сервера, поэтому модель не повторяет ход сама.
+// prefix — причина отказа исходного вызова («сервер не отвечает» или «нет связи с сервером»).
+function notAppliedText(prefix: string, g: GameState, coord: string): string {
   const what = coord === 'pass' ? 'паса' : `хода ${coord}`;
-  const turn = g.status === 'finished' ? 'партия окончена' : `сейчас ход: ${turnOf(g)}`;
-  return `${humanText('client_timeout')}: ${what} в партии пока нет, ${turn}. Не повторяй ход сам: скажи человеку и дождись его слов`;
+  return `${prefix}: ${what} в партии пока нет, ${turnText(g)}. ${NOT_APPLIED_TAIL}`;
+}
+
+// Ревизия другая, а хода в конце партии нет: записан ли он, неизвестно — модель сначала смотрит позицию.
+function changedText(prefix: string, g: GameState, coord: string): string {
+  const what = coord === 'pass' ? 'паса в конце партии не видно' : `хода ${coord} в конце партии нет`;
+  return `${prefix}, а партия за это время изменилась: ${what}, ${turnText(g)}. ${CHANGED_TAIL}`;
 }
 
 export function createToolFns(deps: ToolDeps) {
   const { client, state, signal } = deps;
-  const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const sleep = deps.sleep ?? abortableSleep;
   const now = deps.now ?? Date.now;
   const log = deps.log ?? (() => {});
   const opts = { signal };
 
+  // Пауза, которую обрывает сигнал сеанса: ожидание итога не держит закрытый сеанс до FINISH_WAIT_MS.
+  function abortableSleep(ms: number): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      if (!signal) {
+        setTimeout(resolve, ms);
+        return;
+      }
+      const onAbort = () => {
+        clearTimeout(timer);
+        reject(signal.reason);
+      };
+      const timer = setTimeout(() => {
+        signal.removeEventListener('abort', onAbort);
+        resolve();
+      }, ms);
+      signal.addEventListener('abort', onAbort, { once: true });
+    });
+  }
+
   // Отказ -> { ok: false, reason } по-русски (D-0007): message сервера английский и модели не отдаётся.
   // Три класса различаются: ответ сервера по протоколу, «сервер не отвечает» (таймаут клиента) и
-  // «нет связи» (сеть или ответ не по протоколу, например страница прокси). Остальное — баг или отмена
-  // сигналом сеанса: пробрасываем в лог воркера, человеку это не озвучивается.
+  // «нет связи» (isNetworkError). Остальное — баг или отмена сигналом сеанса: пробрасываем в лог воркера,
+  // человеку это не озвучивается.
   function reasonOf(e: unknown): Fail {
     if (e instanceof ApiError) {
       if (e.code === 'rate_limited') state.blockedUntil = Math.max(state.blockedUntil, now() + retryAfterMs(e.details));
       return fail(humanText(e.code, e.details));
     }
     if (e instanceof ClientTimeoutError) return fail(humanText(e.code));
-    if (e instanceof HttpError || (e instanceof TypeError && e.message === 'fetch failed')) return fail(NETWORK_TEXT);
+    if (isNetworkError(e)) return fail(NETWORK_TEXT);
     throw e;
   }
+
+  // Таймаут или обрыв: запрос мог дойти до сервера и выполниться, хотя ответа нет.
+  const maybeDone = (e: unknown): boolean => e instanceof ClientTimeoutError || isNetworkError(e);
 
   // Retry-After ещё не прошёл: к серверу не идём (D-0012), модель получает ту же фразу, что на сам отказ.
   function blocked(): Fail | null {
     return now() < state.blockedUntil ? fail(humanText('rate_limited')) : null;
   }
+  // Общее начало инструментов партии: партии нет или Retry-After не прошёл — готовый отказ; иначе id партии,
+  // один на весь вызов (раньше resign и прочие перечитывали state.gameId перед каждым запросом).
+  function gameGuard(): string | Fail {
+    if (!state.gameId) return fail(NO_GAME);
+    return blocked() ?? state.gameId;
+  }
 
-  // Последняя ревизия партии из ответов сервера инструментам. События потока сюда не пишутся: state.updated
-  // о записанном ходе приходит раньше таймаута, и сверка в sendMove приняла бы записанный ход за незаписанный.
-  let seen: { gameId: string; revision: number } | null = null;
+  // Итог этой партии, запомненный раньше, устарел: партия снова идёт (пас после отмены счёта, отмена).
+  // Иначе waitFinished взял бы прежний итог, а events.ts не озвучил бы новый.
+  function forgetFinish(gameId: string) {
+    if (state.finished?.gameId === gameId) state.finished = null;
+    if (state.announcedFinish === gameId) state.announcedFinish = null;
+  }
+
+  // Последняя ревизия партии и число ходов в ней из ответов сервера инструментам. События потока сюда не
+  // пишутся: state.updated о записанном ходе приходит раньше таймаута, и сверка в sendMove приняла бы
+  // записанный ход за незаписанный.
+  let seen: { gameId: string; revision: number; moves: number } | null = null;
   function note(g: GameState): GameState {
-    if (!seen || seen.gameId !== g.id || seen.revision < g.revision) seen = { gameId: g.id, revision: g.revision };
+    if (!seen || seen.gameId !== g.id || seen.revision < g.revision) seen = { gameId: g.id, revision: g.revision, moves: g.moves.length };
     return g;
   }
 
-  // Ход, пас или поправка. ClientTimeoutError не значит, что хода нет: сервер мог записать его, а ответ не
-  // дошёл. Повтор вслепую поставил бы камень второй раз или спасовал бы за человека, поэтому партия
-  // перечитывается: та же ревизия — хода нет; иначе ход ищется в конце партии (appliedMove).
+  // Ход, пас или поправка. Таймаут клиента или обрыв связи не значат, что хода нет: сервер мог записать его,
+  // а ответ не дошёл. Повтор вслепую поставил бы камень второй раз или спасовал бы за человека, поэтому
+  // партия перечитывается: та же ревизия — хода нет; иначе ход ищется в конце партии (appliedMove), а не
+  // нашёлся — партия менялась, и модель сначала смотрит позицию.
   async function sendMove(gameId: string, coord: string, call: () => Promise<PlayResponse>): Promise<PlayResponse | Fail> {
-    const before = seen?.gameId === gameId ? seen.revision : null;
+    const before = seen?.gameId === gameId ? { revision: seen.revision, moves: seen.moves } : null;
+    let prefix: string;
     try {
       const res = await call();
       note(res.state);
       return res;
     } catch (e) {
-      if (!(e instanceof ClientTimeoutError)) return reasonOf(e);
+      if (!maybeDone(e)) return reasonOf(e);
+      prefix = reasonOf(e).reason;
     }
     let g: GameState;
     try {
@@ -146,7 +209,8 @@ export function createToolFns(deps: ToolDeps) {
     } catch (e) {
       return reasonOf(e);
     }
-    return (g.revision === before ? null : appliedMove(g, coord)) ?? fail(notAppliedText(g, coord));
+    if (g.revision === before?.revision) return fail(notAppliedText(prefix, g, coord));
+    return appliedMove(g, coord, before?.moves ?? null) ?? fail(changedText(prefix, g, coord));
   }
 
   function moveResult(res: PlayResponse) {
@@ -157,6 +221,7 @@ export function createToolFns(deps: ToolDeps) {
     return {
       ok: true as const,
       yourMove: move.coord,
+      yourMoveSpoken: speakMove(move.coord),
       myMove: reply?.coord ?? null,
       myMoveSpoken: reply ? speakMove(reply.coord) : null,
       captured: move.captured,
@@ -171,7 +236,8 @@ export function createToolFns(deps: ToolDeps) {
   // Итог после двух пасов (R2). Первым делом — событие game.finished: events.ts, пока awaitingFinish равен
   // этой партии, кладёт итог в state.finished и не озвучивает его. Запасной путь — get_game не чаще раза
   // в FINISH_POLL_MS и не раньше Retry-After. Первый опрос — через FINISH_POLL_MS после пасов, всего их
-  // не больше 8 за FINISH_WAIT_MS.
+  // не больше 8 за FINISH_WAIT_MS. Отмена сеанса обрывает ожидание с причиной отмены: и паузу, и ожидание
+  // Retry-After, в котором к серверу не ходим и сигнал клиента не срабатывает.
   async function waitFinished(g0: GameState): Promise<GameState> {
     const gameId = g0.id;
     let g = g0;
@@ -180,6 +246,7 @@ export function createToolFns(deps: ToolDeps) {
     state.awaitingFinish = gameId;
     try {
       for (;;) {
+        signal?.throwIfAborted();
         const fromStream = state.finished;
         if (fromStream?.gameId === gameId) return { ...g, status: 'finished', result: fromStream.result };
         if (now() - started >= FINISH_WAIT_MS) return g;
@@ -257,28 +324,23 @@ export function createToolFns(deps: ToolDeps) {
     },
 
     async playMove({ coord }: { coord: string }) {
-      const gameId = state.gameId;
-      if (!gameId) return fail(NO_GAME);
-      const blockedFail = blocked();
-      if (blockedFail) return blockedFail;
+      const gameId = gameGuard();
+      if (typeof gameId !== 'string') return gameId;
       const res = await sendMove(gameId, coord, () => client.play(gameId, { coord, via: 'voice' }, opts));
       return 'state' in res ? moveResult(res) : res;
     },
 
     async correctLastMove({ coord }: { coord: string }) {
-      const gameId = state.gameId;
-      if (!gameId) return fail(NO_GAME);
-      const blockedFail = blocked();
-      if (blockedFail) return blockedFail;
+      const gameId = gameGuard();
+      if (typeof gameId !== 'string') return gameId;
       const res = await sendMove(gameId, coord, () => client.correct(gameId, { coord, via: 'voice' }, opts));
       return 'state' in res ? moveResult(res) : res;
     },
 
     async pass() {
-      const gameId = state.gameId;
-      if (!gameId) return fail(NO_GAME);
-      const blockedFail = blocked();
-      if (blockedFail) return blockedFail;
+      const gameId = gameGuard();
+      if (typeof gameId !== 'string') return gameId;
+      forgetFinish(gameId);
       const res = await sendMove(gameId, 'pass', () => client.pass(gameId, { via: 'voice' }, opts));
       if (!('state' in res)) return res;
       let g = res.state;
@@ -301,14 +363,13 @@ export function createToolFns(deps: ToolDeps) {
     },
 
     async resign() {
-      if (!state.gameId) return fail(NO_GAME);
-      const blockedFail = blocked();
-      if (blockedFail) return blockedFail;
+      const gameId = gameGuard();
+      if (typeof gameId !== 'string') return gameId;
       try {
         // Цвет сдающегося — до хода: в партии двух людей это тот, чей ход (humanColorOf).
-        const current = note(await client.getGame(state.gameId, opts));
+        const current = note(await client.getGame(gameId, opts));
         const color = humanColorOf(current);
-        const res = await client.resign(state.gameId, { color, via: 'voice' }, opts);
+        const res = await client.resign(gameId, { color, via: 'voice' }, opts);
         note(res.state);
         state.announcedFinish = res.state.id;
         state.awaitingReply = false;
@@ -320,12 +381,12 @@ export function createToolFns(deps: ToolDeps) {
     },
 
     async undo() {
-      if (!state.gameId) return fail(NO_GAME);
-      const blockedFail = blocked();
-      if (blockedFail) return blockedFail;
+      const gameId = gameGuard();
+      if (typeof gameId !== 'string') return gameId;
       try {
-        const res = await client.undo(state.gameId, { via: 'voice' }, opts);
+        const res = await client.undo(gameId, { via: 'voice' }, opts);
         note(res.state);
+        forgetFinish(gameId);
         state.awaitingReply = false;
         state.lastTap = null;
         return {
@@ -336,18 +397,20 @@ export function createToolFns(deps: ToolDeps) {
           status: res.state.status,
         };
       } catch (e) {
-        return reasonOf(e);
+        // Отмена могла пройти: перечитывание не скажет, чья она (две отмены подряд неотличимы), повтор снял бы
+        // лишние ходы.
+        const failed = reasonOf(e);
+        return maybeDone(e) ? fail(`${failed.reason}: ${UNDO_UNKNOWN_TEXT}`) : failed;
       }
     },
 
     async getPosition(): Promise<string> {
-      if (!state.gameId) return NO_GAME;
-      const blockedFail = blocked();
-      if (blockedFail) return blockedFail.reason;
+      const gameId = gameGuard();
+      if (typeof gameId !== 'string') return gameId.reason;
       let g: GameState;
       let ascii: string;
       try {
-        [g, ascii] = await Promise.all([client.getGame(state.gameId, opts), client.ascii(state.gameId, opts)]);
+        [g, ascii] = await Promise.all([client.getGame(gameId, opts), client.ascii(gameId, opts)]);
       } catch (e) {
         return reasonOf(e).reason;
       }
@@ -371,26 +434,33 @@ export function createToolFns(deps: ToolDeps) {
     },
 
     async getAssessment() {
-      if (!state.gameId) return fail(NO_GAME);
-      const blockedFail = blocked();
-      if (blockedFail) return blockedFail;
+      const gameId = gameGuard();
+      if (typeof gameId !== 'string') return gameId;
       try {
-        const [g, a] = await Promise.all([client.getGame(state.gameId, opts), client.analyze(state.gameId, { maxVisits: ASSESSMENT_VISITS }, opts)]);
+        const [g, a] = await Promise.all([client.getGame(gameId, opts), client.analyze(gameId, { maxVisits: ASSESSMENT_VISITS }, opts)]);
         note(g);
         const lead = a.scoreLeadB;
-        const leaderColor: Color | null = Math.abs(lead) < 0.5 ? null : lead > 0 ? 'B' : 'W';
-        const marginPoints = Math.abs(Math.round(lead * 2) / 2);
+        // Одно округление до половины очка для обоих знаков; «поровну» — ровно когда округлённый отрыв 0.
+        const marginPoints = Math.round(Math.abs(lead) * 2) / 2;
+        const leaderColor: Color | null = marginPoints === 0 ? null : lead > 0 ? 'B' : 'W';
         const weak = a.groups.filter((gr) => gr.status !== 'safe');
         const statusText = (s: string) => (s === 'dead' ? 'мертва' : 'неустойчива');
+        // Координаты и рядом их произношение: модель читает вслух *Spoken, а не латиницу.
+        const place = (stones: string[]) => {
+          const shown = stones.slice(0, 3);
+          return { where: shown.join(', '), whereSpoken: shown.map(speakMove).join(', ') };
+        };
         const bestMoves = a.topMoves.slice(0, 3).map((m) => m.coord);
+        const bestMovesSpoken = bestMoves.map(speakMove);
         if (!hasEngine(g)) {
           // Партия двух людей (D-0005): «ты» и «я» здесь не значат ничего, говорим цветами.
           return {
             leader: leaderColor === null ? ('even' as const) : colorKey(leaderColor),
             marginPoints,
             winrateBlack: Math.round(a.winrateB * 100),
-            weakGroups: weak.map((gr) => ({ color: colorKey(gr.color), where: gr.stones.slice(0, 3).join(', '), status: statusText(gr.status) })),
+            weakGroups: weak.map((gr) => ({ color: colorKey(gr.color), ...place(gr.stones), status: statusText(gr.status) })),
             bestMoves,
+            bestMovesSpoken,
             toPlay: colorKey(g.toPlay),
           };
         }
@@ -402,10 +472,11 @@ export function createToolFns(deps: ToolDeps) {
           winrateYou: Math.round(winrateHuman * 100),
           weakGroups: weak.map((gr) => ({
             color: gr.color === human ? ('yours' as const) : ('mine' as const),
-            where: gr.stones.slice(0, 3).join(', '),
+            ...place(gr.stones),
             status: statusText(gr.status),
           })),
           bestMoves,
+          bestMovesSpoken,
           toPlay: g.toPlay === human ? ('you' as const) : ('me' as const),
         };
       } catch (e) {
@@ -420,15 +491,15 @@ export function createToolFns(deps: ToolDeps) {
         state.rank = parsed;
         return { ok: true as const, rank: speakRank(parsed), note: 'применится к следующей партии' };
       }
-      const blockedFail = blocked();
-      if (blockedFail) return blockedFail;
+      const gameId = gameGuard();
+      if (typeof gameId !== 'string') return gameId;
       try {
-        const g = note(await client.getGame(state.gameId, opts));
+        const g = note(await client.getGame(gameId, opts));
         if (!hasEngine(g)) {
           state.rank = parsed;
           return { ok: true as const, rank: speakRank(parsed), note: 'в этой партии нет Гоко: уровень применится к следующей' };
         }
-        await client.setRank(state.gameId, { color: engineColorOf(g), rank: parsed }, opts);
+        await client.setRank(gameId, { color: engineColorOf(g), rank: parsed }, opts);
         state.rank = parsed;
         return { ok: true as const, rank: speakRank(parsed) };
       } catch (e) {
