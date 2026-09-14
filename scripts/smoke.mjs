@@ -43,7 +43,8 @@ const isForeignSecret = (name) => name.startsWith('LIVEKIT_') || name.startsWith
 export function gameServerEnv(parentEnv, { port, dataDir, real = false, engineUrl = '', engineKey = '' }) {
   const env = withoutEmpty(parentEnv);
   for (const name of Object.keys(env)) if (isForeignSecret(name) || SERVER_OWNED.includes(name)) delete env[name];
-  // ALLOW_SESSIONLESS_GAMES=1: сценарий smoke создаёт партии через POST /api/games (create_game без сессии, D-0012).
+  // ALLOW_SESSIONLESS_GAMES=1: сценарий smoke создаёт партии через POST /api/games (create_game без сессии) и читает
+  // список GET /api/games (list_games), оба только под флагом (D-0012).
   Object.assign(env, LIVEKIT_STUB, { APP_KEY: SMOKE_APP_KEY, PORT: String(port), HOST: '127.0.0.1', DATA_DIR: dataDir, AGENT_NAME: 'goko-smoke', ALLOW_SESSIONLESS_GAMES: '1' });
   if (real) {
     env.ENGINE_URL = engineUrl;
