@@ -3634,6 +3634,31 @@ describe('GameService: лимит партий и старые снапшоты 
     await expect(service.play(old, { coord: 'D4', waitForReply: false, via: 'api' })).rejects.toMatchObject({ details: { max: 1, scope: 'client' } });
   });
 
+  it('возврат к устаревшей партии без отметки на диск отметок не пишет; к завершённой старой партии лимит не применяется — game_finished, а не 429', async () => {
+    const base = memoryMarks();
+    const cleared: string[] = [];
+    const marks = {
+      ...base,
+      clearAbandoned: async (id: string) => {
+        cleared.push(id);
+        await base.clearAbandoned(id);
+      },
+    };
+    let clock = NOW.getTime();
+    const { service } = await make(createFakeEngine(), { marks, now: () => new Date(clock), maxActiveGames: 1 });
+    const done = (await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false })).state.id;
+    await service.resign(done, { color: 'B', via: 'api' });
+    const stale = (await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false })).state.id;
+    clock += STALE_GAME_MS + 1;
+    service.resume(stale);
+    await service.play(stale, { coord: 'D4', waitForReply: false, via: 'api' });
+    // Лимит полон вернувшейся stale; старая завершённая партия отвечает своим отказом.
+    await expect(service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false })).rejects.toMatchObject({ code: 'too_many_games' });
+    await expect(service.play(done, { coord: 'D4', waitForReply: false, via: 'api' })).rejects.toMatchObject({ code: 'game_finished' });
+    await service.close();
+    expect(cleared).toEqual([]);
+  });
+
   it('устаревшая партия сверх лимита: поток не ставит задачу движка, действие — 429; в пределах лимита поток ставит задачу', async () => {
     const engine = createFakeEngine({ script: ['E5'] });
     const store = memoryStore([seedEngineGame('staleengine', STALE_GAME_MS + 1)]);
