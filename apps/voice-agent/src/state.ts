@@ -19,6 +19,9 @@ export type AgentState = {
   startingGame: boolean; // start_game ждёт ответа newGame: событие new приходит раньше ответа HTTP
   awaitingFinish: string | null; // pass ждёт итог этой партии: game.finished кладёт его в finished, не озвучивая
   finished: { gameId: string; result: Result } | null; // итог из потока сессии для ожидающего pass (R2)
+  // Ревизия партии, на которой её итог (finished, announcedFinish) стал известен: событие state.updated законченной
+  // партии или ответ инструмента. По ней forgetFinishIfReopened отличает возобновлённую партию от устаревшего события.
+  finishRevision: { gameId: string; revision: number } | null;
   blockedUntil: number; // до этого момента (мс, часы deps.now) запросы к game-server не шлём: rate_limited с Retry-After
 };
 
@@ -43,6 +46,27 @@ export function newAgentState(sessionId: string): AgentState {
     startingGame: false,
     awaitingFinish: null,
     finished: null,
+    finishRevision: null,
     blockedUntil: 0,
   };
+}
+
+// Итог партии gameId известен на ревизии revision. Для той же партии запись не уменьшается: ответ инструмента
+// может нести ревизию старше события потока, которое уже пришло.
+export function noteFinishRevision(state: AgentState, gameId: string, revision: number): void {
+  const known = state.finishRevision;
+  state.finishRevision = { gameId, revision: known?.gameId === gameId ? Math.max(known.revision, revision) : revision };
+}
+
+// Партия gameId снова идёт на ревизии revision (отмена, переподключение, пас человека): итог этой партии,
+// известный на ревизии не новее, устарел. Иначе game.finished промолчал бы о новом итоге (announcedFinish), а
+// ожидающий pass взял бы старый (finished). Событие с ревизией не новее итога — устаревшее (стояло в очереди,
+// пока инструмент записал итог), итог не трогает. revision = null — ревизия неизвестна, но партия точно идёт.
+// Итог другой партии не трогает.
+export function forgetFinishIfReopened(state: AgentState, gameId: string, revision: number | null): void {
+  const known = state.finishRevision?.gameId === gameId ? state.finishRevision : null;
+  if (known && revision !== null && revision <= known.revision) return;
+  if (state.finished?.gameId === gameId) state.finished = null;
+  if (state.announcedFinish === gameId) state.announcedFinish = null;
+  if (known) state.finishRevision = null;
 }

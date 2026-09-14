@@ -19,7 +19,7 @@ import {
   seatColor,
 } from '@goko/protocol';
 import { colorName, describeResult, parseRank, speakMove, speakRank } from './phrases.ts';
-import type { AgentState } from './state.ts';
+import { type AgentState, forgetFinishIfReopened, noteFinishRevision } from './state.ts';
 
 export type ToolClient = Pick<
   GokoClient,
@@ -179,13 +179,6 @@ export function createToolFns(deps: ToolDeps) {
     return blocked() ?? state.gameId;
   }
 
-  // Итог этой партии, запомненный раньше, устарел: партия снова идёт (пас после отмены счёта, отмена).
-  // Иначе waitFinished взял бы прежний итог, а events.ts не озвучил бы новый.
-  function forgetFinish(gameId: string) {
-    if (state.finished?.gameId === gameId) state.finished = null;
-    if (state.announcedFinish === gameId) state.announcedFinish = null;
-  }
-
   // Последняя ревизия партии и число ходов в ней из ответов сервера инструментам. События потока сюда не
   // пишутся: state.updated о записанном ходе приходит раньше таймаута, и сверка в sendMove приняла бы
   // записанный ход за незаписанный.
@@ -228,7 +221,10 @@ export function createToolFns(deps: ToolDeps) {
     const { state: g, move, reply } = res;
     const finished = g.status === 'finished';
     state.awaitingReply = Boolean(res.replyTimedOut) && !finished;
-    if (finished) state.announcedFinish = g.id;
+    if (finished) {
+      state.announcedFinish = g.id;
+      noteFinishRevision(state, g.id, g.revision);
+    }
     return {
       ok: true as const,
       yourMove: move.coord,
@@ -351,8 +347,10 @@ export function createToolFns(deps: ToolDeps) {
     async pass() {
       const gameId = gameGuard();
       if (typeof gameId !== 'string') return gameId;
-      forgetFinish(gameId);
-      const res = await sendMove(gameId, 'pass', () => client.pass(gameId, { via: 'voice' }, opts));
+      // Прежний итог этой партии устарел до отправки: пас принимается только в идущей партии, а итог нового
+      // счёта может прийти из потока раньше ответа. Ревизии до ответа нет — забываем без сверки (null).
+      forgetFinishIfReopened(state, gameId, null);
+      const res = await sendMove(gameId, 'pass',() => client.pass(gameId, { via: 'voice' }, opts));
       if (!('state' in res)) return res;
       let g = res.state;
       // Два паса подряд: сервер считает очки в фоне; итог ждём из потока, опрос — запасной путь.
@@ -360,7 +358,10 @@ export function createToolFns(deps: ToolDeps) {
       const scoring = res.reply?.coord === 'pass' && g.status !== 'finished';
       if (scoring) g = await waitFinished(g);
       const finished = g.status === 'finished';
-      if (finished) state.announcedFinish = g.id;
+      if (finished) {
+        state.announcedFinish = g.id;
+        noteFinishRevision(state, g.id, g.revision);
+      }
       state.awaitingReply = Boolean(res.replyTimedOut) && !finished;
       return {
         ok: true as const,
@@ -383,6 +384,7 @@ export function createToolFns(deps: ToolDeps) {
         const res = await client.resign(gameId, { color, via: 'voice' }, opts);
         note(res.state);
         state.announcedFinish = res.state.id;
+        noteFinishRevision(state, res.state.id, res.state.revision);
         state.awaitingReply = false;
         const who = hasEngine(current) ? color : null;
         return { ok: true as const, result: res.state.result ? describeResult(res.state.result, who) : 'партия сдана' };
@@ -397,7 +399,8 @@ export function createToolFns(deps: ToolDeps) {
       try {
         const res = await client.undo(gameId, { via: 'voice' }, opts);
         note(res.state);
-        forgetFinish(gameId);
+        // Удачная отмена возвращает партию в игру: итог, известный на ревизии старше ответа, устарел.
+        forgetFinishIfReopened(state, gameId, res.state.revision);
         state.awaitingReply = false;
         state.lastTap = null;
         return {

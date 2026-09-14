@@ -656,6 +656,27 @@ describe('pass / resign / undo', () => {
     expect(state.announcedFinish).toBe('g1');
   });
 
+  it('resign, ход и пас, закончившие партию, запоминают ревизию итога; отмена новее итога его забывает', async () => {
+    const resigned = await withGame();
+    await resigned.fns.resign();
+    expect(resigned.state.announcedFinish).toBe('g1');
+    expect(resigned.state.finishRevision).toEqual({ gameId: 'g1', revision: gameOf(resigned.client).revision });
+
+    const played = await withGame();
+    const g = gameOf(played.client);
+    const finishedState: GameState = { ...g, status: 'finished', result: { winner: 'B', reason: 'resign' }, revision: 9 };
+    played.client.play = async () => ({ state: finishedState, move: { n: 1, color: 'B', coord: 'D4', captured: 0, at: 't' } });
+    expect(await played.fns.playMove({ coord: 'D4' })).toMatchObject({ ok: true, finished: true });
+    expect(played.state.finishRevision).toEqual({ gameId: 'g1', revision: 9 });
+
+    const passed = await withGame({ replies: ['pass'], finishAfterPolls: 2 });
+    expect(await passed.fns.pass()).toMatchObject({ finished: true });
+    const scored = gameOf(passed.client);
+    expect(passed.state.finishRevision).toEqual({ gameId: 'g1', revision: scored.revision });
+    expect(await passed.fns.undo()).toMatchObject({ ok: true, status: 'playing' });
+    expect(passed.state.announcedFinish).toBeNull();
+    expect(passed.state.finishRevision).toBeNull();
+  });
   it('отмена с отказом сервера итог партии не забывает: партия не возобновилась (I1)', async () => {
     const { fns, state } = await withGame();
     const finished = { gameId: 'g1', result: { winner: 'W' as const, reason: 'resign' as const } };

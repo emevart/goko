@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { ApiError, type EventsTarget, type GameEvent, type GameState, humanText, type Move, RETRY_MS, STABLE_CONNECTION_MS } from '@goko/protocol';
 import { ERROR_REPEAT_MS, SESSION_EXPIRED_INSTRUCTIONS, type WatchHandle, handleEvent, watchSession } from './events.ts';
-import { newAgentState } from './state.ts';
+import { newAgentState, noteFinishRevision } from './state.ts';
 import { fakeGame } from './testing/fake-client.ts';
 
 const mv = (n: number, color: 'B' | 'W', coord: string): Move => ({ n, color, coord, captured: 0, at: 't' });
@@ -359,6 +359,55 @@ describe('handleEvent: конец партии и ошибки', () => {
     handleEvent(upd(fakeGame({ id: 'g1' }), { cause: 'undo', by: 'human', via: 'tap' }), s);
     expect(s.announcedFinish).toBe('g0');
     expect(s.finished).toEqual({ ...old, gameId: 'g0' });
+  });
+  it('устаревшее undo из очереди за репликой не стирает итог, записанный resign позже: ревизия отмены меньше', () => {
+    const s = newAgentState('s1');
+    s.gameId = 'g1';
+    // resign инструментом ответил на ревизии 5, пока событие undo (ревизия 4) ждало конца реплики.
+    s.announcedFinish = 'g1';
+    noteFinishRevision(s, 'g1', 5);
+    handleEvent(upd(fakeGame({ moves: [mv(1, 'B', 'D4')], revision: 4 }), { cause: 'undo', by: 'human', via: 'tap' }), s);
+    expect(s.announcedFinish).toBe('g1');
+    expect(handleEvent({ type: 'game.finished', result: { winner: 'W', reason: 'resign' } }, s)).toBeNull();
+  });
+  it('state.updated законченной партии запоминает ревизию итога; забывает его только отмена новее', () => {
+    const s = newAgentState('s1');
+    s.gameId = 'g1';
+    const result = { winner: 'B' as const, margin: 4.5, reason: 'score' as const };
+    expect(handleEvent(upd(fakeGame({ status: 'finished', result, revision: 6 }), { cause: 'pass', by: 'engine' }), s)).toBeNull();
+    expect(s.finishRevision).toEqual({ gameId: 'g1', revision: 6 });
+    expect(handleEvent({ type: 'game.finished', result }, s)).not.toBeNull();
+    handleEvent(upd(fakeGame({ revision: 5 }), { cause: 'undo', by: 'human', via: 'voice' }), s);
+    expect(s.announcedFinish).toBe('g1');
+    expect(s.finished).toEqual({ gameId: 'g1', result });
+    handleEvent(upd(fakeGame({ revision: 7 }), { cause: 'undo', by: 'human', via: 'voice' }), s);
+    expect(s.announcedFinish).toBeNull();
+    expect(s.finished).toBeNull();
+  });
+  it('отмена в разрыве потока: sync знакомой идущей партии новее итога забывает итог, следующий game.finished объявлен', () => {
+    const s = newAgentState('s1');
+    s.gameId = 'g1';
+    const result = { winner: 'B' as const, margin: 4.5, reason: 'score' as const };
+    handleEvent(upd(fakeGame({ status: 'finished', result, revision: 6 }), { cause: 'pass', by: 'engine' }), s);
+    handleEvent({ type: 'game.finished', result }, s);
+    expect(handleEvent({ type: 'session.game', gameId: 'g1' }, s)).toBeNull();
+    expect(handleEvent(upd(fakeGame({ revision: 7, moves: [mv(1, 'B', 'D4')] }), { cause: 'sync', by: 'system' }), s)).toBeNull();
+    expect(s.finished).toBeNull();
+    expect(s.announcedFinish).toBeNull();
+    expect(handleEvent({ type: 'game.finished', result: { winner: 'W', margin: 0.5, reason: 'score' } }, s)).toContain('Партия окончена');
+  });
+  it('итог цел при sync законченной партии, при sync не новее итога и при sync другой партии', () => {
+    const s = newAgentState('s1');
+    s.gameId = 'g1';
+    const result = { winner: 'B' as const, margin: 4.5, reason: 'score' as const };
+    handleEvent(upd(fakeGame({ status: 'finished', result, revision: 6 }), { cause: 'pass', by: 'engine' }), s);
+    handleEvent({ type: 'game.finished', result }, s);
+    handleEvent(upd(fakeGame({ status: 'finished', result, revision: 6 }), { cause: 'sync', by: 'system' }), s);
+    // Снимок sync снят до конца партии (ревизия не новее итога), а итог уже записан.
+    handleEvent(upd(fakeGame({ revision: 5 }), { cause: 'sync', by: 'system' }), s);
+    handleEvent(upd(fakeGame({ id: 'g2', revision: 9 }), { cause: 'sync', by: 'system' }), s);
+    expect(s.finished).toEqual({ gameId: 'g1', result });
+    expect(s.announcedFinish).toBe('g1');
   });
   it('любой state.updated снимает retriesExhausted: серию перезапустил коммит', () => {
     const s = newAgentState('s1');
