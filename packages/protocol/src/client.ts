@@ -175,9 +175,9 @@ export function createClient(opts: ClientOptions) {
           clearTimeout(timer);
           own.removeEventListener('abort', onAbort);
         };
-        if (own.aborted) return onAbort();
-        own.addEventListener('abort', onAbort, { once: true });
-        timer = setTimeout(() => controller.abort(new StreamIdleError(STREAM_IDLE_MS)), STREAM_IDLE_MS);
+        // Обработчик на work — до проверки отмены: уже начатое чтение отклоняется позже (тело отменено), и без
+        // обработчика это был бы unhandledRejection, в Node — падение процесса. Колбэки then асинхронны, поэтому
+        // слушатель и таймер ниже успевают встать до settle.
         work.then(
           (value) => {
             settle();
@@ -188,6 +188,9 @@ export function createClient(opts: ClientOptions) {
             reject(e);
           },
         );
+        if (own.aborted) return onAbort();
+        own.addEventListener('abort', onAbort, { once: true });
+        timer = setTimeout(() => controller.abort(new StreamIdleError(STREAM_IDLE_MS)), STREAM_IDLE_MS);
       });
 
     let source: ReadableStreamDefaultReader<Uint8Array> | undefined;

@@ -658,6 +658,38 @@ describe('сторож простоя потока событий', () => {
     expect(f.calls).toHaveLength(1);
   });
 
+  it('отмена, пока вызывающий ждёт в теле цикла, затем next(): AbortError без необработанного отказа чтения', async () => {
+    // Тело, как у undici: отмена сигнала запроса переводит поток в ошибку, и следующее чтение отклоняется.
+    const f = fakeFetch((call) => {
+      const signal = call.init.signal ?? undefined;
+      const stream = new ReadableStream<Uint8Array>({
+        start(c) {
+          c.enqueue(new TextEncoder().encode(event));
+          signal?.addEventListener('abort', () => c.error(signal.reason), { once: true });
+        },
+      });
+      return sseResponse(stream);
+    });
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => void unhandled.push(reason);
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      const client = createClient({ baseUrl: 'http://api.test', appKey: 'k', fetch: f.fetch });
+      const ac = new AbortController();
+      const stream = client.events({ sessionId: 's1' }, ac.signal);
+      expect((await stream.next()).value).toMatchObject({ type: 'engine.thinking' });
+      // Вызывающий ждёт что-то своё, отмена приходит во время ожидания, цикл по signal не выходит и зовёт next().
+      ac.abort();
+      await tick();
+      const out = await stream.next().catch((e: unknown) => e);
+      expect((out as Error).name).toBe('AbortError');
+      for (let i = 0; i < 5; i++) await tick();
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+  });
+
   it('таймер и слушатель внешнего сигнала снимаются: конец потока, ошибка статуса, ранний выход', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     const ac = new AbortController();
