@@ -1,7 +1,9 @@
 # game-server: Node 22 запускает TypeScript напрямую (type stripping), сборка не нужна.
 # npm ci по workspace'у ставит только его зависимости; package.json workspace'ов нужны для lock-файла
-# (spike/ исключён .dockerignore — если npm ci на это ругается, см. шаг 8).
-FROM node:22-slim
+# (spike/ исключён .dockerignore; лишнюю запись spike в lock npm ci --workspace терпит, проверено сборкой).
+# bookworm явно: плавающий node:22-slim переедет на следующий Debian, а сборка на VPS идёт позже проверки на ПК.
+# ca-certificates не нужен: livekit-server-sdk ходит в API LiveKit через fetch Node со встроенными корнями.
+FROM node:22-bookworm-slim
 ENV NODE_ENV=production
 WORKDIR /app
 COPY package.json package-lock.json ./

@@ -1,12 +1,15 @@
+# Контекст сборки — корень репозитория. Шаблоны без **/ привязаны к корню контекста,
+# поэтому секреты и логи исключаются на любой глубине.
 .git
+.superpowers
 node_modules
 **/node_modules
 data
 apps/web/dist
 apps/go-engine/models
 apps/go-engine/bin
-.env
-.env.*
+**/.env
+**/.env.*
 docs
 spike
-*.log
+**/*.log

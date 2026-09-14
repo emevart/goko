@@ -7,6 +7,8 @@ ARG MAIN_NET_URL=https://media.katagotraining.org/uploaded/networks/models/kata1
 ARG HUMAN_NET_URL=https://github.com/lightvector/KataGo/releases/download/v1.15.0/b18c384nbt-humanv0.bin.gz
 # Суммы сняты с фактически скачанных файлов 08.09. При смене KATAGO_ASSET или URL сети
 # сумму надо передать через --build-arg, иначе сборка упадёт на sha256sum -c.
+# KATAGO_ASSET и KATAGO_SHA256 по умолчанию скопированы в args сервиса go-engine в infra/docker-compose.yml:
+# compose передаёт их всегда, так что при смене версии менять в обоих местах.
 ARG KATAGO_SHA256=33e79780dbe3bf6ee859e16f64952cdfc90f7210c8f71ad978ffcba85ad20d79
 ARG MAIN_NET_SHA256=3d8a24697ba25fe4da39af4c2b6bd405907b0ad8295322f5a550fa2d8fe4a2f4
 ARG HUMAN_NET_SHA256=637746e44f0efe00ad1245a50aa9bbf0716efe364c43965ead97bd6835d84ab5
@@ -32,8 +34,10 @@ COPY apps/go-engine/config/analysis.cfg /opt/katago/analysis.cfg
 RUN chmod -R a+rX /opt/katago
 
 # Стадия engine: Node 22 с обёрткой поверх бинарника и сетей из стадии katago.
-FROM node:22-slim AS engine
+# bookworm явно: от версии Debian зависят имя пакета libzip4 и glibc под бинарником KataGo.
+FROM node:22-bookworm-slim AS engine
 ENV NODE_ENV=production
+# ca-certificates не нужен: движок в сеть по TLS не ходит, сети скачаны в стадии katago.
 # libzip4 — имя пакета в Debian bookworm (в Ubuntu noble — libzip4t64); libgomp1 нужен eigen-сборке KataGo (OpenMP).
 RUN apt-get update && apt-get install -y --no-install-recommends libzip4 libgomp1 && rm -rf /var/lib/apt/lists/*
 COPY --from=katago /opt/katago /opt/katago
@@ -52,7 +56,7 @@ RUN npm ci --omit=dev --workspace apps/go-engine --include-workspace-root=false
 COPY packages/go-core/src packages/go-core/src
 COPY packages/protocol/src packages/protocol/src
 COPY apps/go-engine/src apps/go-engine/src
-COPY apps/go-engine/config apps/go-engine/config
+# Конфиг один: /opt/katago/analysis.cfg из стадии katago (KATAGO_CONFIG ниже), apps/go-engine/config в образ не копируется.
 ENV KATAGO_BIN=/opt/katago/katago \
     KATAGO_MODEL=/opt/katago/models/main.txt.gz \
     KATAGO_HUMAN_MODEL=/opt/katago/models/human.bin.gz \

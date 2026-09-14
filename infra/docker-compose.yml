@@ -1,4 +1,15 @@
 name: goko
+# Ручные команды compose на VPS — только с подгрузкой .env в оболочку, как в deploy.sh:
+#   set -a; . /opt/goko/.env; set +a; docker compose --env-file /opt/goko/.env ...
+# Парсер --env-file читает строку «KEY=   # комментарий» как значение «# комментарий»; переменные оболочки важнее файла.
+
+# Ротация логов Docker для сервисов приложения: voice-agent пишет расшифровки реплик, храниться бессрочно они не должны.
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   caddy:
     image: caddy:2
@@ -44,6 +55,7 @@ services:
       context: ..
       dockerfile: apps/game-server/Dockerfile
     restart: unless-stopped
+    logging: *logging
     # tini PID 1: пересылает SIGTERM node и собирает осиротевших потомков.
     init: true
     # Остановка game-server укладывается в SHUTDOWN_MS 25 с (D-0010); docker stop по умолчанию ждёт 10 с и шлёт SIGKILL.
@@ -82,11 +94,13 @@ services:
       context: ..
       dockerfile: apps/go-engine/Dockerfile
       # Сумма идёт в паре со сборкой: Dockerfile проверяет zip через sha256sum -c.
-      # Пустые или незаданные переменные — сборка eigenavx2 и её сумма из Dockerfile стадии 0.
+      # Пустые или незаданные переменные — сборка eigenavx2 и её сумма. Значения по умолчанию — копия ARG
+      # из apps/go-engine/Dockerfile: compose передаёт args всегда, ARG там для compose не действует; менять вместе.
       args:
         KATAGO_ASSET: ${KATAGO_ASSET:-katago-v1.18.1-eigenavx2-linux-x64.zip}
         KATAGO_SHA256: ${KATAGO_SHA256:-33e79780dbe3bf6ee859e16f64952cdfc90f7210c8f71ad978ffcba85ad20d79}
     restart: unless-stopped
+    logging: *logging
     # KataGo запускается через sh-обёртку: tini собирает потомков, которых Node в роли PID 1 не соберёт.
     init: true
     # Остановка KataGo: SIGTERM -> stop() движка; запас над 25 с, как у game-server (D-0010).
@@ -113,9 +127,19 @@ services:
       context: ..
       dockerfile: apps/voice-agent/Dockerfile
     restart: unless-stopped
+    logging: *logging
     init: true
     # drain 5 с + shutdownProcessTimeout 20 с + закрытие инференса до 5 с ≈ 30 с (задача 4, main.ts); запас вдвое.
     stop_grace_period: 60s
+    # Health-сервер @livekit/agents в режиме start (порт 8081 внутри контейнера, не публикуется): 200 — воркер
+    # зарегистрирован в LiveKit и процесс инференса жив, иначе 503. Вход заданий в комнату он не проверяет:
+    # это проверка runbook после деплоя (строка «[OK] voice-agent: комната …» в логе).
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8081/').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
     environment:
       LIVEKIT_URL: ${LIVEKIT_URL}
       LIVEKIT_API_KEY: ${LIVEKIT_API_KEY}
