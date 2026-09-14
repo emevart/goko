@@ -3267,13 +3267,25 @@ describe('GameService: лимит партий и старые снапшоты 
 });
 
 describe('GameService: сдача проверяет место (B7) и занятый id', () => {
-  it('сдача за место движка — not_your_turn, партия не меняется; движок сдаётся сам', async () => {
-    const { service, bus } = await make(createFakeEngine({ script: ['E5'] }));
-    const g = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: true });
+  it('сдача за место движка — bad_request с причиной not_your_seat, и на ходе человека, и на ходе Гоко; партия не меняется; движок сдаётся сам', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const engine = createFakeEngine({ script: ['E5'], delayMs: 100 });
+    const { service, bus } = await make(engine);
+    const g = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: false });
     const events = record(bus, `game:${g.state.id}`);
-    await expect(service.resign(g.state.id, { color: 'W', via: 'voice' })).rejects.toMatchObject({ code: 'not_your_turn', status: 409 });
-    expect(service.get(g.state.id).status).toBe('playing');
+    // Ход человека: отказ связан с местом, а не с очередью хода.
+    const refused = await service.resign(g.state.id, { color: 'W', via: 'voice' }).catch((e: unknown) => e);
+    expect(refused).toBeInstanceOf(ApiError);
+    expect(refused).toMatchObject({ code: 'bad_request', status: 400, details: { reason: 'not_your_seat' } });
     expect(events).toEqual([]);
+    await service.play(g.state.id, { coord: 'D4', waitForReply: false, via: 'voice' });
+    // Ход Гоко: тот же отказ.
+    await expect(service.resign(g.state.id, { color: 'W', via: 'voice' })).rejects.toMatchObject({ code: 'bad_request', details: { reason: 'not_your_seat' } });
+    await thinkThrough(engine, 1, 100);
+    await untilTick(() => service.get(g.state.id).moves.length === 2);
+    // Сдачи не было: только ход человека, раздумье и ответ Гоко.
+    expect(events.map((e) => (e.type === 'state.updated' ? e.cause : e.type))).toEqual(['play', 'engine.thinking', 'engine']);
+    expect(service.get(g.state.id).status).toBe('playing');
     const byEngine = await service.resign(g.state.id, { color: 'W', via: 'api' }, 'engine');
     expect(byEngine.state.result).toMatchObject({ winner: 'B', reason: 'resign' });
   });

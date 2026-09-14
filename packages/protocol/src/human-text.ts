@@ -12,6 +12,13 @@ export const ILLEGAL_REASON_TEXT: Record<IllegalReasonCode, string> = {
   suicide: 'самоубийство: у камня не будет дыханий',
 };
 
+export type BadRequestReasonCode = 'not_your_seat';
+
+// Причины bad_request, у которых есть своя фраза: сдача за цвет, которым человек не управляет.
+export const BAD_REQUEST_REASON_TEXT: Record<BadRequestReasonCode, string> = {
+  not_your_seat: 'это не твой цвет',
+};
+
 export const ERROR_TEXT: Record<ErrorCode, string> = {
   invalid_coord: 'не понял координату',
   illegal_move: 'так ходить нельзя',
@@ -21,7 +28,8 @@ export const ERROR_TEXT: Record<ErrorCode, string> = {
   revision_conflict: 'партия уже изменилась, повтори ещё раз',
   engine_busy: 'Гоко думает дольше обычного',
   engine_unavailable: 'Гоко сейчас недоступен',
-  retries_exhausted: 'Гоко не смог сделать ход: движок не отвечает, нужно повторить',
+  // Без слова «ход»: серия повторов бывает и у автосчёта после двух пасов.
+  retries_exhausted: 'движок не отвечает, нужно повторить',
   unsupported_controller: 'такое место в партии пока не поддерживается',
   not_found: 'такой партии или сессии нет',
   bad_request: 'запрос не по форме',
@@ -43,6 +51,7 @@ const own = <T extends object>(table: T, key: unknown): key is keyof T => typeof
 // code — строка, потому что код события error в схеме не перечисление: незнакомый код даёт текст internal.
 export function humanText(code: string, details?: Record<string, unknown>): string {
   if (code === 'illegal_move' && own(ILLEGAL_REASON_TEXT, details?.reason)) return ILLEGAL_REASON_TEXT[details.reason];
+  if (code === 'bad_request' && own(BAD_REQUEST_REASON_TEXT, details?.reason)) return BAD_REQUEST_REASON_TEXT[details.reason];
   if (own(CLIENT_ERROR_TEXT, code)) return CLIENT_ERROR_TEXT[code];
   return own(ERROR_TEXT, code) ? ERROR_TEXT[code] : ERROR_TEXT.internal;
 }

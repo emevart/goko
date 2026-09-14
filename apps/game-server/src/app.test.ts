@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { RoomAgentDispatch, TokenVerifier } from 'livekit-server-sdk';
-import { GameSettings, createClient, parseSseStream } from '@goko/protocol';
+import { type ApiError, GameSettings, createClient, humanText, parseSseStream } from '@goko/protocol';
 import { fakeFetch } from '@goko/protocol/testing';
 import { EventEmitter, getEventListeners } from 'node:events';
 import { serve } from '@hono/node-server';
@@ -259,6 +259,10 @@ describe('createApp: маршруты брифа', () => {
     expect((await client.getGame(id)).moves.map((m) => m.coord)).toEqual(['C4', 'pass']);
     expect(await client.ascii(id)).toContain('toPlay B');
     expect(await client.sgf(id)).toContain('SZ[9]');
+    // Сдача за цвет Гоко — 400 bad_request с причиной not_your_seat; клиент поднимает details, humanText объясняет.
+    const foreign = await client.resign(id, { color: 'W', via: 'voice' }).catch((e: unknown) => e);
+    expect(foreign).toMatchObject({ code: 'bad_request', status: 400, details: { reason: 'not_your_seat' } });
+    expect(humanText((foreign as ApiError).code, (foreign as ApiError).details)).toBe('это не твой цвет');
     expect((await client.resign(id, { color: 'B', via: 'voice' })).state.result).toMatchObject({ winner: 'W', reason: 'resign' });
     await expect(client.pass(id)).rejects.toMatchObject({ code: 'game_finished', status: 409 });
   });

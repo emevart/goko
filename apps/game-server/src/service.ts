@@ -302,7 +302,11 @@ export class GameService {
   async resign(id: string, req: ResignInput, by: By = 'human'): Promise<StateResponse> {
     return this.humanAction(id, by === 'human', () => this.locked(id, async () => {
       const prev = this.get(id);
-      // Сдаться за место движка может только сам движок (раздел 5 спеки).
+      // Сдаться за место движка может только сам движок (раздел 5 спеки). Отказ связан с местом, а не
+      // с очередью хода: bad_request с причиной not_your_seat, а не not_your_turn.
+      if (prev.seats[req.color].controller === 'engine' && by !== 'engine') {
+        throw new ApiError('bad_request', `cannot resign for the engine seat ${req.color}`, { reason: 'not_your_seat' });
+      }
       this.checkSeat(prev, req.color, by);
       const next = resignGame(prev, req.color);
       await this.commit(next, 'resign', by, req.via);

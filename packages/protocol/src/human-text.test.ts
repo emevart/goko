@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import * as protocol from './index.ts';
 import { ClientTimeoutError, ERROR_CODES } from './errors.ts';
-import { CLIENT_ERROR_TEXT, ERROR_TEXT, ILLEGAL_REASON_TEXT, humanText } from './human-text.ts';
+import { BAD_REQUEST_REASON_TEXT, CLIENT_ERROR_TEXT, ERROR_TEXT, ILLEGAL_REASON_TEXT, humanText } from './human-text.ts';
 
 describe('текст ошибки для человека', () => {
   it('у каждого кода есть русский текст, лишних кодов в таблице нет', () => {
@@ -29,8 +29,20 @@ describe('текст ошибки для человека', () => {
     expect(humanText('not_your_turn', { reason: 'ko' })).toBe(ERROR_TEXT.not_your_turn);
   });
 
-  it('исчерпанная серия повторов: нейтральный текст без просьб, годится и вебу с кнопкой «Повторить», и голосу', () => {
-    expect(humanText('retries_exhausted')).toBe('Гоко не смог сделать ход: движок не отвечает, нужно повторить');
+  it('bad_request с причиной not_your_seat (сдача за чужой цвет): «это не твой цвет»; без причины — общий текст', () => {
+    expect(BAD_REQUEST_REASON_TEXT).toEqual({ not_your_seat: 'это не твой цвет' });
+    expect(humanText('bad_request', { reason: 'not_your_seat' })).toBe('это не твой цвет');
+    expect(humanText('bad_request')).toBe(ERROR_TEXT.bad_request);
+    expect(humanText('bad_request', { reason: 'toString' })).toBe(ERROR_TEXT.bad_request);
+    // Причины двух таблиц не смешиваются.
+    expect(humanText('bad_request', { reason: 'ko' })).toBe(ERROR_TEXT.bad_request);
+    expect(humanText('illegal_move', { reason: 'not_your_seat' })).toBe(ERROR_TEXT.illegal_move);
+    expect(humanText('not_your_turn', { reason: 'not_your_seat' })).toBe(ERROR_TEXT.not_your_turn);
+    expect(protocol.BAD_REQUEST_REASON_TEXT).toBe(BAD_REQUEST_REASON_TEXT);
+  });
+
+  it('исчерпанная серия повторов: нейтральный текст без просьб и без слова «ход» (серия бывает и у автосчёта)', () => {
+    expect(humanText('retries_exhausted')).toBe('движок не отвечает, нужно повторить');
     expect(humanText('engine_gave_up')).toBe(ERROR_TEXT.internal);
   });
 
