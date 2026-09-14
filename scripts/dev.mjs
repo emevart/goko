@@ -57,7 +57,7 @@ export function devPlan(parentEnv, exists, makeKey = () => randomBytes(24).toStr
 
 /**
  * Опции запуска одного процесса dev.
- * POSIX: процесс — лидер своей группы, SIGTERM от dev уходит всему дереву (npm -> vite).
+ * POSIX: процесс — лидер своей группы, SIGTERM от dev уходит всему дереву (go-engine -> KataGo).
  * Windows: windowsHide: false — ребёнок остаётся в консоли терминала и сам получает Ctrl+C. Со скрытием
  * libuv ставит CREATE_NO_WINDOW (stdio без наследования), у ребёнка своя консоль, и мягкой остановки нет.
  * Окно при этом не появляется, если у dev есть консоль (запуск из терминала): ребёнок наследует её.

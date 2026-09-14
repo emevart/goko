@@ -1,9 +1,10 @@
 // Уход и возврат участника. RoomIO стартует с closeOnDisconnect: false: перезагрузка вкладки возвращает ту же
 // сессию и ту же комнату с тем же identity (phone-<sid>), а новой диспетчеризации агента нет (D-0001).
 // Поэтому сеанс при уходе не закрываем, а ждём возврата: не вернулся за RETURN_GRACE_MS — onGone
-// (в main.ts — ctx.shutdown), и Realtime не живёт в комнате без человека дольше срока. Пока агент в
-// комнате, она не пуста, и emptyTimeout комнаты в game-server (300 с) не срабатывает; срок согласован
-// с departureTimeout комнаты в game-server (900 с).
+// (в main.ts — ctx.shutdown), и Realtime не живёт в комнате без человека дольше срока. Агенты комнату не
+// держат: emptyTimeout (300 с) и departureTimeout (900 с) комнаты считаются только по участникам-не-агентам.
+// После ухода телефона комната живёт departureTimeout 900 с (ROOM_DEPARTURE_TIMEOUT_SECONDS,
+// apps/game-server/src/livekit.ts); RETURN_GRACE_MS равен ему — менять оба значения вместе.
 
 import { type Clock, realClock } from './clock.ts';
 

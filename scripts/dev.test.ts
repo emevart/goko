@@ -1,5 +1,10 @@
+import { existsSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { DEV_AGENT_NAME, devPlan, devStartOptions, startDev } from './dev.mjs';
+
+const repoRoot = fileURLToPath(new URL('..', import.meta.url));
 
 const secretEnv = {
   APP_KEY: 'secret-app',
@@ -43,6 +48,9 @@ describe('dev: план запуска', () => {
     expect(web?.cmd).toBe(process.execPath);
     expect(web?.args).toEqual(['node_modules/vite/bin/vite.js', 'apps/web', '--host', '127.0.0.1', '--port', '5173', '--strictPort']);
     expect(web?.shell).toBeUndefined();
+    // Путь жёсткий: vite поднят в корневой node_modules. Если workspaces перестанут его поднимать
+    // (конфликт версий), web упадёт на старте с MODULE_NOT_FOUND — ловим здесь.
+    expect(existsSync(path.join(repoRoot, web?.args[0] ?? 'нет web'))).toBe(true);
   });
 
   it('строки для терминала не содержат значений переменных', () => {

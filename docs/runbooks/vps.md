@@ -16,8 +16,9 @@ dc() { ( set -a; . /opt/goko/.env; set +a; docker compose --env-file /opt/goko/.
 `.env` подгружается в подоболочку: парсер `--env-file` читает строку
 `KEY=   # комментарий` как значение (шапка `infra/docker-compose.yml`), а в
 родительской оболочке секреты не остаются. Значения переменных из `.env` не
-печатать и не вставлять в доки и issue. В доках — только имена переменных
-(`WEB_HOST`, `LK_HOST`, `ACME_EMAIL`), без адресов, доменов и хостнеймов.
+печатать и не вставлять в доки и issue. В командах доков — только имена
+переменных (`WEB_HOST`, `LK_HOST`, `ACME_EMAIL`); адресов и хостнеймов личной
+инфраструктуры нет нигде, домены сервиса записаны только в `docs/NOW.md`.
 
 ## Состав
 
@@ -60,6 +61,12 @@ ssh goko 'grep -c avx2 /proc/cpuinfo'                  # не 0; иначе в /
 ssh goko 'set -a; . /opt/goko/.env; set +a
   for v in WEB_HOST LK_HOST LIVEKIT_URL LIVEKIT_API_KEY LIVEKIT_API_SECRET OPENAI_API_KEY APP_KEY ENGINE_KEY; do
     [ -n "$(printenv "$v")" ] && echo "[OK] $v" || echo "[X] $v пуст"; done'
+
+# 3а. Режим prod, а не остатки dev: API_UPSTREAM пуст или 127.0.0.1:8787 (иначе /api уйдёт на ПК — 502),
+#     AGENT_NAME пуст или goko (иначе агент goko-dev не придёт в комнаты VPS). Значения не печатаются.
+ssh goko 'set -a; . /opt/goko/.env; set +a
+  case "${API_UPSTREAM:-}" in ""|127.0.0.1:8787) echo "[OK] API_UPSTREAM prod";; *) echo "[X] API_UPSTREAM не prod";; esac
+  case "${AGENT_NAME:-}" in ""|goko) echo "[OK] AGENT_NAME prod";; *) echo "[X] AGENT_NAME не goko";; esac'
 
 # 4. Из контейнера доступен свой публичный LiveKit (hairpin): game-server создаёт комнаты по LIVEKIT_URL,
 #    voice-agent подключается туда же. Печатается статус или имя ошибки, без адреса.
@@ -165,7 +172,8 @@ healthcheck не проверяет: его видно по строке
 
 Бесплатные (Realtime не открывается: телефон в комнату не входит, агент ждёт
 участника), но это действия на VPS — только по явной просьбе founder'а.
-Каждая занимает один слот `MAX_SESSIONS` до истечения TTL сессии; если слот
+Проверка 1 занимает один слот `MAX_SESSIONS` до истечения TTL сессии
+(проверка 2 смотрит на ту же сессию, 3 и 4 сессий не создают); если слот
 нужен сразу, а никто не играет, — `dc restart game-server`. Значения из
 `.env` читаются в подоболочке и не печатаются; ответ `POST /api/sessions`
 содержит токен LiveKit, поэтому из него вырезается только id сессии.
@@ -191,8 +199,16 @@ healthcheck не проверяет: его видно по строке
 ```bash
 # 2. D-0001: комната с одним агентом (телефон не вошёл) закрывается по empty_timeout 300 с.
 #    SID задан в подоболочке проверки 1 и здесь пуст: взять id из её строки [OK]; засечь время создания сессии.
+#    Две команды -f, каждая держит терминал до Ctrl+C: запускать в двух ssh-подключениях,
+#    в каждом объявить dc и SID заново.
+# терминал 1
 SID=<id из строки [OK] проверки 1>
 dc logs -f --since 10m livekit | grep --line-buffered "goko-$SID"
+```
+
+```bash
+# терминал 2
+SID=<id из строки [OK] проверки 1>
 dc logs -f --since 10m voice-agent | grep --line-buffered "goko-$SID\|участник не пришёл"
 ```
 
@@ -313,7 +329,7 @@ cd /opt/goko/src/infra && dc start game-server
 
 ```bash
 dc restart voice-agent                  # без пересборки
-dc up -d --build voice-agent            # пересобрать после правки кода (после rsync через deploy.sh)
+dc up -d --build voice-agent            # пересобрать один сервис из уже синхронизированного /opt/goko/src
 dc up -d --build go-engine              # то же для движка; партии в это время получат engine_unavailable
 ```
 
@@ -340,8 +356,8 @@ dc up -d caddy                          # перечитать API_UPSTREAM
 ```
 
 В dev-режиме контейнер `voice-agent` может оставаться запущенным: имя `goko`
-в комнаты dev-сессий не диспетчеризуется (game-server на ПК выпускает токены с
-`goko-dev`).
+в комнаты dev-сессий не диспетчеризуется (game-server на ПК создаёт комнаты с
+диспетчеризацией `goko-dev`).
 
 `[!]` `npm run dev` запускает game-server с `ALLOW_SESSIONLESS_GAMES=1` и без
 `TRUST_PROXY`: пока Caddy смотрит на ПК, `POST /api/games` открыт всем, у кого
@@ -351,10 +367,25 @@ prod тем же `dc up -d caddy`.
 
 ## Откат
 
+Два разных действия, не последовательность: либо вернуть прежнюю версию,
+либо остановить всё.
+
+Вернуть прежнюю версию (на ПК, по явной просьбе founder'а):
+
 ```bash
-# на ПК: вернуть рабочий коммит и задеплоить его
-git checkout <commit> && infra/scripts/deploy.sh --build-web && git checkout -   # вернуться на ветку, с которой ушли
-# на VPS: остановить всё
+git checkout <commit>
+infra/scripts/deploy.sh --build-web
+git checkout -        # вернуться на ветку в любом случае, даже если деплой упал
+```
+
+`--build-web` есть в `deploy.sh` начиная с задачи 10 плана голоса и веба.
+Скрипт более раннего коммита выйдет с `unknown arg --build-web` и ничего не
+выкатит: откат на такой коммит этим способом не делается.
+
+Остановить всё, включая Caddy и LiveKit (на VPS; страница и `/api` перестают
+отвечать):
+
+```bash
 dc down
 ```
 
