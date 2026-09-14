@@ -1,6 +1,6 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { ApiError, type EventsTarget, type GameEvent, type GameState, humanText, type Move, RETRY_MS, STABLE_CONNECTION_MS } from '@goko/protocol';
-import { ERROR_REPEAT_MS, SESSION_EXPIRED_INSTRUCTIONS, handleEvent, watchSession } from './events.ts';
+import { ERROR_REPEAT_MS, SESSION_EXPIRED_INSTRUCTIONS, type WatchHandle, handleEvent, watchSession } from './events.ts';
 import { newAgentState } from './state.ts';
 import { fakeGame } from './testing/fake-client.ts';
 
@@ -79,6 +79,21 @@ describe('handleEvent: подключение и новые партии', () =>
     expect(s.awaitingReply).toBe(true);
     expect(s.gameId).toBe('g2');
   });
+  it('sync партии, сменившей уже известную, — тоже «продолжаем»', () => {
+    const s = newAgentState('s1');
+    s.gameId = 'g1';
+    expect(handleEvent(upd(fakeGame({ id: 'g2' }), { cause: 'sync', by: 'system' }), s)).toContain('Продолжаем партию');
+  });
+  it('new с экрана, первый ход человека: движка не ждём, флаги прежней партии сброшены', () => {
+    const s = newAgentState('s1');
+    s.gameId = 'g1';
+    s.awaitingReply = true;
+    s.lastTap = { cause: 'play', coord: 'D4' };
+    const text = handleEvent(upd(fakeGame({ id: 'g2' }), { cause: 'new', by: 'system' }), s);
+    expect(text).toContain('Первый ход человека');
+    expect(s.awaitingReply).toBe(false);
+    expect(s.lastTap).toBeNull();
+  });
   it('new партии из start_game молчит', () => {
     const s = newAgentState('s1');
     s.toolGames.add('g1');
@@ -118,6 +133,14 @@ describe('handleEvent: ходы', () => {
     expect(text).toContain('ка десять');
     expect(text).toContain('на экране');
     expect(s.lastTap).toBeNull();
+  });
+  it('ответ движка на тап снимает и awaitingReply: следующий ход движка не озвучивается повторно', () => {
+    const s = newAgentState('s1');
+    s.gameId = 'g1';
+    s.awaitingReply = true;
+    s.lastTap = { cause: 'play', coord: 'D4' };
+    expect(handleEvent(upd(fakeGame({ moves: [mv(1, 'B', 'D4'), mv(2, 'W', 'K10')] }), { cause: 'engine', by: 'engine' }), s)).toContain('на экране');
+    expect(s.awaitingReply).toBe(false);
   });
   it('пас тапом и ответный пас', () => {
     const s = newAgentState('s1');
@@ -210,6 +233,21 @@ describe('handleEvent: конец партии и ошибки', () => {
     s.announcedFinish = 'g1';
     expect(handleEvent({ type: 'game.finished', result: { winner: 'W', reason: 'resign' } }, s)).toBeNull();
   });
+  it('game.finished кладёт итог и когда он уже объявлен; объявление сбрасывает флаги хода', () => {
+    const s = newAgentState('s1');
+    s.gameId = 'g1';
+    s.announcedFinish = 'g1';
+    const result = { winner: 'W' as const, reason: 'resign' as const };
+    expect(handleEvent({ type: 'game.finished', result }, s)).toBeNull();
+    expect(s.finished).toEqual({ gameId: 'g1', result });
+    const s2 = newAgentState('s1');
+    s2.gameId = 'g1';
+    s2.awaitingReply = true;
+    s2.lastTap = { cause: 'play', coord: 'D4' };
+    expect(handleEvent({ type: 'game.finished', result }, s2)).not.toBeNull();
+    expect(s2.awaitingReply).toBe(false);
+    expect(s2.lastTap).toBeNull();
+  });
   it('game.finished, пока pass ждёт итог: итог в state.finished, реплики нет (R2)', () => {
     const s = newAgentState('s1');
     s.gameId = 'g1';
@@ -232,6 +270,24 @@ describe('handleEvent: конец партии и ошибки', () => {
     expect(handleEvent({ type: 'error', gameId: 'g1', code: 'engine_unavailable', message: 'engine is unavailable' }, s, now)).toBeNull();
     t += 2;
     expect(handleEvent({ type: 'error', gameId: 'g1', code: 'engine_unavailable', message: 'engine is unavailable' }, s, now)).not.toBeNull();
+  });
+  it('ERROR_REPEAT_MS — 30 с; ровно через 30 с ошибка снова озвучивается', () => {
+    expect(ERROR_REPEAT_MS).toBe(30_000);
+    const s = newAgentState('s1');
+    s.gameId = 'g1';
+    let t = 1_000_000;
+    const now = () => t;
+    expect(handleEvent({ type: 'error', gameId: 'g1', code: 'engine_busy', message: 'engine did not respond within 8000 ms' }, s, now)).not.toBeNull();
+    t += ERROR_REPEAT_MS;
+    expect(handleEvent({ type: 'error', gameId: 'g1', code: 'engine_busy', message: 'engine did not respond within 8000 ms' }, s, now)).not.toBeNull();
+  });
+  it('error до первого session.game (партия ещё неизвестна) не отсекается', () => {
+    const s = newAgentState('s1');
+    const now = () => 1_000_000;
+    expect(handleEvent({ type: 'error', gameId: 'g1', code: 'retries_exhausted', message: 'background task retries are exhausted' }, s, now)).toContain(
+      humanText('retries_exhausted'),
+    );
+    expect(s.retriesExhausted).toBe(true);
   });
   it('error чужой партии (гонка при смене) молчит и флаги не трогает', () => {
     const s = newAgentState('s1');
@@ -420,30 +476,43 @@ describe('watchSession', () => {
     expect(slept).toEqual([80_000, 75_000]);
     expect(s.blockedUntil).toBe(90_000);
   });
-  it('реплика человека после retries_exhausted не переоткрывает поток до blockedUntil', async () => {
+  it('реплика человека после retries_exhausted не переоткрывает поток до blockedUntil; переоткрытое и сразу оборванное подключение — как обычный обрыв', async () => {
     const s = newAgentState('s1');
     const abort = new AbortController();
     const logs: string[] = [];
+    const slept: number[] = [];
     let t = 0;
     let connects = 0;
+    // Поток дошёл до ожидания: отмена застаёт источник внутри чтения, как fetch у настоящего клиента.
+    let waiting: () => void = () => {};
+    const reachedWait = new Promise<void>((resolve) => {
+      waiting = resolve;
+    });
     const client = {
       async *events(_target: EventsTarget, signal?: AbortSignal): AsyncGenerator<GameEvent, void, undefined> {
         connects++;
         if (connects === 1) {
           yield { type: 'session.game', gameId: 'g1' };
           yield { type: 'error', gameId: 'g1', code: 'retries_exhausted', message: 'background task retries are exhausted' };
-          await new Promise<void>((resolve) => signal?.addEventListener('abort', () => resolve(), { once: true }));
+          const aborted = new Promise<void>((resolve) => signal?.addEventListener('abort', () => resolve(), { once: true }));
+          waiting();
+          await aborted;
           throw new DOMException('This operation was aborted', 'AbortError');
         }
+        if (connects === 2) throw new TypeError('fetch failed'); // переоткрытие не удалось, session.game не пришёл
         abort.abort();
       },
     };
-    let announced: () => void = () => {};
-    const exhaustedSpoken = new Promise<void>((resolve) => {
-      announced = resolve;
+    const watch = watchSession({
+      client,
+      state: s,
+      signal: abort.signal,
+      speak: () => {},
+      log: (l) => void logs.push(l),
+      now: () => t,
+      sleep: async (ms) => void slept.push(ms),
     });
-    const watch = watchSession({ client, state: s, signal: abort.signal, speak: () => announced(), log: (l) => void logs.push(l), now: () => t, sleep: async () => {} });
-    await exhaustedSpoken;
+    await reachedWait;
     s.blockedUntil = 50_000;
     t = 49_999;
     watch.humanSpoke(); // запрос к game-server раньше срока Retry-After не шлём: поток живёт, флаг остаётся
@@ -451,9 +520,159 @@ describe('watchSession', () => {
     expect(s.retriesExhausted).toBe(true);
     t = 50_000;
     watch.humanSpoke();
+    watch.humanSpoke(); // вторая реплика подряд не рвёт поток ещё раз
+    await watch.done;
+    expect(connects).toBe(3);
+    expect(logs).toEqual([
+      '[OK] voice-agent: реплика человека после retries_exhausted, переоткрываю поток сессии',
+      '[!] voice-agent: поток сессии оборвался: TypeError: fetch failed',
+    ]);
+    expect(slept).toEqual([1_000]);
+    expect(s.retriesExhausted).toBe(false);
+  });
+  it('реплика человека во время паузы переподключения ничего не делает', async () => {
+    const s = newAgentState('s1');
+    const abort = new AbortController();
+    const logs: string[] = [];
+    const slept: number[] = [];
+    let connects = 0;
+    const client = {
+      async *events(): AsyncGenerator<GameEvent, void, undefined> {
+        connects++;
+        if (connects === 2) {
+          abort.abort();
+          return;
+        }
+        yield { type: 'session.game', gameId: 'g1' };
+        yield { type: 'error', gameId: 'g1', code: 'retries_exhausted', message: 'background task retries are exhausted' };
+        throw new TypeError('fetch failed');
+      },
+    };
+    let watch: WatchHandle | null = null;
+    const sleep = async (ms: number) => {
+      slept.push(ms);
+      watch?.humanSpoke();
+    };
+    watch = watchSession({ client, state: s, signal: abort.signal, speak: () => {}, log: (l) => void logs.push(l), now: () => 0, sleep });
     await watch.done;
     expect(connects).toBe(2);
-    expect(logs).toEqual(['[OK] voice-agent: реплика человека после retries_exhausted, переоткрываю поток сессии']);
+    expect(slept).toEqual([1_000]);
+    expect(logs).toEqual(['[!] voice-agent: поток сессии оборвался: TypeError: fetch failed']);
+  });
+  it('остановка сеанса обрывает живой поток: done завершается, без лога об обрыве и без паузы', async () => {
+    const s = newAgentState('s1');
+    const abort = new AbortController();
+    const logs: string[] = [];
+    const slept: number[] = [];
+    let connects = 0;
+    let waiting: () => void = () => {};
+    const reachedWait = new Promise<void>((resolve) => {
+      waiting = resolve;
+    });
+    const client = {
+      async *events(_target: EventsTarget, signal?: AbortSignal): AsyncGenerator<GameEvent, void, undefined> {
+        connects++;
+        yield { type: 'session.game', gameId: 'g1' };
+        const aborted = new Promise<void>((resolve) => signal?.addEventListener('abort', () => resolve(), { once: true }));
+        waiting();
+        await aborted;
+        throw new DOMException('This operation was aborted', 'AbortError');
+      },
+    };
+    const watch = watchSession({ client, state: s, signal: abort.signal, speak: () => {}, log: (l) => void logs.push(l), now: () => 0, sleep: async (ms) => void slept.push(ms) });
+    await reachedWait;
+    abort.abort();
+    await watch.done;
+    expect(connects).toBe(1);
+    expect(logs).toEqual([]);
+    expect(slept).toEqual([]);
+  });
+  it('пауза rate_limited не короче Retry-After, даже если часы ушли, пока писали лог', async () => {
+    const s = newAgentState('s1');
+    const abort = new AbortController();
+    let t = 0;
+    let connects = 0;
+    const client = {
+      async *events(): AsyncGenerator<GameEvent, void, undefined> {
+        connects++;
+        if (connects === 2) {
+          abort.abort();
+          return;
+        }
+        throw new ApiError('rate_limited', 'too many requests, retry in 42 s', { retryAfterSeconds: 42 });
+      },
+    };
+    const slept: number[] = [];
+    const log = () => {
+      t += 1_000;
+    };
+    await watchSession({ client, state: s, signal: abort.signal, speak: () => {}, log, now: () => t, sleep: async (ms) => void slept.push(ms) }).done;
+    expect(s.blockedUntil).toBe(42_000);
+    expect(slept).toEqual([42_000]);
+  });
+  it('троттлинг ошибок в цикле — по часам опций, не по Date.now', async () => {
+    const s = newAgentState('s1');
+    s.gameId = 'g1';
+    s.lastErrorAt = 10_000;
+    const abort = new AbortController();
+    const spoken: string[] = [];
+    const client = {
+      async *events(): AsyncGenerator<GameEvent, void, undefined> {
+        yield { type: 'error', gameId: 'g1', code: 'engine_busy', message: 'engine did not respond within 8000 ms' };
+        abort.abort();
+      },
+    };
+    await watchSession({ client, state: s, signal: abort.signal, speak: (t) => void spoken.push(t), now: () => 10_000 + ERROR_REPEAT_MS - 1, sleep: async () => {} }).done;
+    expect(spoken).toEqual([]);
+  });
+  it('пауза по умолчанию ждёт ступень по таймеру и просыпается по остановке сеанса', async () => {
+    vi.useFakeTimers();
+    try {
+      const s = newAgentState('s1');
+      const abort = new AbortController();
+      let connects = 0;
+      const client = {
+        async *events(): AsyncGenerator<GameEvent, void, undefined> {
+          connects++;
+          throw new TypeError('fetch failed');
+        },
+      };
+      const watch = watchSession({ client, state: s, signal: abort.signal, speak: () => {}, now: () => 0 });
+      await vi.advanceTimersByTimeAsync(RETRY_MS[0] - 1);
+      expect(connects).toBe(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(connects).toBe(2);
+      // Идёт вторая пауза, 2 с: остановка будит её сразу и снимает таймер.
+      abort.abort();
+      await watch.done;
+      expect(connects).toBe(2);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+  it('ошибка speak не рвёт подключение: без переподключения и паузы, в логе [!]', async () => {
+    const s = newAgentState('s1');
+    s.gameId = 'g1';
+    const abort = new AbortController();
+    const logs: string[] = [];
+    const slept: number[] = [];
+    let connects = 0;
+    const client = {
+      async *events(): AsyncGenerator<GameEvent, void, undefined> {
+        connects++;
+        yield { type: 'game.finished', result: { winner: 'B', reason: 'resign' } };
+        yield { type: 'error', gameId: 'g1', code: 'x', message: 'y' };
+        abort.abort();
+      },
+    };
+    const speak = () => {
+      throw new Error('session closing');
+    };
+    await watchSession({ client, state: s, signal: abort.signal, speak, log: (l) => void logs.push(l), now: () => 1_000_000, sleep: async (ms) => void slept.push(ms) }).done;
+    expect(connects).toBe(1);
+    expect(slept).toEqual([]);
+    expect(logs).toEqual(['[!] voice-agent: generateReply не удался: Error: session closing', '[!] voice-agent: generateReply не удался: Error: session closing']);
   });
   it('not_found (сессия истекла): одна реплика, лог и выход без переподключения', async () => {
     const s = newAgentState('s1');
