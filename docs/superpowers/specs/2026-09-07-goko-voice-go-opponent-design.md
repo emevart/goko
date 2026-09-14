@@ -211,7 +211,7 @@ Session = { id, room: string, currentGameId: string | null, createdAt }
 | --- | --- | --- | --- |
 | `create_session` | `POST /api/sessions` | — | `{ session, livekit: { url, token } }`; комнату с `agents: [{agentName: "goko", metadata: {sessionId}}]` создаёт сервер, токен только `roomJoin` (D-0001) |
 | `session_new_game` | `POST /api/sessions/:sid/games` | `{ black: Seat, white: Seat, settings?, waitForReply?: boolean = true }` | `{ state, firstMove?, replyTimedOut?: true }`; сессия переключается, событие `session.game`; если первым ходит движок, его ход ждётся как в `play`, и `replyTimedOut: true` означает, что движок не успел ответить в отведённое время |
-| `create_game` | `POST /api/games` | то же | то же (без сессии, для MCP) |
+| `create_game` | `POST /api/games` | то же | то же (без сессии, для MCP); только при `ALLOW_SESSIONLESS_GAMES=1` (dev, smoke), иначе `400 bad_request` с `details.reason: 'sessionless_disabled'` (D-0012) |
 | `get_game` | `GET /api/games/:id` | — | `GameState` |
 | `list_games` | `GET /api/games` | — | сводки |
 | `play` | `POST /api/games/:id/play` | `{ coord, color?, expectedRevision?, waitForReply?: boolean = true, via? }` | `{ state, move, reply?: Move, replyTimedOut?: true }` |
@@ -284,9 +284,9 @@ suicide`), `not_your_turn`, `game_finished`, `nothing_to_undo`,
 поэтому `humanText` — «движок не отвечает, нужно повторить», без слова «ход»),
 `unsupported_controller`, `not_found`, `bad_request` (тело не JSON, не прошло
 схему или больше 64 КБ — тогда `details.maxBytes`; сдача за место `engine` —
-`details.reason: 'not_your_seat'`), `limit_reached` (превышен
+`details.reason: 'not_your_seat'`; партия без сессии при выключенном флаге — `details.reason: 'sessionless_disabled'`), `limit_reached` (превышен
 лимит сессий), `rate_limited` (превышен лимит частоты запросов с адреса,
-D-0012), `too_many_games` (превышен лимит незавершённых партий, D-0012),
+D-0012), `too_many_games` (превышен лимит незавершённых партий на сервере или на клиента, D-0012),
 `unauthorized` (нет или неверный `X-App-Key` / `X-Engine-Key`),
 `internal` (непредвиденная ошибка сервера). HTTP-статусы: 400 для
 `invalid_coord`, `illegal_move`, `unsupported_controller`, `bad_request`; 401
@@ -305,13 +305,13 @@ D-0012), `too_many_games` (превышен лимит незавершённы�
 - Русский текст для человека строит клиент по `code` и `details`:
   `humanText(code, details)` из `packages/protocol` (таблицы `ERROR_TEXT`,
   `ILLEGAL_REASON_TEXT` для `occupied | ko | suicide` и
-  `BAD_REQUEST_REASON_TEXT` для `not_your_seat`).
+  `BAD_REQUEST_REASON_TEXT` для `not_your_seat | sessionless_disabled`, `TOO_MANY_GAMES_SCOPE_TEXT` для `scope: 'client'`).
 - `illegal_move` несёт `details: { reason, coord }`, `invalid_coord` —
   `details.coord`, `not_your_turn` — `details.toPlay`, `limit_reached` и
-  `too_many_games` — `details.max`, `rate_limited` —
+  `too_many_games` — `details.max` (у лимита на клиента ещё `details.scope: 'client'`), `rate_limited` —
   `details.retryAfterSeconds` (то же число в заголовке `Retry-After`, не
   меньше 1), `bad_request` схемы — `details.issues`, `bad_request` сдачи за
-  место `engine` — `details.reason: 'not_your_seat'`.
+  место `engine` — `details.reason: 'not_your_seat'`, `bad_request` партии без сессии — `details.reason: 'sessionless_disabled'`.
 - Событие `error` для непредвиденного исключения: `internal` /
   `internal server error` или `engine_unavailable` / `engine is unavailable`,
   без исходного текста.
@@ -364,10 +364,11 @@ Analysis = {
 `error` даёт клиенту вторую сверку. Новая партия в сессии отменяет фоновую
 задачу прежней (ход движка, автосчёт): вызов движка обрывается, результат не
 применяется. Статус прежней партии не меняется, её события идут только в её
-поток; задачу снова ставит действие человека на этой партии или открытие её
-потока. После рестарта сервера отмена не помнится: задачу получает каждая
-незавершённая партия с активностью за последние `SESSION_TTL_MS`, а более
-старая ждёт того же действия человека или открытия потока (раздел 7, D-0012).
+поток. Прежняя незавершённая партия становится брошенной: она не в счёте
+лимитов, отметка переживает рестарт, и при старте задача ей не ставится. Задачу
+и место в счёте ей возвращает действие человека на этой партии или открытие её
+потока (раздел 7, D-0012). После рестарта задачу получает каждая незавершённая
+партия без отметки с активностью за последние `SESSION_TTL_MS`.
 Клиент при обрыве
 переподключается и перечитывает `get_game`. Каждые 15 с поток шлёт
 комментарий `: ping`. Сервер закрывает поток сам, если очередь неотправленных
@@ -402,9 +403,11 @@ Node 22, Hono, zod-схемы из `packages/protocol`.
   загружается, кроме завершённых партий, у которых последний ход (или
   создание) старше 30 дней: их снапшоты удаляются (D-0012). Незавершённая
   партия, у которой последний ход (или создание) старше `SESSION_TTL_MS`
-  (по умолчанию 2 ч), считается брошенной: при старте фоновая задача (ход
-  движка, автосчёт) ей не ставится, её ставит действие человека на партии или
-  открытие её потока, как после отмены сменой партии (раздел 5).
+  (по умолчанию 2 ч), считается брошенной; брошенной сразу становится и
+  прежняя незавершённая партия сессии, в которой началась новая, — отметкой
+  `data/games/<id>.abandoned` рядом со снапшотом. Брошенной партии при старте
+  фоновая задача (ход движка, автосчёт) не ставится, её ставит действие
+  человека на партии или открытие её потока (раздел 5).
 - Автоматика мест `engine`: после `state.updated`, если на ходу `engine` и
   партия идёт — ставится задача `genmove` (`pendingEngineMove: true`,
   событие `engine.thinking`); результат применяется как ход `by: "engine"`.
@@ -471,7 +474,14 @@ Node 22, Hono, zod-схемы из `packages/protocol`.
   ограничена.
 - Не больше 20 незавершённых партий на сервере, считая создаваемые; лишняя —
   `429 too_many_games` (D-0012). Брошенные партии (последний ход или создание
-  старше `SESSION_TTL_MS` на момент создания новой) в счёт не идут.
+  старше `SESSION_TTL_MS` на момент создания новой, или брошенные сменой
+  партии) в счёт не идут, к брошенной вернулись — снова в счёте. Текущая
+  партия сессии не мешает созданию новой в той же сессии.
+- Не больше 3 незавершённых партий на клиента (ключ лимита частоты; у партии
+  сессии — владелец сессии, создавший её), те же правила счёта; лишняя —
+  `429 too_many_games` с `details.scope: 'client'`. `POST /api/games` — только
+  при `ALLOW_SESSIONLESS_GAMES=1` (dev, smoke), иначе `400 bad_request` с
+  `details.reason: 'sessionless_disabled'` (D-0012).
 - Тело `/api/*` — не больше 64 КБ.
 
 ## 8. `apps/go-engine`
