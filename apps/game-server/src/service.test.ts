@@ -313,13 +313,14 @@ describe('GameService: партия человек против движка', (
     expect(engine.calls.score).toBe(calls);
   });
 
-  it('публикует ответ движка не раньше задержки от начала поиска и отменяет ожидание через undo', async () => {
-    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+  it('публикует ответ движка по монотонной задержке при скачке системных часов и отменяет ожидание через undo', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date', 'performance'] });
     const engine = createFakeEngine({ script: ['E5', 'F6'], delayMs: 200 });
     const { service } = await make(engine, { engineMoveDelayMs: 1_500 });
     const g = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: false });
     await service.play(g.state.id, { coord: 'D4', waitForReply: false, via: 'api' });
     await thinkThrough(engine, 1, 200);
+    vi.setSystemTime(new Date('2036-09-07T10:00:00.000Z'));
     expect(service.get(g.state.id).moves).toHaveLength(1);
     await vi.advanceTimersByTimeAsync(1_299);
     expect(service.get(g.state.id).moves).toHaveLength(1);
@@ -328,6 +329,7 @@ describe('GameService: партия человек против движка', (
 
     await service.play(g.state.id, { coord: 'C3', waitForReply: false, via: 'api' });
     await thinkThrough(engine, 2, 200);
+    vi.setSystemTime(new Date('2026-09-07T10:00:00.000Z'));
     const undo = await service.undo(g.state.id, { via: 'api' });
     expect(undo.state.moves).toHaveLength(2);
     await vi.advanceTimersByTimeAsync(2_000);

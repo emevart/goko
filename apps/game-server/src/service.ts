@@ -934,7 +934,7 @@ export class GameService {
       if (!state || state.status !== 'playing' || !state.pendingEngineMove) return;
       const color = state.toPlay;
       const rank = state.seats[color].rank ?? DEFAULT_RANK;
-      const startedAt = Date.now();
+      const startedAt = performance.now();
       this.emitGame(id, { type: 'engine.thinking', gameId: id, color });
       let reply: Awaited<ReturnType<Engine['genmove']>>;
       try {
@@ -948,7 +948,7 @@ export class GameService {
         if (await this.onEngineFailure(id, e, signal)) continue;
         return;
       }
-      const delayLeft = (this.deps.engineMoveDelayMs ?? 0) - (Date.now() - startedAt);
+      const delayLeft = (this.deps.engineMoveDelayMs ?? 0) - (performance.now() - startedAt);
       if (delayLeft > 0) await this.sleep(delayLeft, signal);
       if (this.closed || signal.aborted) return;
       const applied = await this.locked(id, async () => {

@@ -2,7 +2,7 @@ import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { newGame } from './game.ts';
+import { applyMove, newGame } from './game.ts';
 import { GameStore } from './store.ts';
 import { memoryStore } from './test-helpers.ts';
 
@@ -46,6 +46,59 @@ describe('GameStore', () => {
     delete old.canRedo;
     await writeFile(path.join(dir, 'old.json'), JSON.stringify(old), 'utf8');
     expect((await store.load()).find((g) => g.id === 'old')).toMatchObject({ canRedo: false });
+  });
+
+  it.each([
+    ['пустая порция', [{ moves: [] }]],
+    ['нарушен порядок ходов', [{ moves: [{ n: 2, color: 'B', coord: 'D4', captured: 0, at: T }] }]],
+    ['нелегальная координата', [{ moves: [{ n: 1, color: 'B', coord: 'D20', captured: 0, at: T }] }]],
+    ['неверно число взятых камней', [{ moves: [{ n: 1, color: 'B', coord: 'D4', captured: 1, at: T }] }]],
+  ])('load сохраняет валидную партию, но отбрасывает повреждённую redo-историю: %s', async (_case, redoHistory) => {
+    const file = path.join(dir, 'g1.json');
+    const before = JSON.stringify({ ...state(), canRedo: true, redoHistory });
+    await writeFile(file, before, 'utf8');
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    expect(await new GameStore(dir).load()).toEqual([state()]);
+    expect(error).toHaveBeenCalledWith('[!] store: invalid redo history discarded');
+    expect(await readFile(file, 'utf8')).toBe(before);
+  });
+
+  it('load принимает полную цепочку redo и итог score только после двух пасов', async () => {
+    const base = state();
+    const first = applyMove(base, 'B', 'D4', T).state.moves[0]!;
+    const afterFirst = applyMove(base, 'B', 'D4', T).state;
+    const second = applyMove(afterFirst, 'W', 'E5', T).state.moves[1]!;
+    const afterSecond = applyMove(afterFirst, 'W', 'E5', T).state;
+    const passB = applyMove(afterSecond, 'B', 'pass', T).state.moves[2]!;
+    const afterPassB = applyMove(afterSecond, 'B', 'pass', T).state;
+    const passW = applyMove(afterPassB, 'W', 'pass', T).state.moves[3]!;
+    const result = {
+      winner: 'W' as const,
+      margin: 7.5,
+      reason: 'score' as const,
+      score: { areaB: 1, areaW: 1, komi: 7.5, dead: [], ownership: new Array(169).fill(0) },
+    };
+    const redoHistory = [{ moves: [passB, passW], result }, { moves: [first, second] }];
+    await writeFile(path.join(dir, 'g1.json'), JSON.stringify({ ...base, canRedo: true, redoHistory }), 'utf8');
+
+    expect((await new GameStore(dir).load())[0]).toMatchObject({ canRedo: true, redoHistory });
+  });
+
+  it.each([
+    ['сдача вместо счёта', { winner: 'W' as const, reason: 'resign' as const }],
+    ['счёт до двух пасов', { winner: 'W' as const, margin: 7.5, reason: 'score' as const, score: { areaB: 1, areaW: 1, komi: 7.5, dead: [], ownership: new Array(169).fill(0) } }],
+    ['ownership не размера доски', { winner: 'W' as const, margin: 7.5, reason: 'score' as const, score: { areaB: 1, areaW: 1, komi: 7.5, dead: [], ownership: [] } }],
+  ])('load отбрасывает несогласованный результат redo: %s', async (kind, result) => {
+    const base = state();
+    const firstPass = applyMove(base, 'B', 'pass', T).state.moves[0]!;
+    const afterFirst = applyMove(base, 'B', 'pass', T).state;
+    const secondPass = applyMove(afterFirst, 'W', 'pass', T).state.moves[1]!;
+    const moves = kind === 'счёт до двух пасов' ? [firstPass] : [firstPass, secondPass];
+    await writeFile(path.join(dir, 'g1.json'), JSON.stringify({ ...base, redoHistory: [{ moves, result }] }), 'utf8');
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    expect(await new GameStore(dir).load()).toEqual([base]);
   });
 
   it('load создаёт каталог, если его нет, и возвращает пустой список', async () => {

@@ -2,6 +2,7 @@
 import { mkdir, open, readFile, readdir, rename, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import { z } from 'zod';
+import { emptyPosition, formatCoord, opposite, parseCoord, play, resultFromArea } from '@goko/go-core';
 import { ApiError, GameState, Move, Result, type GameState as GameStateType, type Move as MoveType, type Result as ResultType } from '@goko/protocol';
 import { MAX_ID_LENGTH, isSafeId } from './ids.ts';
 
@@ -38,6 +39,52 @@ export type SnapshotStore = Pick<GameStore, 'dir' | 'init' | 'load' | 'save' | '
 // Отметки брошенных партий: отдельный необязательный шов сервиса, подделка в памяти — memoryMarks.
 export type AbandonMarks = Pick<GameStore, 'loadAbandoned' | 'markAbandoned' | 'clearAbandoned'>;
 
+function validRedoHistory(state: GameStateType, history: RedoPortion[]): boolean {
+  if (history.length === 0) return true;
+  if (state.status !== 'playing' || state.result !== undefined) return false;
+  let position = emptyPosition(state.settings.boardSize);
+  let nextN = 1;
+  let nextColor: MoveType['color'] = 'B';
+  let consecutivePasses = 0;
+  const replayMove = (move: MoveType): boolean => {
+    if (move.n !== nextN || move.color !== nextColor) return false;
+    try {
+      const point = parseCoord(move.coord, state.settings.boardSize);
+      const coord = point === 'pass' ? 'pass' : formatCoord(point);
+      if (move.coord !== coord) return false;
+      const played = play(position, move.color, coord);
+      if (move.captured !== played.captured) return false;
+      position = played.position;
+      consecutivePasses = coord === 'pass' ? consecutivePasses + 1 : 0;
+    } catch {
+      return false;
+    }
+    nextN++;
+    nextColor = opposite(nextColor);
+    return true;
+  };
+  for (const move of state.moves) if (!replayMove(move)) return false;
+  if (state.toPlay !== nextColor || state.consecutivePasses !== consecutivePasses) return false;
+  for (let i = history.length - 1; i >= 0; i--) {
+    const portion = history[i];
+    if (!portion || portion.moves.length === 0) return false;
+    for (const move of portion.moves) if (!replayMove(move)) return false;
+    if (!portion.result) continue;
+    if (i !== 0 || portion.result.reason !== 'score' || consecutivePasses < 2) return false;
+    const score = portion.result.score;
+    if (!score) return false;
+    if (score.ownership.length !== state.settings.boardSize ** 2 || score.komi !== state.settings.komi) return false;
+    const expected = resultFromArea(score);
+    if (portion.result.winner !== expected.winner || portion.result.margin !== expected.margin) return false;
+    try {
+      for (const coord of score.dead) if (parseCoord(coord, state.settings.boardSize) === 'pass') return false;
+    } catch {
+      return false;
+    }
+  }
+  return true;
+}
+
 export class GameStore {
   readonly dir: string;
   private readonly fs: StoreFs;
@@ -60,9 +107,18 @@ export class GameStore {
       try {
         const raw = JSON.parse(await readFile(file, 'utf8')) as unknown;
         const history = SnapshotHistory.safeParse(raw);
-        const parsed = GameState.safeParse({ ...(raw as Record<string, unknown>), canRedo: history.success && (history.data.redoHistory?.length ?? 0) > 0 });
-        if (parsed.success && history.success) out.push({ ...parsed.data, ...(history.data.redoHistory ? { redoHistory: history.data.redoHistory } : {}) });
-        else console.error(`[!] store: ${name} does not match the schema, skipped`);
+        const parsed = GameState.safeParse({ ...(raw as Record<string, unknown>), canRedo: false });
+        if (!parsed.success) {
+          console.error(`[!] store: ${name} does not match the schema, skipped`);
+          continue;
+        }
+        const redoHistory = history.success ? (history.data.redoHistory ?? []) : [];
+        if (!history.success || !validRedoHistory(parsed.data, redoHistory)) {
+          console.error('[!] store: invalid redo history discarded');
+          out.push(parsed.data);
+          continue;
+        }
+        out.push({ ...parsed.data, canRedo: redoHistory.length > 0, ...(redoHistory.length > 0 ? { redoHistory } : {}) });
       } catch {
         console.error(`[!] store: ${name} is not readable, skipped`);
       }
