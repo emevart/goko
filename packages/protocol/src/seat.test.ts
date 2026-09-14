@@ -32,4 +32,10 @@ describe('hasEngine / humanColorOf', () => {
     expect(humanColorOf({ seats, toPlay: 'W' })).toBe('W');
     expect(humanColorOf({ seats, toPlay: 'B' })).toBe('B');
   });
+  it('без движка и без второго человека «ты» — место человека, а не тот, чей ход', () => {
+    const external: Seat = { controller: 'external' };
+    expect(hasEngine({ seats: { B: human, W: external } })).toBe(false);
+    expect(humanColorOf({ seats: { B: human, W: external }, toPlay: 'W' })).toBe('B');
+    expect(humanColorOf({ seats: { B: external, W: human }, toPlay: 'B' })).toBe('W');
+  });
 });

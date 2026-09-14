@@ -11,6 +11,11 @@ describe('паузы клиентов game-server', () => {
     expect(retryAfterMs({ retryAfterSeconds: 0 })).toBe(1_000);
     expect(retryAfterMs({ retryAfterSeconds: -5 })).toBe(1_000);
   });
+  it('retryAfterMs: строка с числом секунд, как в заголовке Retry-After, принимается; бесконечность — мусор', () => {
+    expect(retryAfterMs({ retryAfterSeconds: '30' })).toBe(30_000);
+    expect(retryAfterMs({ retryAfterSeconds: Number.POSITIVE_INFINITY })).toBe(1_000);
+    expect(retryAfterMs({ retryAfterSeconds: 'Infinity' })).toBe(1_000);
+  });
   it('ступени переподключения 1, 2, 4, 8, 15 с; порог рабочего соединения — 15 с; всё экспортирует пакет', () => {
     expect(RETRY_MS).toEqual([1_000, 2_000, 4_000, 8_000, 15_000]);
     expect(STABLE_CONNECTION_MS).toBe(15_000);

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { colorName, describeResult, formatPoints, parseRank, speakMove, speakRank } from './phrases.ts';
+import { colorName, colorNameInstrumental, describeResult, formatPoints, parseRank, speakMove, speakRank } from './phrases.ts';
 
 describe('parseRank', () => {
   it('понимает кю и дан по-русски и по-английски', () => {
@@ -18,6 +18,23 @@ describe('parseRank', () => {
     expect(parseRank('сильно')).toBeNull();
     expect(parseRank('')).toBeNull();
   });
+  it('порядковые суффиксы с дефисом и пробелами, английское dan, регистр и ведущий ноль', () => {
+    expect(parseRank('1й дан')).toBe('1d');
+    expect(parseRank('1-ый дан')).toBe('1d');
+    expect(parseRank('1 - й дан')).toBe('1d');
+    expect(parseRank('до 5-го кю')).toBe('5k');
+    expect(parseRank('5-ого кю')).toBe('5k');
+    expect(parseRank('2 dan')).toBe('2d');
+    expect(parseRank('5K')).toBe('5k');
+    expect(parseRank('3 ДАН')).toBe('3d');
+    expect(parseRank('05 кю')).toBe('5k');
+  });
+  it('единица — отдельное слово, число — не больше двух цифр и не хвост длинного числа', () => {
+    expect(parseRank('2 days')).toBeNull();
+    expect(parseRank('3d4')).toBeNull();
+    expect(parseRank('115 кю')).toBeNull();
+    expect(parseRank('005 кю')).toBeNull();
+  });
 });
 
 describe('speakRank / speakMove / colorName', () => {
@@ -28,6 +45,10 @@ describe('speakRank / speakMove / colorName', () => {
     expect(speakMove('pass')).toBe('пас');
     expect(colorName('B')).toBe('чёрные');
     expect(colorName('W')).toBe('белые');
+  });
+  it('цвет в творительном падеже', () => {
+    expect(colorNameInstrumental('B')).toBe('чёрными');
+    expect(colorNameInstrumental('W')).toBe('белыми');
   });
 });
 
@@ -41,6 +62,13 @@ describe('formatPoints', () => {
     expect(formatPoints(5.5)).toBe('5,5 очка');
     expect(formatPoints(0.5)).toBe('0,5 очка');
   });
+  it('границы склонения, сотни и знак', () => {
+    expect(formatPoints(4)).toBe('4 очка');
+    expect(formatPoints(14)).toBe('14 очков');
+    expect(formatPoints(111)).toBe('111 очков');
+    expect(formatPoints(-3.5)).toBe('3,5 очка');
+    expect(formatPoints(-1)).toBe('1 очко');
+  });
 });
 
 describe('describeResult', () => {
@@ -53,5 +81,9 @@ describe('describeResult', () => {
   it('в партии двух людей называет цвет победителя (D-0005)', () => {
     expect(describeResult({ winner: 'B', reason: 'resign' }, null)).toBe('победа чёрных: белые сдались');
     expect(describeResult({ winner: 'W', margin: 2.5, reason: 'score' }, null)).toBe('победа белых, разница 2,5 очка');
+  });
+  it('счёт без margin: разница 0 очков', () => {
+    expect(describeResult({ winner: 'B', reason: 'score' }, 'B')).toBe('победа за тобой, разница 0 очков');
+    expect(describeResult({ winner: 'B', reason: 'score' }, null)).toBe('победа чёрных, разница 0 очков');
   });
 });
