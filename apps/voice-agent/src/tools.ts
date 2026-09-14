@@ -350,7 +350,7 @@ export function createToolFns(deps: ToolDeps) {
       // Прежний итог этой партии устарел до отправки: пас принимается только в идущей партии, а итог нового
       // счёта может прийти из потока раньше ответа. Ревизии до ответа нет — забываем без сверки (null).
       forgetFinishIfReopened(state, gameId, null);
-      const res = await sendMove(gameId, 'pass',() => client.pass(gameId, { via: 'voice' }, opts));
+      const res = await sendMove(gameId, 'pass', () => client.pass(gameId, { via: 'voice' }, opts));
       if (!('state' in res)) return res;
       let g = res.state;
       // Два паса подряд: сервер считает очки в фоне; итог ждём из потока, опрос — запасной путь.
