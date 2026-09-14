@@ -1,3 +1,4 @@
+import { getEventListeners } from 'node:events';
 import { describe, expect, it, vi } from 'vitest';
 import { ApiError, type EventsTarget, type GameEvent, type GameState, humanText, type Move, RETRY_MS, STABLE_CONNECTION_MS } from '@goko/protocol';
 import { ERROR_REPEAT_MS, SESSION_EXPIRED_INSTRUCTIONS, type WatchHandle, handleEvent, watchSession } from './events.ts';
@@ -191,6 +192,20 @@ describe('handleEvent: переподключение к той же парти�
     const g = fakeGame({ seats: { B: { controller: 'human' }, W: { controller: 'human' } }, moves: [mv(1, 'B', 'D4'), mv(2, 'W', 'K10')], revision: 2 });
     expect(handleEvent(upd(g, { cause: 'sync', by: 'system' }), twoHumans)).toBeNull();
     expect(twoHumans.awaitingReply).toBe(false);
+  });
+  it('ждали ответа, а в разрыве отменили все ходы: sync пустой доски молча снимает флаги', () => {
+    const s = waiting({ awaitingReply: true, lastTap: true });
+    handleEvent({ type: 'session.game', gameId: 'g1' }, s);
+    expect(handleEvent(upd(fakeGame({ moves: [], toPlay: 'B', revision: 4 }), { cause: 'sync', by: 'system' }), s)).toBeNull();
+    expect(s.awaitingReply).toBe(false);
+    expect(s.lastTap).toBeNull();
+  });
+  it('sync другой партии без session.game — «продолжаем», флаги прежней партии сняты', () => {
+    const s = waiting({ awaitingReply: true, lastTap: true });
+    const other = fakeGame({ id: 'g2', moves: [mv(1, 'B', 'D4')], toPlay: 'W', pendingEngineMove: true, revision: 1 });
+    expect(handleEvent(upd(other, { cause: 'sync', by: 'system' }), s)).toContain('Продолжаем партию');
+    expect(s.awaitingReply).toBe(false);
+    expect(s.lastTap).toBeNull();
   });
 });
 
@@ -970,9 +985,9 @@ describe('watchSession', () => {
     const watch = watchSession({ client, state: s, signal: abort.signal, speak: () => {}, log: (l) => void logs.push(l), now: () => t, sleep: async () => {} });
     await reachedWait;
     s.blockedUntil = 12_000;
-    t = 1_000;
+    t = 1_400; // до срока 10,6 с: в логе 11
     watch.humanSpoke();
-    t = 11_001;
+    t = 11_600; // 0,4 с: в логе 1, не 0
     watch.humanSpoke();
     abort.abort();
     await watch.done;
@@ -1071,7 +1086,8 @@ describe('watchSession', () => {
             yield { type: 'engine.thinking', gameId: 'g1', color: 'W' };
           },
         };
-        const watch = watchSession({ client, state: s, signal: abort.signal, speak, now: () => 0, sleep: async () => {} });
+        const logs: string[] = [];
+        const watch = watchSession({ client, state: s, signal: abort.signal, speak, log: (l) => void logs.push(l), now: () => 0, sleep: async () => {} });
         await settle();
         expect(calls).toHaveLength(1);
         expect(await race(watch.done)).toBe(false); // без остановки ждём реплику, как раньше
@@ -1080,6 +1096,7 @@ describe('watchSession', () => {
         fail(new Error('session closed'));
         await settle();
         expect(rejections).toEqual([]);
+        expect(logs).toEqual(['[!] voice-agent: generateReply не удался: Error: session closed']); // поздний отказ не потерян
         expect(connects).toBe(1);
       });
     });
@@ -1117,6 +1134,31 @@ describe('watchSession', () => {
       const watch = watchSession({ client, state: s, signal: abort.signal, speak, now: () => 0, sleep: async () => {} });
       expect(await race(watch.done)).toBe(true);
       expect(calls.length).toBeLessThanOrEqual(1);
+    });
+    it('каждая реплика снимает свой слушатель остановки: живой поток держит один слушатель подключения', async () => {
+      const s = newAgentState('s1');
+      const abort = new AbortController();
+      const spoken: string[] = [];
+      let waiting: () => void = () => {};
+      const reachedWait = new Promise<void>((resolve) => {
+        waiting = resolve;
+      });
+      const client = {
+        async *events(_target: EventsTarget, signal?: AbortSignal): AsyncGenerator<GameEvent, void, undefined> {
+          for (let i = 0; i < 3; i++) yield { type: 'error', gameId: 'g1', code: 'retries_exhausted', message: 'background task retries are exhausted' };
+          const aborted = new Promise<void>((resolve) => signal?.addEventListener('abort', () => resolve(), { once: true }));
+          waiting();
+          await aborted;
+          throw new DOMException('This operation was aborted', 'AbortError');
+        },
+      };
+      const watch = watchSession({ client, state: s, signal: abort.signal, speak: (t) => void spoken.push(t), now: () => 0, sleep: async () => {} });
+      await reachedWait;
+      expect(spoken).toHaveLength(3);
+      expect(getEventListeners(abort.signal, 'abort')).toHaveLength(1);
+      abort.abort();
+      await watch.done;
+      expect(getEventListeners(abort.signal, 'abort')).toHaveLength(0);
     });
   });
   it('ошибка speak не рвёт цикл', async () => {

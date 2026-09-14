@@ -677,6 +677,22 @@ describe('pass / resign / undo', () => {
     expect(passed.state.announcedFinish).toBeNull();
     expect(passed.state.finishRevision).toBeNull();
   });
+  it('ответ отмены, отставший от итога новее из потока, этот итог не стирает', async () => {
+    const { fns, state, client } = await withGame();
+    const g = gameOf(client);
+    const later = { gameId: 'g1', result: { winner: 'W' as const, reason: 'resign' as const } };
+    client.undo = async () => {
+      // Пока шёл ответ HTTP, поток принёс итог следующей ревизии: после отмены партия закончилась снова.
+      state.finished = later;
+      state.announcedFinish = 'g1';
+      state.finishRevision = { gameId: 'g1', revision: 11 };
+      return { state: { ...g, revision: 10 }, removed: [] };
+    };
+    expect(await fns.undo()).toMatchObject({ ok: true });
+    expect(state.finished).toBe(later);
+    expect(state.announcedFinish).toBe('g1');
+    expect(state.finishRevision).toEqual({ gameId: 'g1', revision: 11 });
+  });
   it('отмена с отказом сервера итог партии не забывает: партия не возобновилась (I1)', async () => {
     const { fns, state } = await withGame();
     const finished = { gameId: 'g1', result: { winner: 'W' as const, reason: 'resign' as const } };
