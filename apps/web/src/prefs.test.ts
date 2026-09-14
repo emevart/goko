@@ -57,6 +57,7 @@ describe('prefs: новая партия только полями NewGameReques
       white: { controller: 'engine', rank: '5k' },
       settings: { komi: 7.5 },
       waitForReply: false,
+      via: 'tap',
     });
   });
   it('белыми — места меняются; случайно — по жребию', () => {

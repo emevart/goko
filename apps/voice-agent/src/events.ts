@@ -80,6 +80,10 @@ function engineReplyText(state: AgentState, last: Move, prev: Move | undefined):
 
 function onStateUpdated(ev: Extract<GameEvent, { type: 'state.updated' }>, state: AgentState): string | null {
   const g = ev.state;
+  const observed = state.observedRevision;
+  if (!observed || observed.gameId !== g.id || observed.revision < g.revision) {
+    state.observedRevision = { gameId: g.id, revision: g.revision };
+  }
   // Живой поток сессии начинается с session.game, и gameId к sync уже тот же: смену партии помнит announceSync.
   const fresh = g.id !== state.gameId || state.announceSync === g.id;
   state.announceSync = null;
@@ -131,9 +135,9 @@ function onStateUpdated(ev: Extract<GameEvent, { type: 'state.updated' }>, state
       return null;
     case 'new': {
       resetTurnFlags(state);
-      // У сервера new всегда by 'system' без via: отличить кнопку на экране от start_game можно только
-      // по памяти агента. Событие обгоняет ответ HTTP, поэтому смотрим и на идущий start_game.
-      if (state.startingGame) state.toolGames.add(g.id);
+      // Единственный параллельный start_game помечает запрос via=voice; сервер переносит via в событие.
+      // Поэтому кнопка via=tap не маскируется под голосовую партию даже при обратном порядке сети.
+      if (state.startingGame && ev.via === 'voice') state.toolGames.add(g.id);
       if (state.toolGames.has(g.id)) return null;
       const engineColor = seatColor(g.seats, 'engine');
       if (engineColor === null) {
@@ -191,6 +195,8 @@ export function handleEvent(ev: GameEvent, state: AgentState, now: () => number 
       // флаги прежней партии сброшены. Переподключение к уже знакомой партии флаги не трогает: ожидание хода
       // движка и fallbackMove переживают обрыв и переоткрытие после retries_exhausted, sync сверит их с позицией.
       if (ev.gameId !== state.gameId) {
+        state.gameGeneration++;
+        state.observedRevision = null;
         state.announceSync = ev.gameId;
         resetTurnFlags(state);
         state.fallbackMove = null;

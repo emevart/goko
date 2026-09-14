@@ -185,9 +185,9 @@ describe('GameService: партия человек против движка', (
     const { service, bus } = await make(createFakeEngine({ script: ['C3'] }));
     const seen: GameEvent[] = [];
     bus.subscribe('session:s1', (e) => seen.push(e));
-    const created = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: true }, { sessionId: 's1' });
+    const created = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: true, via: 'voice' }, { sessionId: 's1' });
     expect(seen[0]).toEqual({ type: 'session.game', gameId: created.state.id });
-    expect(seen[1]).toMatchObject({ type: 'state.updated', cause: 'new', by: 'system' });
+    expect(seen[1]).toMatchObject({ type: 'state.updated', cause: 'new', by: 'system', via: 'voice' });
   });
 
   it('два паса -> счёт -> finished, game.finished, result.reason score', async () => {

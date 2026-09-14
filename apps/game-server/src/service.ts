@@ -40,7 +40,7 @@ import { SESSION_TTL_MS } from './sessions.ts';
 import type { AbandonMarks, RedoPortion, SnapshotStore } from './store.ts';
 
 // Входы операций — уже разобранные схемой тела (z.output): defaults подставлены.
-export type NewGameInput = z.output<typeof NewGameRequest>;
+export type NewGameInput = Omit<z.output<typeof NewGameRequest>, 'via'> & { via?: Via };
 export type PlayInput = z.output<typeof PlayRequest>;
 export type PassInput = z.output<typeof PassRequest>;
 export type ResignInput = z.output<typeof ResignRequest>;
@@ -335,7 +335,7 @@ export class GameService {
     if (opts.sessionId) this.sessionsByGame.set(id, opts.sessionId);
     const waiter = state.pendingEngineMove && req.waitForReply ? this.registerWaiter(id, state.revision) : null;
     try {
-      await this.commit(state, 'new', 'system', undefined, undefined, []);
+      await this.commit(state, 'new', 'system', req.via ?? 'api', undefined, []);
     } catch (e) {
       // Партии нет и не будет: id больше не встретится, поэтому привязка к сессии и ожидающий
       // первого хода снимаются здесь, а не висят до close.

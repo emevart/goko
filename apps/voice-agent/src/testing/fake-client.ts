@@ -132,6 +132,9 @@ export function createFakeClient(opts: FakeClientOptions = {}): FakeClient {
       record('undo', o, id, req);
       throwPendingAny();
       const g = need();
+      if (req.expectedRevision !== undefined && req.expectedRevision !== g.revision) {
+        throw new ApiError('revision_conflict', 'game revision changed');
+      }
       if (g.moves.length === 0) throw new ApiError('nothing_to_undo', 'nothing to undo');
       const removed = g.moves.slice(-2);
       redoStack.push({ state: structuredClone(g), restored: structuredClone(removed) });
@@ -148,6 +151,9 @@ export function createFakeClient(opts: FakeClientOptions = {}): FakeClient {
       record('redo', o, id, req);
       throwPendingAny();
       const current = need();
+      if (req.expectedRevision !== undefined && req.expectedRevision !== current.revision) {
+        throw new ApiError('revision_conflict', 'game revision changed');
+      }
       const entry = redoStack.pop();
       if (!entry) throw new ApiError('nothing_to_redo', 'nothing to redo');
       self.game = { ...structuredClone(entry.state), revision: current.revision + 1, canRedo: redoStack.length > 0 };

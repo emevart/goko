@@ -5,6 +5,8 @@ import type { Color, Rank, Result } from '@goko/protocol';
 export type AgentState = {
   sessionId: string;
   gameId: string | null;
+  gameGeneration: number; // растёт при session.game другой партии; защищает AgentState от поздних tool-ответов
+  observedRevision: { gameId: string; revision: number } | null; // самая новая ревизия этой партии из SSE
   announceSync: string | null; // session.game сменил партию: sync этой партии озвучить «Продолжаем партию» (задача 3)
   humanColor: Color | null; // null — в партии нет движка, играют два человека (D-0005)
   rank: Rank; // ранг Гоко для следующей партии
@@ -35,6 +37,8 @@ export function newAgentState(sessionId: string): AgentState {
   return {
     sessionId,
     gameId: null,
+    gameGeneration: 0,
+    observedRevision: null,
     announceSync: null,
     humanColor: 'B',
     rank: DEFAULT_RANK,

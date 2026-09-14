@@ -2,6 +2,7 @@ import { getEventListeners } from 'node:events';
 import { describe, expect, it, vi } from 'vitest';
 import { ApiError, ClientTimeoutError, type GameState, HttpError, humanText } from '@goko/protocol';
 import { type AgentState, newAgentState } from './state.ts';
+import { handleEvent } from './events.ts';
 import { createFakeClient, fakeGame } from './testing/fake-client.ts';
 import {
   ASSESSMENT_VISITS,
@@ -74,7 +75,7 @@ describe('start_game', () => {
     expect(res).toEqual({ ok: true, gameId: 'g1', youPlay: 'black', rank: '10 кю', komi: 7.5, firstMove: null, firstMoveSpoken: null });
     expect(client.calls[0]).toMatchObject({
       method: 'newGame',
-      args: ['s1', { black: { controller: 'human' }, white: { controller: 'engine', rank: '10k' }, settings: { komi: 7.5 }, waitForReply: true }],
+      args: ['s1', { black: { controller: 'human' }, white: { controller: 'engine', rank: '10k' }, settings: { komi: 7.5 }, waitForReply: true, via: 'voice' }],
     });
     expect(state.gameId).toBe('g1');
     expect(state.humanColor).toBe('B');
@@ -121,6 +122,46 @@ describe('start_game', () => {
     const res = await fns.startGame({ my_color: 'white' });
     expect(res).toMatchObject({ ok: true, firstMove: null, note: 'Гоко ещё думает над первым ходом и назовёт его сам' });
     expect(state.awaitingReply).toBe(true);
+  });
+  it('поздний ответ не возвращает агента из новой партии с экрана в созданную инструментом', async () => {
+    const { fns, state, client } = setup();
+    let resolve!: (value: Awaited<ReturnType<typeof client.newGame>>) => void;
+    client.newGame = () => new Promise((r) => { resolve = r; });
+    const pending = fns.startGame({});
+    handleEvent({ type: 'session.game', gameId: 'voice-game' }, state);
+    handleEvent({ type: 'state.updated', cause: 'new', by: 'system', via: 'voice', state: fakeGame({ id: 'voice-game' }) }, state);
+    handleEvent({ type: 'session.game', gameId: 'web-game' }, state);
+    handleEvent({ type: 'state.updated', cause: 'new', by: 'system', via: 'tap', state: fakeGame({ id: 'web-game', pendingEngineMove: true }) }, state);
+    resolve({ state: fakeGame({ id: 'voice-game' }) });
+    expect(await pending).toEqual({ ok: false, reason: 'партия уже сменилась: посмотри текущую позицию и скажи человеку' });
+    expect(state.gameId).toBe('web-game');
+    expect(state.awaitingReply).toBe(true);
+    expect(state.toolGames.has('voice-game')).toBe(true);
+  });
+  it('button-first не маскируется под start_game, а следующий voice commit подтверждает свой ответ', async () => {
+    const { fns, state, client } = setup();
+    let resolve!: (value: Awaited<ReturnType<typeof client.newGame>>) => void;
+    client.newGame = () => new Promise((r) => { resolve = r; });
+    const pending = fns.startGame({});
+    handleEvent({ type: 'session.game', gameId: 'web-game' }, state);
+    expect(handleEvent({ type: 'state.updated', cause: 'new', by: 'system', via: 'tap', state: fakeGame({ id: 'web-game' }) }, state)).toContain('Человек начал новую партию с экрана');
+    handleEvent({ type: 'session.game', gameId: 'voice-game' }, state);
+    expect(handleEvent({ type: 'state.updated', cause: 'new', by: 'system', via: 'voice', state: fakeGame({ id: 'voice-game' }) }, state)).toBeNull();
+    resolve({ state: fakeGame({ id: 'voice-game' }) });
+    expect(await pending).toMatchObject({ ok: true, gameId: 'voice-game' });
+    expect(state.gameId).toBe('voice-game');
+    expect(state.toolGames.has('web-game')).toBe(false);
+    expect(state.toolGames.has('voice-game')).toBe(true);
+  });
+  it('не запускает два overlapping start_game в одном состоянии', async () => {
+    const { fns, state, client } = setup();
+    let resolve!: (value: Awaited<ReturnType<typeof client.newGame>>) => void;
+    client.newGame = () => new Promise((r) => { resolve = r; });
+    const first = fns.startGame({});
+    expect(await fns.startGame({})).toEqual({ ok: false, reason: 'новая партия уже создаётся: дождись результата' });
+    resolve({ state: fakeGame({ id: 'g1' }) });
+    await first;
+    expect(state.startingGame).toBe(false);
   });
 });
 
@@ -615,18 +656,64 @@ describe('pass / resign / undo', () => {
     expect(humanText('bad_request', { reason: 'not_your_seat' })).toBe('это не твой цвет');
   });
   it('undo возвращает снятые ходы с произношением', async () => {
-    const { fns, state } = await withGame({ replies: ['K10'] });
+    const { fns, state, client } = await withGame({ replies: ['K10'] });
     await fns.playMove({ coord: 'D4' });
     state.awaitingReply = true;
     expect(await fns.undo()).toEqual({ ok: true, removed: ['D4', 'K10'], removedSpoken: ['дэ четыре', 'ка десять'], toPlay: 'B', status: 'playing' });
     expect(state.awaitingReply).toBe(false);
+    expect(client.calls.at(-1)).toMatchObject({ method: 'undo', args: ['g1', { via: 'voice', expectedRevision: 2 }] });
+  });
+  it('undo перечитывает актуальную ревизию перед мутацией', async () => {
+    const { fns, state, client } = setup({ replies: ['K10'] });
+    client.game = fakeGame({ id: 'g1', moves: [{ n: 1, color: 'B', coord: 'D4', captured: 0, at: 't' }], revision: 1 });
+    state.gameId = 'g1';
+    await fns.undo();
+    expect(client.calls.map((c) => c.method)).toEqual(['getGame', 'undo']);
+    expect(client.calls.at(-1)).toMatchObject({ args: ['g1', { via: 'voice', expectedRevision: 1 }] });
+  });
+  it('redo после последовательного undo с экрана использует его новую ревизию, а не старый tool-cache', async () => {
+    const { fns, client } = await withGame({ replies: ['K10'] });
+    await fns.playMove({ coord: 'D4' });
+    await client.undo('g1', { via: 'tap', expectedRevision: 2 });
+    client.calls.length = 0;
+    expect(await fns.redo()).toMatchObject({ ok: true, restored: ['D4', 'K10'] });
+    expect(client.calls.map((c) => c.method)).toEqual(['getGame', 'redo']);
+    expect(client.calls.at(-1)).toMatchObject({ args: ['g1', { via: 'voice', expectedRevision: 3 }] });
+  });
+  it('поздний undo старой партии не сбрасывает ожидание ответа новой партии', async () => {
+    const { fns, state, client } = await withGame({ replies: ['K10'] });
+    await fns.playMove({ coord: 'D4' });
+    let resolve!: (value: Awaited<ReturnType<typeof client.undo>>) => void;
+    client.undo = () => new Promise((r) => { resolve = r; });
+    const pending = fns.undo();
+    await Promise.resolve();
+    await Promise.resolve();
+    handleEvent({ type: 'session.game', gameId: 'g2' }, state);
+    handleEvent({ type: 'state.updated', cause: 'new', by: 'system', state: fakeGame({ id: 'g2', pendingEngineMove: true }) }, state);
+    resolve({ state: fakeGame({ id: 'g1', revision: 3 }), removed: [] });
+    expect(await pending).toEqual({ ok: false, reason: 'партия уже сменилась: посмотри текущую позицию и скажи человеку' });
+    expect(state.gameId).toBe('g2');
+    expect(state.awaitingReply).toBe(true);
+  });
+  it('поздний undo старой ревизии той же партии не стирает lastTap нового хода из SSE', async () => {
+    const { fns, state, client } = await withGame({ replies: ['K10'] });
+    await fns.playMove({ coord: 'D4' });
+    let resolve!: (value: Awaited<ReturnType<typeof client.undo>>) => void;
+    client.undo = () => new Promise((r) => { resolve = r; });
+    const pending = fns.undo();
+    await Promise.resolve();
+    await Promise.resolve();
+    handleEvent({ type: 'state.updated', cause: 'play', by: 'human', via: 'tap', state: fakeGame({ id: 'g1', revision: 4, pendingEngineMove: true, moves: [{ n: 1, color: 'B', coord: 'C3', captured: 0, at: 't' }] }) }, state);
+    resolve({ state: fakeGame({ id: 'g1', revision: 3 }), removed: [] });
+    expect(await pending).toEqual({ ok: false, reason: 'партия уже сменилась: посмотри текущую позицию и скажи человеку' });
+    expect(state.lastTap).toEqual({ cause: 'play', coord: 'C3' });
   });
   it('undo без ходов — reason из humanText, не английский message', async () => {
     const { fns } = await withGame();
     expect(await fns.undo()).toEqual({ ok: false, reason: humanText('nothing_to_undo') });
   });
   it('redo восстанавливает ходы, сбрасывает stale-флаги и возвращает итог', async () => {
-    const { fns, state } = await withGame({ replies: ['K10'] });
+    const { fns, state, client } = await withGame({ replies: ['K10'] });
     await fns.playMove({ coord: 'D4' });
     await fns.undo();
     state.awaitingReply = true;
@@ -643,6 +730,7 @@ describe('pass / resign / undo', () => {
     expect(state.awaitingReply).toBe(false);
     expect(state.awaitingFinish).toBeNull();
     expect(state.lastTap).toBeNull();
+    expect(client.calls.at(-1)).toMatchObject({ method: 'redo', args: ['g1', { via: 'voice', expectedRevision: 3 }] });
   });
   it('redo восстановленного финала произносит сохранённый итог', async () => {
     const { fns, state, client } = await withGame({ replies: ['pass'], finishAfterPolls: 1 });
@@ -661,12 +749,12 @@ describe('pass / resign / undo', () => {
     await fns.playMove({ coord: 'D4' });
     await fns.undo();
     client.calls.length = 0;
-    client.failNext(err());
+    client.failOn('redo', err());
     expect(await fns.redo()).toEqual({
       ok: false,
       reason: `${prefix}: возврат мог пройти. Не повторяй возврат сам: посмотри позицию и скажи человеку`,
     });
-    expect(client.calls.map((c) => c.method)).toEqual(['redo']);
+    expect(client.calls.map((c) => c.method)).toEqual(['getGame', 'redo']);
   });
   it.each([
     ['таймаут', () => new ClientTimeoutError('undo', 15_000), humanText('client_timeout')],
@@ -676,12 +764,12 @@ describe('pass / resign / undo', () => {
   ])('undo: %s — отмена могла пройти, без перечитывания и повтора', async (_name, err, prefix) => {
     const { fns, client } = await withGame({ replies: ['K10'] });
     await fns.playMove({ coord: 'D4' });
-    client.failNext(err());
+    client.failOn('undo', err());
     expect(await fns.undo()).toEqual({
       ok: false,
       reason: `${prefix}: отмена могла пройти. Не повторяй отмену сам: посмотри позицию и скажи человеку`,
     });
-    expect(client.calls.map((c) => c.method)).toEqual(['play', 'undo']);
+    expect(client.calls.map((c) => c.method)).toEqual(['play', 'getGame', 'undo']);
   });
 
   it('итог, отмена, снова два паса — ждём новый итог, а не прежний (I1)', async () => {
@@ -1018,8 +1106,8 @@ describe('сигнал сеанса в каждом инструменте (M7)'
     ['correct_last_move', (f) => f.correctLastMove({ coord: 'D5' }), ['correct']],
     ['pass', (f) => f.pass(), ['pass']],
     ['resign', (f) => f.resign(), ['getGame', 'resign']],
-    ['undo', (f) => f.undo(), ['undo']],
-    ['redo', (f) => f.redo(), ['redo']],
+    ['undo', (f) => f.undo(), ['getGame', 'undo']],
+    ['redo', (f) => f.redo(), ['getGame', 'redo']],
     ['get_position', (f) => f.getPosition(), ['getGame', 'ascii']],
     ['get_assessment', (f) => f.getAssessment(), ['getGame', 'analyze']],
     ['set_rank', (f) => f.setRank({ rank: '5 кю' }), ['getGame', 'setRank']],

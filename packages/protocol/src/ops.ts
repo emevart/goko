@@ -16,6 +16,7 @@ export const NewGameRequest = z.strictObject({
     .strictObject({ boardSize: BoardSize.optional(), rules: z.literal('chinese').optional(), komi: Komi.optional() })
     .optional(),
   waitForReply: z.boolean().default(true),
+  via: Via.default('api'),
 });
 export type NewGameRequest = z.input<typeof NewGameRequest>;
 

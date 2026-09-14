@@ -9,7 +9,7 @@ import { client } from '../api.ts';
 import { type Prefs, newGameRequest } from '../prefs.ts';
 import { type StreamHandle, needsRetry, streamEvents } from '../stream.ts';
 import { type SentMove, actionRefusal, describeError, retryDelayMs, sendTapMove } from '../text.ts';
-import { guardedGameResponse, thinkingAfterMutationResponse } from '../game-response.ts';
+import { guardedGameResponse, historyRequest, thinkingAfterMutationResponse } from '../game-response.ts';
 
 const MESSAGE_MS = 3000;
 
@@ -212,8 +212,8 @@ export function useGame(sessionId: string | null, onLost: () => void, trace: (ty
     [tapMove],
   );
   const pass = useCallback(() => tapMove((id, revision, o) => client.pass(id, { via: 'tap', expectedRevision: revision, waitForReply: false }, o)), [tapMove]);
-  const undo = useCallback(() => mutate((id, _g, o) => client.undo(id, { via: 'tap' }, o), true), [mutate]);
-  const redo = useCallback(() => mutate((id, _g, o) => client.redo(id, { via: 'tap' }, o), true), [mutate]);
+  const undo = useCallback(() => mutate((id, g, o) => client.undo(id, historyRequest(g.revision, 'tap'), o), true), [mutate]);
+  const redo = useCallback(() => mutate((id, g, o) => client.redo(id, historyRequest(g.revision, 'tap'), o), true), [mutate]);
   const resign = useCallback(() => mutate((id, g, o) => client.resign(id, { color: humanColorOf(g), via: 'tap' }, o), false), [mutate]);
 
   // «Новая партия» — цвет и ранг из выбора на экране (prefs), размер доски и коми от текущей партии.

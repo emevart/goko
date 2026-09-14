@@ -57,6 +57,7 @@ export function newGameRequest(prefs: Prefs, current: GameState | null, random: 
     white: humanBlack ? engine : human,
     settings: current ? { boardSize: current.settings.boardSize, komi: current.settings.komi } : { komi: DEFAULT_KOMI },
     waitForReply: false, // ответ движка придёт событием
+    via: 'tap',
   };
 }
 

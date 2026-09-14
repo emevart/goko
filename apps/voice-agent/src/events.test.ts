@@ -109,7 +109,7 @@ describe('handleEvent: подключение и новые партии', () =>
     const s = newAgentState('s1');
     s.startingGame = true;
     const g = fakeGame({ id: 'g3', seats: { B: { controller: 'engine', rank: '10k' }, W: { controller: 'human' } }, pendingEngineMove: true });
-    expect(handleEvent(upd(g, { cause: 'new', by: 'system' }), s)).toBeNull();
+    expect(handleEvent(upd(g, { cause: 'new', by: 'system', via: 'voice' }), s)).toBeNull();
     expect(s.toolGames.has('g3')).toBe(true);
     expect(s.awaitingReply).toBe(false);
   });

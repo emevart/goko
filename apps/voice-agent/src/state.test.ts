@@ -73,6 +73,8 @@ describe('newAgentState', () => {
     expect(newAgentState('s1')).toStrictEqual({
       sessionId: 's1',
       gameId: null,
+      gameGeneration: 0,
+      observedRevision: null,
       announceSync: null,
       humanColor: 'B',
       rank: '10k',

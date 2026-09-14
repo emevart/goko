@@ -296,6 +296,7 @@ describe('операции', () => {
       settings: { komi: 6.5 },
     });
     expect(r.waitForReply).toBe(true);
+    expect(r.via).toBe('api');
     expect(r.settings).toEqual({ komi: 6.5 });
     expect(
       NewGameRequest.parse({ black: { controller: 'human' }, white: { controller: 'engine' } }).settings,
@@ -315,6 +316,7 @@ describe('операции', () => {
     ).toThrow();
     const input: NewGameRequest = { black: { controller: 'human' }, white: { controller: 'engine' } };
     expect(NewGameRequest.parse(input).waitForReply).toBe(true);
+    expect(NewGameRequest.parse({ ...input, via: 'voice' }).via).toBe('voice');
   });
 
   it('NewGameResponse: первый ход и флаг таймаута необязательны', () => {

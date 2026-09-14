@@ -62,6 +62,8 @@ const noRepeatTail = (coord: string, next: string): string => `Не повтор
 // Отмена после таймаута или обрыва не перечитывается: могла пройти, модель смотрит позицию.
 const UNDO_UNKNOWN_TEXT = 'отмена могла пройти. Не повторяй отмену сам: посмотри позицию и скажи человеку';
 const REDO_UNKNOWN_TEXT = 'возврат мог пройти. Не повторяй возврат сам: посмотри позицию и скажи человеку';
+const STALE_GAME_TEXT = 'партия уже сменилась: посмотри текущую позицию и скажи человеку';
+const STARTING_GAME_TEXT = 'новая партия уже создаётся: дождись результата';
 
 // Коми по протоколу — x.5 от 0,5 до 13,5 (иначе сервер ответит bad_request без понятной человеку причины).
 const komiValid = (komi: number): boolean => Number.isFinite(komi) && komi >= 0.5 && komi <= 13.5 && komi % 1 === 0.5;
@@ -136,6 +138,15 @@ export function createToolFns(deps: ToolDeps) {
   const log = deps.log ?? (() => {});
   const opts = { signal };
 
+  const gameIsCurrent = (gameId: string, generation: number): boolean =>
+    state.gameId === gameId && state.gameGeneration === generation;
+  const resultIsCurrent = (gameId: string, generation: number, revision: number): boolean => {
+    if (!gameIsCurrent(gameId, generation)) return false;
+    const observed = state.observedRevision;
+    return observed?.gameId !== gameId || observed.revision <= revision;
+  };
+  const staleGame = (): Fail => fail(STALE_GAME_TEXT);
+
   // Пауза, которую обрывает сигнал сеанса: ожидание итога не держит закрытый сеанс до FINISH_WAIT_MS.
   // Слушатель снимается после паузы: сигнал живёт весь сеанс, а пауз за одно ожидание — до 88.
   function abortableSleep(ms: number): Promise<void> {
@@ -196,26 +207,40 @@ export function createToolFns(deps: ToolDeps) {
   // а ответ не дошёл. Повтор вслепую поставил бы камень второй раз или спасовал бы за человека, поэтому
   // партия перечитывается: та же ревизия — хода нет; иначе ход ищется в конце партии (appliedMove), а не
   // нашёлся — партия менялась, и модель сначала смотрит позицию.
-  async function sendMove(gameId: string, coord: string, call: () => Promise<PlayResponse>): Promise<PlayResponse | Fail> {
+  async function sendMove(gameId: string, generation: number, coord: string, call: () => Promise<PlayResponse>): Promise<PlayResponse | Fail> {
     const before = seen?.gameId === gameId ? { revision: seen.revision, moves: seen.moves, humanColor: seen.humanColor } : null;
     let prefix: string;
     try {
       const res = await call();
+      if (!resultIsCurrent(gameId, generation, res.state.revision)) return staleGame();
       note(res.state);
       return res;
     } catch (e) {
+      if (!gameIsCurrent(gameId, generation)) return staleGame();
       if (!maybeDone(e)) return reasonOf(e);
       prefix = reasonOf(e).reason;
     }
     let g: GameState;
     try {
       g = note(await client.getGame(gameId, opts));
+      if (!resultIsCurrent(gameId, generation, g.revision)) return staleGame();
     } catch (e) {
       // Партию не видно: ход мог и дойти, модель всё равно его не повторяет.
       return fail(`${reasonOf(e).reason}. ${noRepeatTail(coord, WAIT_NEXT)}`);
     }
     if (g.revision === before?.revision) return fail(notAppliedText(prefix, g, coord));
     return appliedMove(g, coord, before) ?? fail(changedText(prefix, g, coord));
+  }
+
+  async function revisionFor(gameId: string, generation: number): Promise<number | Fail> {
+    try {
+      const g = await client.getGame(gameId, opts);
+      if (!resultIsCurrent(gameId, generation, g.revision)) return staleGame();
+      return note(g).revision;
+    } catch (e) {
+      if (!gameIsCurrent(gameId, generation)) return staleGame();
+      return reasonOf(e);
+    }
   }
 
   function moveResult(res: PlayResponse) {
@@ -246,7 +271,7 @@ export function createToolFns(deps: ToolDeps) {
   // в FINISH_POLL_MS и не раньше Retry-After. Первый опрос — через FINISH_POLL_MS после пасов, всего их
   // не больше 8 за FINISH_WAIT_MS. Отмена сеанса обрывает ожидание с причиной отмены: и паузу, и ожидание
   // Retry-After, в котором к серверу не ходим и сигнал клиента не срабатывает.
-  async function waitFinished(g0: GameState): Promise<GameState> {
+  async function waitFinished(g0: GameState, generation: number): Promise<GameState | Fail> {
     const gameId = g0.id;
     let g = g0;
     const started = now();
@@ -268,14 +293,16 @@ export function createToolFns(deps: ToolDeps) {
           if (g.status === 'finished') return g;
         }
         await sleep(FINISH_TICK_MS);
+        if (!resultIsCurrent(gameId, generation, g.revision)) return staleGame();
       }
     } finally {
-      state.awaitingFinish = null;
+      if (gameIsCurrent(gameId, generation) && state.awaitingFinish === gameId) state.awaitingFinish = null;
     }
   }
 
   return {
     async startGame(args: { my_color?: 'black' | 'white'; rank?: string; komi?: number }) {
+      if (state.startingGame) return fail(STARTING_GAME_TEXT);
       const human: Color = args.my_color === 'white' ? 'W' : 'B';
       let rank = state.rank;
       if (args.rank !== undefined) {
@@ -291,6 +318,7 @@ export function createToolFns(deps: ToolDeps) {
       const humanSeat = { controller: 'human' as const };
       // Сервер публикует state.updated new раньше, чем отвечает на HTTP (а с waitForReply и первым ходом
       // движка — заметно раньше): флаг говорит events.ts, что эта новая партия — от инструмента.
+      const generation = state.gameGeneration;
       state.startingGame = true;
       try {
         const res = await client.newGame(
@@ -300,9 +328,11 @@ export function createToolFns(deps: ToolDeps) {
             white: human === 'W' ? humanSeat : engine,
             settings: { komi },
             waitForReply: true,
+            via: 'voice',
           },
           opts,
         );
+        if (state.gameGeneration !== generation && state.gameId !== res.state.id) return staleGame();
         const g = note(res.state);
         state.gameId = g.id;
         state.humanColor = human;
@@ -325,6 +355,7 @@ export function createToolFns(deps: ToolDeps) {
           ...(res.replyTimedOut ? { note: 'Гоко ещё думает над первым ходом и назовёт его сам' } : {}),
         };
       } catch (e) {
+        if (state.gameGeneration !== generation) return staleGame();
         return reasonOf(e);
       } finally {
         state.startingGame = false;
@@ -334,30 +365,38 @@ export function createToolFns(deps: ToolDeps) {
     async playMove({ coord }: { coord: string }) {
       const gameId = gameGuard();
       if (typeof gameId !== 'string') return gameId;
-      const res = await sendMove(gameId, coord, () => client.play(gameId, { coord, via: 'voice' }, opts));
+      const generation = state.gameGeneration;
+      const res = await sendMove(gameId, generation, coord, () => client.play(gameId, { coord, via: 'voice' }, opts));
       return 'state' in res ? moveResult(res) : res;
     },
 
     async correctLastMove({ coord }: { coord: string }) {
       const gameId = gameGuard();
       if (typeof gameId !== 'string') return gameId;
-      const res = await sendMove(gameId, coord, () => client.correct(gameId, { coord, via: 'voice' }, opts));
+      const generation = state.gameGeneration;
+      const res = await sendMove(gameId, generation, coord, () => client.correct(gameId, { coord, via: 'voice' }, opts));
       return 'state' in res ? moveResult(res) : res;
     },
 
     async pass() {
       const gameId = gameGuard();
       if (typeof gameId !== 'string') return gameId;
+      const generation = state.gameGeneration;
       // Прежний итог этой партии устарел до отправки: пас принимается только в идущей партии, а итог нового
       // счёта может прийти из потока раньше ответа. Ревизии до ответа нет — забываем без сверки (null).
       forgetFinishIfReopened(state, gameId, null);
-      const res = await sendMove(gameId, 'pass', () => client.pass(gameId, { via: 'voice' }, opts));
+      const res = await sendMove(gameId, generation, 'pass', () => client.pass(gameId, { via: 'voice' }, opts));
       if (!('state' in res)) return res;
       let g = res.state;
       // Два паса подряд: сервер считает очки в фоне; итог ждём из потока, опрос — запасной путь.
       // Отказы опроса waitFinished разбирает сам; наружу из него идут только баг и отмена сигналом.
       const scoring = res.reply?.coord === 'pass' && g.status !== 'finished';
-      if (scoring) g = await waitFinished(g);
+      if (scoring) {
+        const waited = await waitFinished(g, generation);
+        if (!('id' in waited)) return waited;
+        g = waited;
+      }
+      if (!gameIsCurrent(gameId, generation)) return staleGame();
       const finished = g.status === 'finished';
       if (finished) {
         state.announcedFinish = g.id;
@@ -378,11 +417,14 @@ export function createToolFns(deps: ToolDeps) {
     async resign() {
       const gameId = gameGuard();
       if (typeof gameId !== 'string') return gameId;
+      const generation = state.gameGeneration;
       try {
         // Цвет сдающегося — до хода: в партии двух людей это тот, чей ход (humanColorOf).
         const current = note(await client.getGame(gameId, opts));
+        if (!resultIsCurrent(gameId, generation, current.revision)) return staleGame();
         const color = humanColorOf(current);
         const res = await client.resign(gameId, { color, via: 'voice' }, opts);
+        if (!resultIsCurrent(gameId, generation, res.state.revision)) return staleGame();
         note(res.state);
         state.announcedFinish = res.state.id;
         noteFinishRevision(state, res.state.id, res.state.revision);
@@ -390,6 +432,7 @@ export function createToolFns(deps: ToolDeps) {
         const who = hasEngine(current) ? color : null;
         return { ok: true as const, result: res.state.result ? describeResult(res.state.result, who) : 'партия сдана' };
       } catch (e) {
+        if (!gameIsCurrent(gameId, generation)) return staleGame();
         return reasonOf(e);
       }
     },
@@ -397,8 +440,12 @@ export function createToolFns(deps: ToolDeps) {
     async undo() {
       const gameId = gameGuard();
       if (typeof gameId !== 'string') return gameId;
+      const generation = state.gameGeneration;
       try {
-        const res = await client.undo(gameId, { via: 'voice' }, opts);
+        const revision = await revisionFor(gameId, generation);
+        if (typeof revision !== 'number') return revision;
+        const res = await client.undo(gameId, { via: 'voice', expectedRevision: revision }, opts);
+        if (!resultIsCurrent(gameId, generation, res.state.revision)) return staleGame();
         note(res.state);
         // Удачная отмена возвращает партию в игру: итог, известный на ревизии старше ответа, устарел.
         forgetFinishIfReopened(state, gameId, res.state.revision);
@@ -412,6 +459,7 @@ export function createToolFns(deps: ToolDeps) {
           status: res.state.status,
         };
       } catch (e) {
+        if (!gameIsCurrent(gameId, generation)) return staleGame();
         // Отмена могла пройти: перечитывание не скажет, чья она (две отмены подряд неотличимы), повтор снял бы
         // лишние ходы.
         const failed = reasonOf(e);
@@ -422,8 +470,12 @@ export function createToolFns(deps: ToolDeps) {
     async redo() {
       const gameId = gameGuard();
       if (typeof gameId !== 'string') return gameId;
+      const generation = state.gameGeneration;
       try {
-        const res = await client.redo(gameId, { via: 'voice' }, opts);
+        const revision = await revisionFor(gameId, generation);
+        if (typeof revision !== 'number') return revision;
+        const res = await client.redo(gameId, { via: 'voice', expectedRevision: revision }, opts);
+        if (!resultIsCurrent(gameId, generation, res.state.revision)) return staleGame();
         const g = note(res.state);
         state.awaitingReply = false;
         state.awaitingFinish = null;
@@ -444,6 +496,7 @@ export function createToolFns(deps: ToolDeps) {
           ...finishedFields(g),
         };
       } catch (e) {
+        if (!gameIsCurrent(gameId, generation)) return staleGame();
         const failed = reasonOf(e);
         return maybeDone(e) ? fail(`${failed.reason}: ${REDO_UNKNOWN_TEXT}`) : failed;
       }
@@ -452,13 +505,16 @@ export function createToolFns(deps: ToolDeps) {
     async getPosition(): Promise<string> {
       const gameId = gameGuard();
       if (typeof gameId !== 'string') return gameId.reason;
+      const generation = state.gameGeneration;
       let g: GameState;
       let ascii: string;
       try {
         [g, ascii] = await Promise.all([client.getGame(gameId, opts), client.ascii(gameId, opts)]);
       } catch (e) {
+        if (!gameIsCurrent(gameId, generation)) return STALE_GAME_TEXT;
         return reasonOf(e).reason;
       }
+      if (!resultIsCurrent(gameId, generation, g.revision)) return STALE_GAME_TEXT;
       note(g);
       const last = g.moves
         .slice(-6)
@@ -482,8 +538,10 @@ export function createToolFns(deps: ToolDeps) {
     async getAssessment() {
       const gameId = gameGuard();
       if (typeof gameId !== 'string') return gameId;
+      const generation = state.gameGeneration;
       try {
         const [g, a] = await Promise.all([client.getGame(gameId, opts), client.analyze(gameId, { maxVisits: ASSESSMENT_VISITS }, opts)]);
+        if (!resultIsCurrent(gameId, generation, g.revision)) return staleGame();
         note(g);
         const lead = a.scoreLeadB;
         // Одно округление до половины очка для обоих знаков; «поровну» — ровно когда округлённый отрыв 0.
@@ -537,6 +595,7 @@ export function createToolFns(deps: ToolDeps) {
           toPlay: g.toPlay === human ? ('you' as const) : ('me' as const),
         };
       } catch (e) {
+        if (!gameIsCurrent(gameId, generation)) return staleGame();
         return reasonOf(e);
       }
     },
@@ -550,16 +609,20 @@ export function createToolFns(deps: ToolDeps) {
       }
       const gameId = gameGuard();
       if (typeof gameId !== 'string') return gameId;
+      const generation = state.gameGeneration;
       try {
         const g = note(await client.getGame(gameId, opts));
+        if (!resultIsCurrent(gameId, generation, g.revision)) return staleGame();
         if (!hasEngine(g)) {
           state.rank = parsed;
           return { ok: true as const, rank: speakRank(parsed), note: 'в этой партии нет Гоко: уровень применится к следующей' };
         }
         await client.setRank(gameId, { color: engineColorOf(g), rank: parsed }, opts);
+        if (!gameIsCurrent(gameId, generation)) return staleGame();
         state.rank = parsed;
         return { ok: true as const, rank: speakRank(parsed) };
       } catch (e) {
+        if (!gameIsCurrent(gameId, generation)) return staleGame();
         return reasonOf(e);
       }
     },
