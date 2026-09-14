@@ -1,3 +1,4 @@
+import { getEventListeners } from 'node:events';
 import { describe, expect, it, vi } from 'vitest';
 import { ApiError, ClientTimeoutError, type GameState, HttpError, humanText } from '@goko/protocol';
 import { type AgentState, newAgentState } from './state.ts';
@@ -617,6 +618,16 @@ describe('pass / resign / undo', () => {
     expect(state.announcedFinish).toBe('g1');
   });
 
+  it('отмена с отказом сервера итог партии не забывает: партия не возобновилась (I1)', async () => {
+    const { fns, state } = await withGame();
+    const finished = { gameId: 'g1', result: { winner: 'W' as const, reason: 'resign' as const } };
+    state.finished = finished;
+    state.announcedFinish = 'g1';
+    expect(await fns.undo()).toEqual({ ok: false, reason: humanText('nothing_to_undo') });
+    expect(state.finished).toBe(finished);
+    expect(state.announcedFinish).toBe('g1');
+  });
+
   it('пас забывает прежний итог этой партии до отправки; итог другой партии не трогает (I1)', async () => {
     const { fns, state, clock } = await withGame({ replies: ['pass'], finishAfterPolls: 2 });
     state.finished = { gameId: 'g1', result: { winner: 'B', margin: 0.5, reason: 'score' } };
@@ -667,12 +678,30 @@ describe('pass / resign / undo', () => {
       await vi.advanceTimersByTimeAsync(0);
       expect(outcome).toBe('pending');
       expect(vi.getTimerCount()).toBe(1);
+      // Четыре паузы прошли, слушатель отмены на сигнале сеанса — только у текущей.
+      await vi.advanceTimersByTimeAsync(4 * FINISH_TICK_MS);
+      expect(outcome).toBe('pending');
+      expect(getEventListeners(controller.signal, 'abort')).toHaveLength(1);
       const reason = new Error('session closed');
       controller.abort(reason);
       await vi.advanceTimersByTimeAsync(0);
       expect(outcome).toBe(reason);
       expect(vi.getTimerCount()).toBe(0);
       expect(state.awaitingFinish).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('два паса: без сигнала сеанса пауза по умолчанию просто ждёт', async () => {
+    vi.useFakeTimers();
+    try {
+      const client = createFakeClient({ replies: ['pass'], finishAfterPolls: 1 });
+      const fns = createToolFns({ client, state: newAgentState('s1') });
+      await fns.startGame({});
+      const res = fns.pass();
+      await vi.advanceTimersByTimeAsync(FINISH_POLL_MS);
+      expect(await res).toMatchObject({ ok: true, finished: true, result: 'победа за мной, разница 3,5 очка' });
     } finally {
       vi.useRealTimers();
     }

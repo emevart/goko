@@ -126,21 +126,18 @@ export function createToolFns(deps: ToolDeps) {
   const opts = { signal };
 
   // Пауза, которую обрывает сигнал сеанса: ожидание итога не держит закрытый сеанс до FINISH_WAIT_MS.
+  // Слушатель снимается после паузы: сигнал живёт весь сеанс, а пауз за одно ожидание — до 88.
   function abortableSleep(ms: number): Promise<void> {
     return new Promise<void>((resolve, reject) => {
-      if (!signal) {
-        setTimeout(resolve, ms);
-        return;
-      }
       const onAbort = () => {
         clearTimeout(timer);
-        reject(signal.reason);
+        reject(signal?.reason);
       };
       const timer = setTimeout(() => {
-        signal.removeEventListener('abort', onAbort);
+        signal?.removeEventListener('abort', onAbort);
         resolve();
       }, ms);
-      signal.addEventListener('abort', onAbort, { once: true });
+      signal?.addEventListener('abort', onAbort, { once: true });
     });
   }
 
