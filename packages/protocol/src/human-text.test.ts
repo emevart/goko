@@ -30,8 +30,9 @@ describe('текст ошибки для человека', () => {
   });
 
   it('bad_request с причиной not_your_seat (сдача за чужой цвет): «это не твой цвет»; без причины — общий текст', () => {
-    expect(BAD_REQUEST_REASON_TEXT).toEqual({ not_your_seat: 'это не твой цвет', sessionless_disabled: 'партии создаются только внутри сессии' });
+    expect(BAD_REQUEST_REASON_TEXT).toEqual({ not_your_seat: 'это не твой цвет', sessionless_disabled: 'партии создаются только внутри сессии', list_disabled: 'список партий недоступен' });
     expect(humanText('bad_request', { reason: 'sessionless_disabled' })).toBe('партии создаются только внутри сессии');
+    expect(humanText('bad_request', { reason: 'list_disabled' })).toBe('список партий недоступен');
     expect(humanText('bad_request', { reason: 'not_your_seat' })).toBe('это не твой цвет');
     expect(humanText('bad_request')).toBe(ERROR_TEXT.bad_request);
     expect(humanText('bad_request', { reason: 'toString' })).toBe(ERROR_TEXT.bad_request);

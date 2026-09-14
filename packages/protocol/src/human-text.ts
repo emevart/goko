@@ -12,13 +12,14 @@ export const ILLEGAL_REASON_TEXT: Record<IllegalReasonCode, string> = {
   suicide: 'самоубийство: у камня не будет дыханий',
 };
 
-export type BadRequestReasonCode = 'not_your_seat' | 'sessionless_disabled';
+export type BadRequestReasonCode = 'not_your_seat' | 'sessionless_disabled' | 'list_disabled';
 
-// Причины bad_request, у которых есть своя фраза: сдача за цвет, которым человек не управляет, и партия
-// без сессии там, где такие выключены (D-0012).
+// Причины bad_request, у которых есть своя фраза: сдача за цвет, которым человек не управляет, партия
+// без сессии и список партий там, где они выключены (D-0012).
 export const BAD_REQUEST_REASON_TEXT: Record<BadRequestReasonCode, string> = {
   not_your_seat: 'это не твой цвет',
   sessionless_disabled: 'партии создаются только внутри сессии',
+  list_disabled: 'список партий недоступен',
 };
 
 export type TooManyGamesScope = 'client';
