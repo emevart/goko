@@ -37,6 +37,23 @@ export async function sendTapMove(
   return { state, text: state.revision === before.revision ? TIMEOUT_NOT_APPLIED_TEXT : null };
 }
 
+// Ход тапом, на который ответ уже пришёл: пока состояние партии не новее этой ревизии, следующий ход ушёл бы со старой.
+export type SentMove = { gameId: string; revision: number };
+
+// Почему действие над текущей партией не отправляется: фраза для человека, '' — молча, null — запрос можно слать.
+// Между session.game новой партии и её первым state.updated gameId уже новый, а state ещё старый: запрос ушёл бы
+// в новую партию с ревизией старой, поэтому тоже «партии ещё нет». Проверка «чей ход» — только по полям состояния.
+// inFlight — действие над партией ещё в пути; sent — последний записанный ход тапом. Пока одно из них держит, второй
+// ход не уходит (иначе 409 revision_conflict): фраза та же, что в черёд Гоко; отмена и сдача ждут молча.
+export function actionRefusal(state: GameState | null, gameId: string | null, needTurn: boolean, inFlight: boolean, sent: SentMove | null): string | null {
+  if (!gameId || !state || state.id !== gameId) return 'партии ещё нет';
+  if (state.status === 'finished') return 'партия окончена';
+  const humanTurn = state.status === 'playing' && state.seats[state.toPlay].controller === 'human' && !state.pendingEngineMove;
+  const waiting = inFlight || (sent !== null && sent.gameId === state.id && state.revision <= sent.revision);
+  if (needTurn && (!humanTurn || waiting)) return hasEngine(state) ? 'сейчас ход Гоко' : 'сейчас не твой ход';
+  return waiting ? '' : null;
+}
+
 export function describeError(e: unknown): string {
   // Текст для человека — по code и details, message сервера английский (D-0007). details несут reason
   // (bad_request: not_your_seat, sessionless_disabled) и scope (too_many_games) — фразу выбирает humanText.

@@ -3,6 +3,7 @@ import { ApiError, type CallOptions, ClientTimeoutError, type GameState, HttpErr
 import {
   NETWORK_TEXT,
   TIMEOUT_NOT_APPLIED_TEXT,
+  actionRefusal,
   capturesText,
   describeError,
   rankText,
@@ -130,5 +131,37 @@ describe('text', () => {
     expect(resultText(game({ seats: hvh, status: 'finished', result: { winner: 'B', reason: 'resign' } }))).toBe('Победа чёрных: сдача');
     expect(resultText(game({ seats: hvh, status: 'finished', result: { winner: 'W', margin: 2.5, reason: 'score' } }))).toBe('Победа белых: +2,5');
     expect(rankText(game({ seats: hvh }))).toBe('Два игрока');
+  });
+});
+
+// Действие над партией тапом: фраза без запроса, '' — молча без запроса, null — запрос уходит.
+describe('actionRefusal', () => {
+  const hvh = { B: { controller: 'human' }, W: { controller: 'human' } } as const;
+  it('без партии, до её первого состояния и после конца — фраза', () => {
+    expect(actionRefusal(null, null, true, false, null)).toBe('партии ещё нет');
+    expect(actionRefusal(game(), 'g2', true, false, null)).toBe('партии ещё нет');
+    expect(actionRefusal(game({ status: 'finished' }), 'g1', false, false, null)).toBe('партия окончена');
+  });
+  it('ход и пас: не черёд человека — «сейчас ход Гоко», в партии двух людей — «сейчас не твой ход»', () => {
+    expect(actionRefusal(game(), 'g1', true, false, null)).toBeNull();
+    expect(actionRefusal(game({ toPlay: 'W' }), 'g1', true, false, null)).toBe('сейчас ход Гоко');
+    expect(actionRefusal(game({ pendingEngineMove: true }), 'g1', true, false, null)).toBe('сейчас ход Гоко');
+    expect(actionRefusal(game({ seats: hvh, pendingEngineMove: true }), 'g1', true, false, null)).toBe('сейчас не твой ход');
+    // Отмена и сдача черёд не проверяют.
+    expect(actionRefusal(game({ toPlay: 'W' }), 'g1', false, false, null)).toBeNull();
+  });
+  it('запрос в пути (m1): второй ход — «сейчас ход Гоко» без запроса, прочие действия молча', () => {
+    expect(actionRefusal(game(), 'g1', true, true, null)).toBe('сейчас ход Гоко');
+    expect(actionRefusal(game({ seats: hvh }), 'g1', true, true, null)).toBe('сейчас не твой ход');
+    expect(actionRefusal(game(), 'g1', false, true, null)).toBe('');
+  });
+  it('ответ пришёл, а состояние с новой ревизией ещё нет — ход по-прежнему не уходит со старой ревизией', () => {
+    const sent = { gameId: 'g1', revision: 4 };
+    expect(actionRefusal(game({ revision: 4 }), 'g1', true, false, sent)).toBe('сейчас ход Гоко');
+    expect(actionRefusal(game({ revision: 4 }), 'g1', false, false, sent)).toBe('');
+    // Пришло состояние новее отправленного: можно.
+    expect(actionRefusal(game({ revision: 6 }), 'g1', true, false, sent)).toBeNull();
+    // Отметка другой партии текущую не держит.
+    expect(actionRefusal(game({ id: 'g2', revision: 1 }), 'g2', true, false, sent)).toBeNull();
   });
 });

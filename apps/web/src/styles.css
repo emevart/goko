@@ -31,9 +31,11 @@ body { background: var(--bg); color: var(--fg); font: 16px/1.4 system-ui, -apple
 .app { display: flex; flex-direction: column; height: 100dvh; padding: env(safe-area-inset-top) 8px env(safe-area-inset-bottom); gap: 8px; }
 .top-row { display: flex; justify-content: flex-end; padding-top: 6px; }
 .status { padding: 0 4px; }
-.status-row { display: flex; align-items: center; gap: 8px; }
-/* Главная строка — всегда на две строки высоты: фразы на 3 с не сдвигают доску. */
-.status-main { flex: 1; font-size: 18px; font-weight: 600; line-height: 1.3; min-height: 2.6em; }
+/* Главная строка — во всю ширину и ровно две строки высоты: фразы на 3 с не сдвигают доску. На 360 px все фразы
+   укладываются в две строки; обрезка многоточием — страховка для экранов уже 360 px и крупного шрифта. */
+.status-main { font-size: 18px; font-weight: 600; line-height: 1.3; height: 2.6em; overflow: hidden; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; }
+/* «Повторить» (D-0006) — своей строкой под главной: появляется по состоянию, а не на 3 с. */
+.status-retry { display: flex; margin-top: 4px; }
 .status-notice { font-size: 14px; line-height: 1.3; }
 .status-sub { font-size: 14px; min-height: 20px; }
 .muted { color: var(--muted); }

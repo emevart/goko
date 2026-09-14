@@ -12,11 +12,8 @@ import { Transcript } from './components/Transcript.tsx';
 import { useGame } from './hooks/useGame.ts';
 import { useSession } from './hooks/useSession.ts';
 import { useWakeLock } from './hooks/useWakeLock.ts';
+import { AGENT_HINT_TEXT, type AgentHint, agentHintTimer } from './agent.ts';
 
-// Агент ждёт возврата телефона 15 минут и уходит из комнаты; в эту сессию его повторно не позвать.
-// 15 с без агента в подключённой комнате — не переподключение агента, а уход.
-const AGENT_GONE_MS = 15_000;
-const AGENT_GONE_TEXT = 'Гоко вышел из комнаты: доска работает тапами. Чтобы снова говорить с Гоко, открой страницу в новой вкладке.';
 const AGENT_SEEN_KEY = 'goko.agentSeen';
 
 // Был ли агент в комнате этой сессии: хранится рядом с сессией (sessionStorage) и переживает перезагрузку вкладки.
@@ -32,27 +29,29 @@ function saveAgentSeen(sessionId: string) {
   try {
     sessionStorage.setItem(AGENT_SEEN_KEY, sessionId);
   } catch {
-    // без storage отметку держит ref в useAgentGone — до перезагрузки вкладки
+    // без storage отметку держит ref в useAgentHint — до перезагрузки вкладки
   }
 }
 
-// Подсказка «Гоко вышел»: комната подключена, агент в этой сессии уже был, а сейчас его нет дольше AGENT_GONE_MS.
-// Без воркера (агента не было ни разу) подсказки нет: там поле «Гоко подключается…».
-function useAgentGone(sessionId: string | null, connected: boolean, agent: boolean): boolean {
-  const [gone, setGone] = useState(false);
+// Подсказка об агенте (agent.ts): «Гоко вышел» — агент в сессии был и ушёл, «Гоко не пришёл» — комната подключена,
+// а агента в сессии ещё не было. Появление агента снимает подсказку сразу; отсчёт перезапускается при каждой смене
+// подключения, агента или сессии.
+function useAgentHint(sessionId: string | null, connected: boolean, agent: boolean): AgentHint | null {
+  const [hint, setHint] = useState<AgentHint | null>(null);
   const seen = useRef<string | null>(null);
   useEffect(() => {
     if (sessionId && agent) {
       seen.current = sessionId;
       saveAgentSeen(sessionId);
     }
-    setGone(false);
-    if (!sessionId || !connected || agent) return;
-    if (seen.current !== sessionId && loadAgentSeen() !== sessionId) return;
-    const t = setTimeout(() => setGone(true), AGENT_GONE_MS);
+    setHint(null);
+    if (!sessionId) return;
+    const wait = agentHintTimer(connected, agent, seen.current === sessionId || loadAgentSeen() === sessionId);
+    if (!wait) return;
+    const t = setTimeout(() => setHint(wait.hint), wait.ms);
     return () => clearTimeout(t);
   }, [sessionId, connected, agent]);
-  return gone;
+  return hint;
 }
 
 export function App() {
@@ -64,7 +63,7 @@ export function App() {
   const size = g.state?.settings.boardSize ?? 13;
   const keepAwake = useWakeLock();
   const activating = useRef(false);
-  const agentGone = useAgentGone(sessionId, link === 'connected', agent);
+  const agentHint = useAgentHint(sessionId, link === 'connected', agent);
 
   // Ошибка связи с комнатой или микрофона уходит, когда причина прошла: вошли в комнату и микрофон не в отказе.
   useEffect(() => {
@@ -112,8 +111,8 @@ export function App() {
         onUndo={() => void g.undo()}
       />
       <NewGame prefs={s.prefs} onChange={s.updatePrefs} onStart={() => void g.newGame(s.prefs)} />
-      <Transcript lines={s.lines} mode={s.prefs.mode} notice={agentGone ? AGENT_GONE_TEXT : null} />
-      {s.prefs.mode === 'chat' && <ChatInput ready={agent} gone={agentGone} onSend={onSend} />}
+      <Transcript lines={s.lines} mode={s.prefs.mode} notice={agentHint ? AGENT_HINT_TEXT[agentHint] : null} />
+      {s.prefs.mode === 'chat' && <ChatInput ready={agent} hint={agentHint} onSend={onSend} />}
       <div id="audio" hidden />
     </div>
   );

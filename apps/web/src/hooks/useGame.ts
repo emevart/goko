@@ -4,11 +4,11 @@
 // Запросы идут с signal жизни компонента: после размонтирования ответ не трогает состояние и ошибку не показывает.
 // rate_limited (D-0012): до Retry-After тапы запросов не шлют, а сразу показывают ту же фразу.
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { type CallOptions, type GameState, hasEngine, humanColorOf, humanText } from '@goko/protocol';
+import { type CallOptions, type GameState, humanColorOf, humanText } from '@goko/protocol';
 import { client } from '../api.ts';
 import { type Prefs, newGameRequest } from '../prefs.ts';
 import { type StreamHandle, needsRetry, streamEvents } from '../stream.ts';
-import { describeError, retryDelayMs, sendTapMove } from '../text.ts';
+import { type SentMove, actionRefusal, describeError, retryDelayMs, sendTapMove } from '../text.ts';
 
 const MESSAGE_MS = 3000;
 
@@ -23,6 +23,10 @@ export function useGame(sessionId: string | null, onLost: () => void) {
   const stream = useRef<StreamHandle | null>(null);
   const gameRef = useRef<string | null>(null);
   const blockedUntil = useRef(0);
+  // Защита от второго тапа (m1): действие в пути и последний записанный ход тапом. Ref, а не состояние: тап в том же
+  // кадре, до перерисовки, видит уже выставленную отметку.
+  const inFlight = useRef(false);
+  const sent = useRef<SentMove | null>(null);
   // Контроллер создаётся в эффекте, а не при первом рендере: StrictMode в dev монтирует дважды,
   // и контроллер, отменённый первой уборкой, иначе отменял бы все запросы второго монтирования.
   const life = useRef<AbortController | null>(null);
@@ -98,9 +102,6 @@ export function useGame(sessionId: string | null, onLost: () => void) {
     stream.current?.reopen();
   }, [flash]);
 
-  // Ход человека — место того, чей черёд, у человека (в партии двух людей — всегда, D-0005).
-  const humanTurn = Boolean(state && state.status === 'playing' && state.seats[state.toPlay].controller === 'human' && !state.pendingEngineMove);
-
   // Общая обёртка запроса: пауза после rate_limited, signal жизни компонента, текст ошибки через describeError
   // (таймаут клиента — «сервер не отвечает», потеря сети — «нет связи с сервером», коды — humanText).
   const request = useCallback(
@@ -119,33 +120,52 @@ export function useGame(sessionId: string | null, onLost: () => void) {
     [flash],
   );
 
-  // Действие над текущей партией. Без партии или после её конца — фраза без запроса; иначе fn получает
-  // id партии и состояние уже проверенными, и действиям не нужны gameId! и state!.
-  // Между session.game новой партии и её первым state.updated gameId уже новый, а state ещё старый: в этом окне
-  // запрос ушёл бы в новую партию с ревизией старой, поэтому тоже «партии ещё нет».
+  // Действие над текущей партией. Отказ без запроса — actionRefusal (нет партии, партия окончена, не черёд, действие
+  // в пути); иначе fn получает id партии и состояние уже проверенными, и действиям не нужны gameId! и state!.
+  // Второе действие, пока первое в пути, не уходит: ход тапом со старой ревизией получил бы 409 (m1).
   const act = useCallback(
     async (fn: (id: string, g: GameState, o: CallOptions) => Promise<unknown>, needTurn: boolean) => {
-      if (!gameId || !state || state.id !== gameId) return flash('партии ещё нет');
-      if (state.status === 'finished') return flash('партия окончена');
-      if (needTurn && !humanTurn) return flash(hasEngine(state) ? 'сейчас ход Гоко' : 'сейчас не твой ход');
-      await request((o) => fn(gameId, state, o));
+      const refusal = actionRefusal(state, gameId, needTurn, inFlight.current, sent.current);
+      if (refusal !== null) return refusal ? flash(refusal) : undefined;
+      if (!gameId || !state) return; // уже проверено в actionRefusal; здесь — для сужения типов
+      inFlight.current = true;
+      try {
+        await request((o) => fn(gameId, state, o));
+      } finally {
+        inFlight.current = false;
+      }
     },
-    [gameId, state, humanTurn, flash, request],
+    [gameId, state, flash, request],
   );
 
-  // Ход и пас тапом. Таймаут клиента не значит, что ход не записан: запрос не повторяется, партия перечитывается
-  // и рисуется как есть (sendTapMove); та же ревизия — ещё и фраза «ход пока не записан». Перечитанное состояние
-  // не затирает более новое из потока и не рисуется, если текущая партия сессии уже другая.
+  // Состояние из ответа хода или перечитывания: не затирает более новое из потока и не рисуется,
+  // если текущая партия сессии уже другая.
+  const applyState = useCallback((actual: GameState) => {
+    if (gameRef.current !== actual.id) return;
+    setState((s) => (s && s.id === actual.id && s.revision > actual.revision ? s : actual));
+  }, []);
+
+  // Ход и пас тапом. Ответ записанного хода рисуется сразу, не дожидаясь события потока, а отметка sent держит следующий
+  // ход, пока на экране состояние не новее отправленной ревизии. Таймаут клиента не значит, что ход не записан: запрос
+  // не повторяется, партия перечитывается и рисуется как есть (sendTapMove); та же ревизия — ещё и фраза «ход пока не записан».
   const tapMove = useCallback(
-    (send: (id: string, revision: number, o: CallOptions) => Promise<unknown>) =>
+    (send: (id: string, revision: number, o: CallOptions) => Promise<{ state: GameState }>) =>
       act(async (id, before, o) => {
-        const reread = await sendTapMove(client, before, (opts) => send(id, before.revision, opts), o);
+        const reread = await sendTapMove(
+          client,
+          before,
+          async (opts) => {
+            const res = await send(id, before.revision, opts);
+            sent.current = { gameId: id, revision: before.revision };
+            applyState(res.state);
+          },
+          o,
+        );
         if (!reread || gameRef.current !== reread.state.id) return;
-        const actual = reread.state;
-        setState((s) => (s && s.id === actual.id && s.revision > actual.revision ? s : actual));
+        applyState(reread.state);
         if (reread.text) flash(reread.text);
       }, true),
-    [act, flash],
+    [act, applyState, flash],
   );
   const play = useCallback(
     (coord: string) => tapMove((id, revision, o) => client.play(id, { coord, via: 'tap', expectedRevision: revision, waitForReply: false }, o)),
