@@ -120,6 +120,80 @@ describe('handleEvent: подключение и новые партии', () =>
   });
 });
 
+describe('handleEvent: переподключение к той же партии (I1)', () => {
+  const pending = () => fakeGame({ moves: [mv(1, 'B', 'D4')], toPlay: 'W', pendingEngineMove: true, revision: 1 });
+  const replied = () => fakeGame({ moves: [mv(1, 'B', 'D4'), mv(2, 'W', 'K10')], toPlay: 'B', revision: 2 });
+  const waiting = (flags: { awaitingReply?: boolean; lastTap?: boolean }) => {
+    const s = newAgentState('s1');
+    s.gameId = 'g1';
+    s.awaitingReply = flags.awaitingReply ?? false;
+    s.lastTap = flags.lastTap ? { cause: 'play', coord: 'D4' } : null;
+    return s;
+  };
+
+  it('session.game той же партии не трогает ожидание хода и fallbackMove; смена партии сбрасывает', () => {
+    const s = waiting({ awaitingReply: true, lastTap: true });
+    s.fallbackMove = 4;
+    s.retriesExhausted = true;
+    expect(handleEvent({ type: 'session.game', gameId: 'g1' }, s)).toBeNull();
+    expect(s.awaitingReply).toBe(true);
+    expect(s.lastTap).toEqual({ cause: 'play', coord: 'D4' });
+    expect(s.fallbackMove).toBe(4);
+    expect(s.retriesExhausted).toBe(false); // открытие потока перезапускает серию повторов (D-0006)
+    expect(s.announceSync).toBeNull();
+    expect(handleEvent({ type: 'session.game', gameId: 'g2' }, s)).toBeNull();
+    expect(s.awaitingReply).toBe(false);
+    expect(s.lastTap).toBeNull();
+    expect(s.fallbackMove).toBeNull();
+  });
+  it('обрыв во время раздумья движка: sync с pendingEngineMove сохраняет ожидание, ход движка озвучен', () => {
+    const voice = waiting({ awaitingReply: true });
+    handleEvent({ type: 'session.game', gameId: 'g1' }, voice);
+    expect(handleEvent(upd(pending(), { cause: 'sync', by: 'system' }), voice)).toBeNull();
+    expect(voice.awaitingReply).toBe(true);
+    expect(handleEvent(upd(replied(), { cause: 'engine', by: 'engine' }), voice)).toContain('Твой ход готов: ка десять');
+
+    const tap = waiting({ lastTap: true });
+    handleEvent({ type: 'session.game', gameId: 'g1' }, tap);
+    expect(handleEvent(upd(pending(), { cause: 'sync', by: 'system' }), tap)).toBeNull();
+    expect(tap.awaitingReply).toBe(false);
+    expect(handleEvent(upd(replied(), { cause: 'engine', by: 'engine' }), tap)).toContain('сыграл дэ четыре на экране, ты ответил ка десять');
+  });
+  it('sync с pendingEngineMove без флагов ставит ожидание: ход движка озвучивается обычной фразой', () => {
+    const s = waiting({});
+    handleEvent({ type: 'session.game', gameId: 'g1' }, s);
+    expect(handleEvent(upd(pending(), { cause: 'sync', by: 'system' }), s)).toBeNull();
+    expect(s.awaitingReply).toBe(true);
+    expect(handleEvent(upd(replied(), { cause: 'engine', by: 'engine' }), s)).toContain('Твой ход готов: ка десять');
+  });
+  it('движок сходил во время обрыва: sync называет ход один раз той же фразой, что событие хода, и снимает флаги', () => {
+    for (const flags of [{ awaitingReply: true }, { lastTap: true }, { awaitingReply: true, lastTap: true }]) {
+      const viaEngine = waiting(flags);
+      const expected = handleEvent(upd(replied(), { cause: 'engine', by: 'engine' }), viaEngine);
+      expect(expected).not.toBeNull();
+      const s = waiting(flags);
+      handleEvent({ type: 'session.game', gameId: 'g1' }, s);
+      expect(handleEvent(upd(replied(), { cause: 'sync', by: 'system' }), s)).toBe(expected);
+      expect(s.awaitingReply).toBe(false);
+      expect(s.lastTap).toBeNull();
+      handleEvent({ type: 'session.game', gameId: 'g1' }, s);
+      expect(handleEvent(upd(replied(), { cause: 'sync', by: 'system' }), s)).toBeNull();
+    }
+  });
+  it('ждали ответа, а последний ход не движка (в разрыве сходил и человек): флаги сняты молча, чужой тап не приклеится', () => {
+    const s = waiting({ awaitingReply: true, lastTap: true });
+    const humanLast = fakeGame({ moves: [mv(1, 'B', 'D4'), mv(2, 'W', 'K10'), mv(3, 'B', 'C3')], toPlay: 'W', revision: 3 });
+    handleEvent({ type: 'session.game', gameId: 'g1' }, s);
+    expect(handleEvent(upd(humanLast, { cause: 'sync', by: 'system' }), s)).toBeNull();
+    expect(s.awaitingReply).toBe(false);
+    expect(s.lastTap).toBeNull();
+    const twoHumans = waiting({ awaitingReply: true });
+    const g = fakeGame({ seats: { B: { controller: 'human' }, W: { controller: 'human' } }, moves: [mv(1, 'B', 'D4'), mv(2, 'W', 'K10')], revision: 2 });
+    expect(handleEvent(upd(g, { cause: 'sync', by: 'system' }), twoHumans)).toBeNull();
+    expect(twoHumans.awaitingReply).toBe(false);
+  });
+});
+
 describe('handleEvent: ходы', () => {
   it('тап с ответом движка: молчим на тап, говорим на ответ с обоими ходами', () => {
     const s = newAgentState('s1');
@@ -578,6 +652,73 @@ describe('watchSession', () => {
     ]);
     expect(slept).toEqual([1_000]);
     expect(s.retriesExhausted).toBe(false);
+  });
+  it('обрыв во время раздумья движка: после переподключения ход движка озвучен (I1)', async () => {
+    const s = newAgentState('s1');
+    s.gameId = 'g1';
+    s.awaitingReply = true; // play голосом вернул replyTimedOut
+    const abort = new AbortController();
+    const spoken: string[] = [];
+    let connects = 0;
+    const pendingGame = fakeGame({ moves: [mv(1, 'B', 'D4')], toPlay: 'W', pendingEngineMove: true, revision: 1 });
+    const client = {
+      async *events(): AsyncGenerator<GameEvent, void, undefined> {
+        connects++;
+        yield { type: 'session.game', gameId: 'g1' };
+        yield upd(pendingGame, { cause: 'sync', by: 'system' });
+        if (connects === 1) throw new Error('socket hang up');
+        yield upd(fakeGame({ moves: [mv(1, 'B', 'D4'), mv(2, 'W', 'K10')], revision: 2 }), { cause: 'engine', by: 'engine' });
+        abort.abort();
+      },
+    };
+    await watchSession({ client, state: s, signal: abort.signal, speak: (t) => void spoken.push(t), now: () => 0, sleep: async () => {} }).done;
+    expect(connects).toBe(2);
+    expect(spoken).toEqual(['Твой ход готов: ка десять. Назови его одной фразой.']);
+  });
+  it('retries_exhausted, реплика человека, переоткрытие: ход движка, ради которого открывали поток, озвучен (D-0006, I1)', async () => {
+    const s = newAgentState('s1');
+    s.gameId = 'g1';
+    s.awaitingReply = true;
+    const abort = new AbortController();
+    const spoken: string[] = [];
+    let connects = 0;
+    const pendingGame = fakeGame({ moves: [mv(1, 'B', 'D4')], toPlay: 'W', pendingEngineMove: true, revision: 1 });
+    const client = {
+      async *events(_target: EventsTarget, signal?: AbortSignal): AsyncGenerator<GameEvent, void, undefined> {
+        connects++;
+        yield { type: 'session.game', gameId: 'g1' };
+        yield upd(pendingGame, { cause: 'sync', by: 'system' });
+        if (connects === 1) {
+          yield { type: 'error', gameId: 'g1', code: 'retries_exhausted', message: 'background task retries are exhausted' };
+          await new Promise<void>((resolve) => signal?.addEventListener('abort', () => resolve(), { once: true }));
+          throw new DOMException('This operation was aborted', 'AbortError');
+        }
+        yield upd(fakeGame({ moves: [mv(1, 'B', 'D4'), mv(2, 'W', 'K10')], revision: 2 }), { cause: 'engine', by: 'engine' });
+        abort.abort();
+      },
+    };
+    let announced: () => void = () => {};
+    const exhaustedSpoken = new Promise<void>((resolve) => {
+      announced = resolve;
+    });
+    const watch = watchSession({
+      client,
+      state: s,
+      signal: abort.signal,
+      speak: (t) => {
+        spoken.push(t);
+        announced();
+      },
+      now: () => 0,
+      sleep: async () => {},
+    });
+    await exhaustedSpoken;
+    watch.humanSpoke();
+    await watch.done;
+    expect(connects).toBe(2);
+    expect(spoken).toHaveLength(2);
+    expect(spoken[0]).toContain(humanText('retries_exhausted'));
+    expect(spoken[1]).toBe('Твой ход готов: ка десять. Назови его одной фразой.');
   });
   it('реплика человека во время паузы переподключения ничего не делает', async () => {
     const s = newAgentState('s1');

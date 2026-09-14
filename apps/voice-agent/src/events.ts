@@ -7,6 +7,7 @@ import {
   type GameEvent,
   type GameState,
   type GokoClient,
+  type Move,
   RETRY_MS,
   STABLE_CONNECTION_MS,
   hasEngine,
@@ -45,6 +46,21 @@ function describeMove(coord: string): string {
   return coord === 'pass' ? 'спасовал' : `сыграл ${speakMove(coord)}`;
 }
 
+// Ход движка, которого ждали: после тапа — оба хода, после таймаута инструмента — «Твой ход готов». Флаги снимаются.
+// Не ждали (ответ на голосовой ход уже вернул инструмент) — null. Общая фраза для события engine и для sync,
+// в разрыве перед которым движок сходил.
+function engineReplyText(state: AgentState, last: Move): string | null {
+  const tap = state.lastTap;
+  const awaiting = state.awaitingReply;
+  resetTurnFlags(state);
+  if (tap) {
+    const reply = last.coord === 'pass' ? 'ответил пасом' : `ответил ${speakMove(last.coord)}`;
+    return `Человек ${describeMove(tap.coord)} на экране, ты ${reply}. Назови свой ход одной фразой.`;
+  }
+  if (awaiting) return `Твой ход готов: ${speakMove(last.coord)}. Назови его одной фразой.`;
+  return null;
+}
+
 function onStateUpdated(ev: Extract<GameEvent, { type: 'state.updated' }>, state: AgentState): string | null {
   const g = ev.state;
   // Живой поток сессии начинается с session.game, и gameId к sync уже тот же: смену партии помнит announceSync.
@@ -68,9 +84,22 @@ function onStateUpdated(ev: Extract<GameEvent, { type: 'state.updated' }>, state
 
   switch (ev.cause) {
     case 'sync':
-      if (!fresh) return null;
+      if (fresh) {
+        resetTurnFlags(state);
+        return `Продолжаем партию: ${seatsText(g)}, сделано ходов: ${g.moves.length}, ${whoseTurn(g)}. ${ONE_PHRASE} Ход не называй, пока его не вернул инструмент.`;
+      }
+      // Переподключение к знакомой партии: сверяем ожидание хода движка с присланной позицией (I1).
+      // Движок ещё думает — ответ впереди: ждём его, даже если флага не было (ход с экрана в разрыве).
+      if (g.pendingEngineMove) {
+        if (!state.lastTap) state.awaitingReply = true;
+        return null;
+      }
+      // Ждали ответа, и последний ход — движка: он случился в разрыве, называем его той же фразой. Иначе ответа
+      // ждать нечего (в разрыве сходил человек, партия двух людей): флаги снимаем, чтобы старый тап не
+      // приклеился к следующему ходу движка.
+      if (last && (state.lastTap || state.awaitingReply) && last.color === seatColor(g.seats, 'engine')) return engineReplyText(state, last);
       resetTurnFlags(state);
-      return `Продолжаем партию: ${seatsText(g)}, сделано ходов: ${g.moves.length}, ${whoseTurn(g)}. ${ONE_PHRASE} Ход не называй, пока его не вернул инструмент.`;
+      return null;
     case 'new': {
       resetTurnFlags(state);
       // У сервера new всегда by 'system' без via: отличить кнопку на экране от start_game можно только
@@ -106,18 +135,7 @@ function onStateUpdated(ev: Extract<GameEvent, { type: 'state.updated' }>, state
       // Ход с тем же или меньшим номером без признака значит, что прежний ход сняли или заменили.
       if (ev.humanFallback) state.fallbackMove = last.n;
       else if (state.fallbackMove !== null && last.n <= state.fallbackMove) state.fallbackMove = null;
-      const reply = last.coord === 'pass' ? 'ответил пасом' : `ответил ${speakMove(last.coord)}`;
-      if (state.lastTap) {
-        const tap = state.lastTap;
-        state.lastTap = null;
-        state.awaitingReply = false;
-        return `Человек ${describeMove(tap.coord)} на экране, ты ${reply}. Назови свой ход одной фразой.`;
-      }
-      if (state.awaitingReply) {
-        state.awaitingReply = false;
-        return `Твой ход готов: ${speakMove(last.coord)}. Назови его одной фразой.`;
-      }
-      return null;
+      return engineReplyText(state, last);
     }
     case 'rank':
     case 'resign':
@@ -130,13 +148,16 @@ function onStateUpdated(ev: Extract<GameEvent, { type: 'state.updated' }>, state
 export function handleEvent(ev: GameEvent, state: AgentState, now: () => number = Date.now): string | null {
   switch (ev.type) {
     case 'session.game':
-      // Партия сменилась (подключение агента к идущей партии, новая партия): следующий sync о ней — «Продолжаем».
-      // Переподключение к уже знакомой партии флаг не ставит, и sync молчит.
-      if (ev.gameId !== state.gameId) state.announceSync = ev.gameId;
+      // Партия сменилась (подключение агента к идущей партии, новая партия): следующий sync о ней — «Продолжаем»,
+      // флаги прежней партии сброшены. Переподключение к уже знакомой партии флаги не трогает: ожидание хода
+      // движка и fallbackMove переживают обрыв и переоткрытие после retries_exhausted, sync сверит их с позицией.
+      if (ev.gameId !== state.gameId) {
+        state.announceSync = ev.gameId;
+        resetTurnFlags(state);
+        state.fallbackMove = null;
+      }
       state.gameId = ev.gameId;
-      resetTurnFlags(state);
-      state.retriesExhausted = false;
-      state.fallbackMove = null;
+      state.retriesExhausted = false; // открытие потока перезапускает серию повторов (D-0006)
       return null;
     case 'state.updated':
       return onStateUpdated(ev, state);
