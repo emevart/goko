@@ -21,6 +21,8 @@ describe('ConversationEvent', () => {
 
   it('ограничивает размер JSON до безопасного размера text stream', () => {
     expect(JSON.parse(encodeConversationEvent(event))).toEqual(event);
+    expect(new TextEncoder().encode(encodeConversationEvent({ ...event, text: 'я' })).byteLength)
+      .toBeGreaterThan(encodeConversationEvent({ ...event, text: 'a' }).length);
     expect(() => encodeConversationEvent({ ...event, text: 'я'.repeat(20_000) })).toThrow(/слишком велико/);
   });
 });

@@ -19,7 +19,7 @@ export type ConversationEvent = z.infer<typeof ConversationEvent>;
 
 export function encodeConversationEvent(value: unknown): string {
   const json = JSON.stringify(ConversationEvent.parse(value));
-  if (Buffer.byteLength(json, 'utf8') > CONVERSATION_EVENT_MAX_BYTES) {
+  if (new TextEncoder().encode(json).byteLength > CONVERSATION_EVENT_MAX_BYTES) {
     throw new Error(`событие разговора слишком велико: максимум ${CONVERSATION_EVENT_MAX_BYTES} байт`);
   }
   return json;
