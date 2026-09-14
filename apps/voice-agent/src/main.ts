@@ -10,6 +10,7 @@ import { createClient } from '@goko/protocol';
 import { GokoAgent } from './agent.ts';
 import { CONFIG_EXIT_CODE, readConfig } from './config.ts';
 import { watchDeparture } from './departure.ts';
+import { createEventSpeaker } from './event-speech.ts';
 import { type WatchHandle, watchSession } from './events.ts';
 import { LOAD_THRESHOLD, jobLoad } from './load.ts';
 import { sessionIdOf } from './metadata.ts';
@@ -150,8 +151,9 @@ async function runSession(ctx: JobContext, sessionId: string): Promise<void> {
     signal: abort.signal,
     log,
     // Реплики событий по очереди: следующее событие ждёт, пока прозвучит (или прервётся) предыдущая.
+    // Текст события — в историю разговора, ответ — без инструментов (event-speech.ts, D-0013).
     // Остановку сеанса say в events.ts не ждёт: ожидание ограничено сигналом.
-    speak: (instructions) => session.generateReply({ instructions }).waitForPlayout(),
+    speak: createEventSpeaker({ agent, session, log }),
   });
   void watch.done;
 }
