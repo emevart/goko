@@ -13,23 +13,26 @@ export function parseVoiceMode(v: string | undefined): VoiceMode {
   throw new Error(`VOICE_MODE: expected realtime or pipeline, got "${v}"`); // для разработчика — по-английски, как ошибки ядра
 }
 
-// Параметры VAD — из docs/research/stage0-results.md (стадия 0 подбирала перебивание).
+// semantic_vad определяет завершение фразы; far_field рассчитан на телефон рядом с физической доской.
 export const REALTIME_TURN_DETECTION = {
-  type: 'server_vad',
-  threshold: 0.5,
-  prefix_padding_ms: 300,
-  silence_duration_ms: 500,
+  type: 'semantic_vad',
+  eagerness: 'medium',
+  create_response: true,
+  interrupt_response: true,
 } as const;
+
+export const REALTIME_MODEL_OPTIONS = {
+  model: 'gpt-realtime',
+  voice: 'cedar',
+  inputAudioNoiseReduction: { type: 'far_field' },
+  turnDetection: REALTIME_TURN_DETECTION,
+  inputAudioTranscription: { model: 'gpt-live-transcribe', language: 'ru' },
+} as const satisfies ConstructorParameters<typeof openai.realtime.RealtimeModel>[0];
 
 export async function sessionOptions(mode: VoiceMode): Promise<SessionOptions> {
   if (mode === 'realtime') {
     return {
-      llm: new openai.realtime.RealtimeModel({
-        model: 'gpt-realtime',
-        voice: 'marin',
-        turnDetection: REALTIME_TURN_DETECTION,
-        inputAudioTranscription: { model: 'gpt-live-transcribe', language: 'ru' },
-      }),
+      llm: new openai.realtime.RealtimeModel(REALTIME_MODEL_OPTIONS),
     };
   }
   return {

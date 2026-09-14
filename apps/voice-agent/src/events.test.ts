@@ -427,6 +427,31 @@ describe('handleEvent: ходы', () => {
     const twoHumans = fakeGame({ seats: { B: { controller: 'human' }, W: { controller: 'human' } }, toPlay: 'W', moves: [mv(1, 'B', 'D4')] });
     expect(handleEvent(upd(twoHumans, { cause: 'undo', by: 'human', via: 'tap' }), s)).toContain('Скажи вслух только: «Ход отменён, ходят белые».');
   });
+  it('redo с экрана озвучивается один раз без ожиданий старой ветки', () => {
+    const s = newAgentState('s1');
+    s.gameId = 'g1';
+    s.awaitingReply = true;
+    s.awaitingFinish = 'g1';
+    s.lastTap = { cause: 'play', coord: 'D4' };
+    const restored = fakeGame({ moves: [mv(1, 'B', 'D4'), mv(2, 'W', 'K10')], toPlay: 'B', revision: 4 });
+    expect(handleEvent(upd(restored, { cause: 'redo', by: 'human', via: 'tap' }), s)).toBe(
+      'Человек вернул отменённые ходы кнопкой на экране, они уже на доске, сейчас ход человека. Скажи вслух только: «Ходы возвращены, твой ход».',
+    );
+    expect(s.awaitingReply).toBe(false);
+    expect(s.awaitingFinish).toBeNull();
+    expect(s.lastTap).toBeNull();
+    expect(handleEvent(upd(restored, { cause: 'redo', by: 'human', via: 'voice' }), s)).toBeNull();
+  });
+  it('redo с экрана, восстановивший финал, не подавляет сохранённый итог старым awaitingFinish', () => {
+    const s = newAgentState('s1');
+    s.gameId = 'g1';
+    s.awaitingFinish = 'g1';
+    const result = { winner: 'W' as const, margin: 3.5, reason: 'score' as const };
+    const restored = fakeGame({ status: 'finished', result, revision: 5 });
+    expect(handleEvent(upd(restored, { cause: 'redo', by: 'human', via: 'tap' }), s)).toBeNull();
+    expect(s.awaitingFinish).toBeNull();
+    expect(handleEvent({ type: 'game.finished', result }, s)).toContain('Партия окончена');
+  });
   it('ход внешнего соперника (стадия 2)', () => {
     const s = newAgentState('s1');
     s.gameId = 'g1';

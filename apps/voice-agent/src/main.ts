@@ -9,6 +9,7 @@ import { type Participant, type RemoteParticipant, RoomEvent } from '@livekit/rt
 import { createClient } from '@goko/protocol';
 import { GokoAgent } from './agent.ts';
 import { CONFIG_EXIT_CODE, readConfig } from './config.ts';
+import { attachConversationEvents } from './conversation-events.ts';
 import { watchDeparture } from './departure.ts';
 import { createEventSpeaker } from './event-speech.ts';
 import { type WatchHandle, watchSession } from './events.ts';
@@ -90,6 +91,17 @@ async function runSession(ctx: JobContext, sessionId: string): Promise<void> {
   const agent = new GokoAgent(createTools({ client, state, log, signal: abort.signal }), { greet: false });
   const session = new voice.AgentSession(await sessionOptions(voiceMode));
   let watch: WatchHandle | null = null;
+  const localParticipant = ctx.room.localParticipant;
+  if (!localParticipant) throw new Error('local participant unavailable after connect');
+  const stopConversationEvents = attachConversationEvents({
+    subscribe: (listener) => {
+      session.on(Events.ConversationItemAdded, listener);
+      return () => void session.off(Events.ConversationItemAdded, listener);
+    },
+    sendText: (text, options) => localParticipant.sendText(text, options),
+    destinationIdentity: identity,
+    log,
+  });
 
   // Лента для логов: что услышали и что сказали. Значений env здесь нет.
   // Реплика человека после retries_exhausted переоткрывает поток сессии (D-0006): голосом — финальный
@@ -114,12 +126,14 @@ async function runSession(ctx: JobContext, sessionId: string): Promise<void> {
   session.on(Events.Close, (ev) => {
     abort.abort();
     departure.stop();
+    stopConversationEvents();
     log(`[!] voice-agent: сеанс закрыт (${ev.reason}), job завершается`);
     ctx.shutdown(`session closed: ${ev.reason}`);
   });
   ctx.addShutdownCallback(async () => {
     abort.abort();
     departure.stop();
+    stopConversationEvents();
   });
 
   const attributesChanged = (listener: (p: ParticipantLike) => void) => {

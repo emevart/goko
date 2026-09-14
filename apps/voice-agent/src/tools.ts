@@ -23,7 +23,7 @@ import { type AgentState, forgetFinishIfReopened, noteFinishRevision } from './s
 
 export type ToolClient = Pick<
   GokoClient,
-  'newGame' | 'play' | 'correct' | 'pass' | 'resign' | 'undo' | 'getGame' | 'ascii' | 'analyze' | 'setRank'
+  'newGame' | 'play' | 'correct' | 'pass' | 'resign' | 'undo' | 'redo' | 'getGame' | 'ascii' | 'analyze' | 'setRank'
 >;
 
 export type ToolDeps = {
@@ -61,6 +61,7 @@ const LOOK_NEXT = 'посмотри позицию и скажи человек�
 const noRepeatTail = (coord: string, next: string): string => `Не повторяй ${coord === 'pass' ? 'пас' : 'ход'} сам: ${next}`;
 // Отмена после таймаута или обрыва не перечитывается: могла пройти, модель смотрит позицию.
 const UNDO_UNKNOWN_TEXT = 'отмена могла пройти. Не повторяй отмену сам: посмотри позицию и скажи человеку';
+const REDO_UNKNOWN_TEXT = 'возврат мог пройти. Не повторяй возврат сам: посмотри позицию и скажи человеку';
 
 // Коми по протоколу — x.5 от 0,5 до 13,5 (иначе сервер ответит bad_request без понятной человеку причины).
 const komiValid = (komi: number): boolean => Number.isFinite(komi) && komi >= 0.5 && komi <= 13.5 && komi % 1 === 0.5;
@@ -418,6 +419,36 @@ export function createToolFns(deps: ToolDeps) {
       }
     },
 
+    async redo() {
+      const gameId = gameGuard();
+      if (typeof gameId !== 'string') return gameId;
+      try {
+        const res = await client.redo(gameId, { via: 'voice' }, opts);
+        const g = note(res.state);
+        state.awaitingReply = false;
+        state.awaitingFinish = null;
+        state.lastTap = null;
+        if (g.status === 'finished' && g.result) {
+          state.announcedFinish = g.id;
+          state.finished = { gameId: g.id, result: g.result };
+          noteFinishRevision(state, g.id, g.revision);
+        } else {
+          forgetFinishIfReopened(state, g.id, g.revision);
+        }
+        return {
+          ok: true as const,
+          restored: res.restored.map((m) => m.coord),
+          restoredSpoken: res.restored.map((m) => speakMove(m.coord)),
+          toPlay: g.toPlay,
+          status: g.status,
+          ...finishedFields(g),
+        };
+      } catch (e) {
+        const failed = reasonOf(e);
+        return maybeDone(e) ? fail(`${failed.reason}: ${REDO_UNKNOWN_TEXT}`) : failed;
+      }
+    },
+
     async getPosition(): Promise<string> {
       const gameId = gameGuard();
       if (typeof gameId !== 'string') return gameId.reason;
@@ -437,6 +468,7 @@ export function createToolFns(deps: ToolDeps) {
       // humanFallback приходит только событием state.updated хода движка (events.ts запоминает номер хода).
       const fallback = state.fallbackMove === null ? undefined : g.moves.find((m) => m.n === state.fallbackMove);
       return [
+        `Ориентация: доска ${g.settings.boardSize} на ${g.settings.boardSize}; строки идут сверху от ${g.settings.boardSize} вниз до 1, столбцы слева направо A–N без I.`,
         ascii.trimEnd(),
         `Последние ходы: ${last || 'нет'}`,
         `Пленные: чёрные сняли ${g.captures.B}, белые сняли ${g.captures.W}`,
@@ -461,20 +493,29 @@ export function createToolFns(deps: ToolDeps) {
         const statusText = (s: string) => (s === 'dead' ? 'мертва' : 'неустойчива');
         // Координаты и рядом их произношение: модель читает вслух *Spoken, а не латиницу.
         const place = (stones: string[]) => {
-          const shown = stones.slice(0, 3);
-          return { where: shown.join(', '), whereSpoken: shown.map(speakMove).join(', ') };
+          const stonesSpoken = stones.map(speakMove);
+          return { where: stones.join(', '), whereSpoken: stonesSpoken.join(', '), stones, stonesSpoken };
         };
-        const bestMoves = a.topMoves.slice(0, 3).map((m) => m.coord);
+        const top = a.topMoves.slice(0, 3);
+        const bestMoves = top.map((m) => m.coord);
         const bestMovesSpoken = bestMoves.map(speakMove);
+        const bestCandidates = top.map((m) => ({
+          coord: m.coord,
+          coordSpoken: speakMove(m.coord),
+          winrateBlack: Math.round(m.winrateB * 100),
+          scoreLeadBlack: m.scoreLeadB,
+          visits: m.visits,
+        }));
         if (!hasEngine(g)) {
           // Партия двух людей (D-0005): «ты» и «я» здесь не значат ничего, говорим цветами.
           return {
             leader: leaderColor === null ? ('even' as const) : colorKey(leaderColor),
             marginPoints,
             winrateBlack: Math.round(a.winrateB * 100),
-            weakGroups: weak.map((gr) => ({ color: colorKey(gr.color), ...place(gr.stones), status: statusText(gr.status) })),
+            weakGroups: weak.map((gr) => ({ color: colorKey(gr.color), ...place(gr.stones), liberties: gr.liberties, status: statusText(gr.status) })),
             bestMoves,
             bestMovesSpoken,
+            bestCandidates,
             toPlay: colorKey(g.toPlay),
           };
         }
@@ -487,10 +528,12 @@ export function createToolFns(deps: ToolDeps) {
           weakGroups: weak.map((gr) => ({
             color: gr.color === human ? ('yours' as const) : ('mine' as const),
             ...place(gr.stones),
+            liberties: gr.liberties,
             status: statusText(gr.status),
           })),
           bestMoves,
           bestMovesSpoken,
+          bestCandidates,
           toPlay: g.toPlay === human ? ('you' as const) : ('me' as const),
         };
       } catch (e) {
@@ -561,12 +604,16 @@ export function createTools(deps: ToolDeps) {
       description: 'Отменить последний ход человека и ответ Гоко («отмени», «верни ход»).',
       execute: () => fns.undo(),
     }),
+    redo: llm.tool({
+      description: 'Вернуть ровно последнюю отменённую порцию ходов («верни отменённое», «вперёд»). Если восстановлен итог, объявить result; иначе сказать, чей ход.',
+      execute: () => fns.redo(),
+    }),
     get_position: llm.tool({
-      description: 'Текущая позиция: доска, последние ходы, пленные, чей ход. Зови, когда спрашивают о доске или ты не уверен, что было.',
+      description: 'Текущая позиция: размер и ориентация ASCII-доски, последние ходы, пленные, чей ход. Зови, когда спрашивают о доске или ты не уверен, что было.',
       execute: () => fns.getPosition(),
     }),
     get_assessment: llm.tool({
-      description: 'Оценка позиции: кто впереди и на сколько, шансы человека в процентах, слабые группы, bestMoves. bestMoves называй только по прямой просьбе подсказать ход.',
+      description: 'Оценка позиции: кто впереди и на сколько, слабые группы со всеми камнями и свободами, кандидаты с оценками. Кандидаты и оценки называй только по прямой просьбе подсказать ход.',
       execute: () => fns.getAssessment(),
     }),
     set_rank: llm.tool({

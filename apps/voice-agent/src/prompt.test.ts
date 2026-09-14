@@ -29,4 +29,22 @@ describe('промпт Гоко', () => {
     expect(GREETING_INSTRUCTIONS).toContain('Не говори, чей ход');
     expect(GREETING_INSTRUCTIONS).toContain('предложи сыграть партию');
   });
+  it('разговор тёплый и содержательный без глобального лимита двух предложений', () => {
+    expect(INSTRUCTIONS).toContain('тёпло и заинтересованно');
+    expect(INSTRUCTIONS).toContain('2–5 предложений');
+    expect(INSTRUCTIONS).not.toMatch(/до двух предложений|максимум (?:два|2) предложения/i);
+    expect(INSTRUCTIONS).toContain('без обязательного минимума или максимума');
+    expect(INSTRUCTIONS).toContain('Не вставляй смех');
+  });
+  it('объяснение позиции требует факты инструментов, а не winrate или память', () => {
+    expect(INSTRUCTIONS).toContain('get_position и get_assessment');
+    expect(INSTRUCTIONS).toContain('конкретные связи групп, цель хода и ближайшее последствие');
+    expect(INSTRUCTIONS).toContain('Число winrate не является причиной');
+    expect(INSTRUCTIONS).toContain('Центр доски 13 на 13 — G7');
+    expect(INSTRUCTIONS).toContain('E11 находится у верхней стороны');
+  });
+  it('backchannel не получает навязчивое «твой ход», а redo использует инструмент', () => {
+    expect(INSTRUCTIONS).toContain('Не повторяй «твой ход» на каждый короткий отклик');
+    expect(INSTRUCTIONS).toContain('«верни отменённое», «вперёд» — redo');
+  });
 });

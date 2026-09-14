@@ -93,10 +93,14 @@ function onStateUpdated(ev: Extract<GameEvent, { type: 'state.updated' }>, state
   // Последний ход новее показанного: сделан в разрыве потока. Не знаем, что показывали, — считаем новым.
   const madeInGap = seen === null || (last?.n ?? 0) > seen;
 
+  // Redo начинает новую завершённую операцию, поэтому ожидание результата старых двух пасов больше не
+  // должно подавлять game.finished восстановленной ветки, даже когда state.updated уже finished.
+  if (ev.cause === 'redo') state.awaitingFinish = null;
+
   // Партия снова идёт: отмена (кнопкой на экране или инструментом — via не важен) или снимок нового подключения
   // (отмена могла случиться в разрыве). Итог, известный на ревизии не новее, устарел (state.ts). Только undo и
   // sync: запоздавшее событие хода после resign инструментом тоже приходит с идущей партией.
-  if (g.status === 'playing' && (ev.cause === 'undo' || ev.cause === 'sync')) forgetFinishIfReopened(state, g.id, g.revision);
+  if (g.status === 'playing' && (ev.cause === 'undo' || ev.cause === 'redo' || ev.cause === 'sync')) forgetFinishIfReopened(state, g.id, g.revision);
 
   if (g.status === 'finished') {
     noteFinishRevision(state, g.id, g.revision); // следом придёт game.finished: ревизия его итога
@@ -160,6 +164,10 @@ function onStateUpdated(ev: Extract<GameEvent, { type: 'state.updated' }>, state
       if (ev.via !== 'tap') return null;
       // Ход Гоко после отмены назовёт событие хода движка: вслух — только «Ход отменён».
       return `Человек отменил последний ход кнопкой на экране, отмена уже на доске, ${whoseTurn(g)}. ${sayOnly(hasEngine(g) && g.toPlay !== humanColorOf(g) ? 'Ход отменён' : `Ход отменён, ${turnSpoken(g)}`)}`;
+    case 'redo':
+      resetTurnFlags(state);
+      if (ev.via !== 'tap') return null;
+      return `Человек вернул отменённые ходы кнопкой на экране, они уже на доске, ${whoseTurn(g)}. ${sayOnly(hasEngine(g) && g.toPlay !== humanColorOf(g) ? 'Ходы возвращены' : `Ходы возвращены, ${turnSpoken(g)}`)}`;
     case 'engine': {
       if (!last) return null;
       // humanFallback есть только здесь (D-0007): get_position скажет о таком ходе, пока он на доске.

@@ -13,6 +13,8 @@ import {
   type PlayRequest,
   type PlayResponse,
   type ResignRequest,
+  type RedoRequest,
+  type RedoResponse,
   type SetRankRequest,
   type StateResponse,
   type UndoRequest,
@@ -69,6 +71,7 @@ export function createFakeClient(opts: FakeClientOptions = {}): FakeClient {
   const failures = new Map<keyof ToolClient, Error>();
   let pollsLeft = -1;
   let n = 0;
+  const redoStack: Array<{ state: GameState; restored: Move[] }> = [];
 
   const self: FakeClient = {
     calls: [],
@@ -85,6 +88,7 @@ export function createFakeClient(opts: FakeClientOptions = {}): FakeClient {
     async newGame(sessionId: string, req: NewGameRequest, o?: CallOptions): Promise<NewGameResponse> {
       record('newGame', o, sessionId, req);
       throwPendingAny();
+      redoStack.length = 0;
       const komi = req.settings?.komi ?? 7.5;
       self.game = fakeGame({
         id: `g${++n}`,
@@ -117,6 +121,7 @@ export function createFakeClient(opts: FakeClientOptions = {}): FakeClient {
     async resign(id: string, req: ResignRequest, o?: CallOptions): Promise<StateResponse> {
       record('resign', o, id, req);
       throwPendingAny();
+      redoStack.length = 0;
       const g = need();
       g.status = 'finished';
       g.result = { winner: req.color === 'B' ? 'W' : 'B', reason: 'resign' };
@@ -129,13 +134,24 @@ export function createFakeClient(opts: FakeClientOptions = {}): FakeClient {
       const g = need();
       if (g.moves.length === 0) throw new ApiError('nothing_to_undo', 'nothing to undo');
       const removed = g.moves.slice(-2);
+      redoStack.push({ state: structuredClone(g), restored: structuredClone(removed) });
       g.moves = g.moves.slice(0, -2);
       g.toPlay = seatColor(g.seats, 'human') ?? 'B';
       // Как у сервера после счёта: партия снова идёт, итога нет.
       g.status = 'playing';
       delete g.result;
       g.revision++;
+      g.canRedo = true;
       return { state: g, removed };
+    },
+    async redo(id: string, req: RedoRequest = {}, o?: CallOptions): Promise<RedoResponse> {
+      record('redo', o, id, req);
+      throwPendingAny();
+      const current = need();
+      const entry = redoStack.pop();
+      if (!entry) throw new ApiError('nothing_to_redo', 'nothing to redo');
+      self.game = { ...structuredClone(entry.state), revision: current.revision + 1, canRedo: redoStack.length > 0 };
+      return { state: self.game, restored: structuredClone(entry.restored) };
     },
     async getGame(id: string, o?: CallOptions): Promise<GameState> {
       record('getGame', o, id);
@@ -250,6 +266,7 @@ export function createFakeClient(opts: FakeClientOptions = {}): FakeClient {
   }
   function applyHumanMove(coord: string): PlayResponse {
     const g = need();
+    redoStack.length = 0;
     if (g.status === 'finished') throw new ApiError('game_finished', 'game is finished');
     const human = g.toPlay;
     if (g.seats[human].controller !== 'human') throw new ApiError('not_your_turn', 'it is Goko to play');

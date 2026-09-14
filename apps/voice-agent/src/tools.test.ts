@@ -55,6 +55,7 @@ describe('без партии', () => {
     const { fns, client } = setup();
     expect(await fns.playMove({ coord: 'D4' })).toEqual({ ok: false, reason: 'партия не начата: предложи начать' });
     expect(await fns.pass()).toMatchObject({ ok: false });
+    expect(await fns.redo()).toMatchObject({ ok: false });
     expect(await fns.getPosition()).toContain('партия не начата');
     expect(client.calls).toEqual([]);
   });
@@ -624,6 +625,49 @@ describe('pass / resign / undo', () => {
     const { fns } = await withGame();
     expect(await fns.undo()).toEqual({ ok: false, reason: humanText('nothing_to_undo') });
   });
+  it('redo восстанавливает ходы, сбрасывает stale-флаги и возвращает итог', async () => {
+    const { fns, state } = await withGame({ replies: ['K10'] });
+    await fns.playMove({ coord: 'D4' });
+    await fns.undo();
+    state.awaitingReply = true;
+    state.awaitingFinish = 'g1';
+    state.lastTap = { cause: 'play', coord: 'C3' };
+    const res = await fns.redo();
+    expect(res).toEqual({
+      ok: true,
+      restored: ['D4', 'K10'],
+      restoredSpoken: ['дэ четыре', 'ка десять'],
+      toPlay: 'B',
+      status: 'playing',
+    });
+    expect(state.awaitingReply).toBe(false);
+    expect(state.awaitingFinish).toBeNull();
+    expect(state.lastTap).toBeNull();
+  });
+  it('redo восстановленного финала произносит сохранённый итог', async () => {
+    const { fns, state, client } = await withGame({ replies: ['pass'], finishAfterPolls: 1 });
+    expect(await fns.pass()).toMatchObject({ finished: true });
+    await fns.undo();
+    const res = await fns.redo();
+    expect(res).toMatchObject({ ok: true, finished: true, result: 'победа за мной, разница 3,5 очка' });
+    expect(state.announcedFinish).toBe('g1');
+    expect(state.finishRevision).toEqual({ gameId: 'g1', revision: gameOf(client).revision });
+  });
+  it.each([
+    ['таймаут', () => new ClientTimeoutError('redo', 5_000), humanText('client_timeout')],
+    ['fetch failed', () => new TypeError('fetch failed'), NETWORK_TEXT],
+  ])('redo: %s — операция могла пройти, без перечитывания и повтора', async (_name, err, prefix) => {
+    const { fns, client } = await withGame({ replies: ['K10'] });
+    await fns.playMove({ coord: 'D4' });
+    await fns.undo();
+    client.calls.length = 0;
+    client.failNext(err());
+    expect(await fns.redo()).toEqual({
+      ok: false,
+      reason: `${prefix}: возврат мог пройти. Не повторяй возврат сам: посмотри позицию и скажи человеку`,
+    });
+    expect(client.calls.map((c) => c.method)).toEqual(['redo']);
+  });
   it.each([
     ['таймаут', () => new ClientTimeoutError('undo', 15_000), humanText('client_timeout')],
     ['fetch failed', () => new TypeError('fetch failed'), NETWORK_TEXT],
@@ -812,14 +856,26 @@ describe('get_position / get_assessment / set_rank', () => {
       marginPoints: 6,
       winrateYou: 70,
       weakGroups: [
-        { color: 'mine', where: 'C3, C4', whereSpoken: 'цэ три, цэ четыре', status: 'неустойчива' },
-        { color: 'yours', where: 'M3', whereSpoken: 'эм три', status: 'мертва' },
+        { color: 'mine', where: 'C3, C4', whereSpoken: 'цэ три, цэ четыре', stones: ['C3', 'C4'], stonesSpoken: ['цэ три', 'цэ четыре'], liberties: 2, status: 'неустойчива' },
+        { color: 'yours', where: 'M3', whereSpoken: 'эм три', stones: ['M3'], stonesSpoken: ['эм три'], liberties: 1, status: 'мертва' },
       ],
       bestMoves: ['K10', 'D10', 'G7'],
       bestMovesSpoken: ['ка десять', 'дэ десять', 'гэ семь'],
+      bestCandidates: [
+        { coord: 'K10', coordSpoken: 'ка десять', winrateBlack: 71, scoreLeadBlack: 6.5, visits: 20 },
+        { coord: 'D10', coordSpoken: 'дэ десять', winrateBlack: 69, scoreLeadBlack: 6, visits: 15 },
+        { coord: 'G7', coordSpoken: 'гэ семь', winrateBlack: 68, scoreLeadBlack: 5.8, visits: 10 },
+      ],
       toPlay: 'you',
     });
     expect(client.calls.find((c) => c.method === 'analyze')).toMatchObject({ args: ['g1', { maxVisits: ASSESSMENT_VISITS }] });
+  });
+  it('оценка не обрезает список камней слабой группы', async () => {
+    const stones = ['A1', 'A2', 'A3', 'A4', 'A5'];
+    const { fns } = await withGame({ analysis: { groups: [{ color: 'W', stones, liberties: 3, ownershipAvg: 0, status: 'unsettled' }] } });
+    expect(await fns.getAssessment()).toMatchObject({
+      weakGroups: [{ stones, stonesSpoken: ['а один', 'а два', 'а три', 'а четыре', 'а пять'], liberties: 3 }],
+    });
   });
   it('оценка при отставании', async () => {
     const { fns } = await withGame({ analysis: { winrateB: 0.3, scoreLeadB: -0.2 } });
@@ -855,7 +911,7 @@ describe('createTools', () => {
     const { client, state } = setup();
     const tools = createTools({ client, state });
     expect(Object.keys(tools).sort()).toEqual(
-      ['correct_last_move', 'get_assessment', 'get_position', 'pass', 'play_move', 'resign', 'set_rank', 'start_game', 'undo'],
+      ['correct_last_move', 'get_assessment', 'get_position', 'pass', 'play_move', 'redo', 'resign', 'set_rank', 'start_game', 'undo'],
     );
   });
 });
@@ -940,11 +996,16 @@ describe('человек против человека (D-0005)', () => {
       marginPoints: 6,
       winrateBlack: 70,
       weakGroups: [
-        { color: 'white', where: 'C3, C4', whereSpoken: 'цэ три, цэ четыре', status: 'неустойчива' },
-        { color: 'black', where: 'M3', whereSpoken: 'эм три', status: 'мертва' },
+        { color: 'white', where: 'C3, C4', whereSpoken: 'цэ три, цэ четыре', stones: ['C3', 'C4'], stonesSpoken: ['цэ три', 'цэ четыре'], liberties: 2, status: 'неустойчива' },
+        { color: 'black', where: 'M3', whereSpoken: 'эм три', stones: ['M3'], stonesSpoken: ['эм три'], liberties: 1, status: 'мертва' },
       ],
       bestMoves: ['K10', 'D10', 'G7'],
       bestMovesSpoken: ['ка десять', 'дэ десять', 'гэ семь'],
+      bestCandidates: [
+        { coord: 'K10', coordSpoken: 'ка десять', winrateBlack: 71, scoreLeadBlack: 6.5, visits: 20 },
+        { coord: 'D10', coordSpoken: 'дэ десять', winrateBlack: 69, scoreLeadBlack: 6, visits: 15 },
+        { coord: 'G7', coordSpoken: 'гэ семь', winrateBlack: 68, scoreLeadBlack: 5.8, visits: 10 },
+      ],
       toPlay: 'white',
     });
   });
@@ -958,6 +1019,7 @@ describe('сигнал сеанса в каждом инструменте (M7)'
     ['pass', (f) => f.pass(), ['pass']],
     ['resign', (f) => f.resign(), ['getGame', 'resign']],
     ['undo', (f) => f.undo(), ['undo']],
+    ['redo', (f) => f.redo(), ['redo']],
     ['get_position', (f) => f.getPosition(), ['getGame', 'ascii']],
     ['get_assessment', (f) => f.getAssessment(), ['getGame', 'analyze']],
     ['set_rank', (f) => f.setRank({ rank: '5 кю' }), ['getGame', 'setRank']],
