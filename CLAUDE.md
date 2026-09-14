@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-> **Last Updated:** 2026-09-13
+> **Last Updated:** 2026-09-14
 
 Правила для агентов-разработчиков в проекте Гоко. Канонический файл: если
 `AGENTS.md` или доки расходятся с ним, прав этот файл, если founder не
@@ -17,7 +17,7 @@
 - Текущий фокус и следующий шаг: `docs/NOW.md`
 - Карта документации: `docs/README.md`
 - Решения после спеки: `docs/decisions/`
-- Стадия: 1, ядро готово (`go-core`, `protocol`, `go-engine`, `game-server`, `smoke`, `dev`); голос и веб — план `docs/superpowers/plans/2026-09-07-goko-stage1-voice-web.md` `[WIP]`
+- Стадия: 1 завершена (ядро, голос, веб); приёмка у доски и стадия 2 (agent-native) — `docs/NOW.md`
 
 ## Стек
 
@@ -48,7 +48,8 @@ npm run doctor   # Node, KATAGO_BIN, сети, env без печати знач�
 npm run check    # typecheck + unit (vitest по всем workspace'ам; линтера в v1 нет)
 npm run smoke    # game-server с фейковым движком, сценарная партия по HTTP, ascii-доска; -- --real: с KataGo
 npm run dev      # game-server :8787, go-engine :8788 (без KATAGO_BIN — FAKE_ENGINE=1), web :5173 и voice-agent goko-dev, если есть
-node scripts/chat.mjs   # текстовый диалог с Гоко в комнате LiveKit (появится вместе с voice-agent)
+npm run chat     # текстовый диалог с Гоко в комнате LiveKit (нужны VPS с LiveKit и запущенный воркер)
+npm run build:web   # статика телефона в apps/web/dist (APP_KEY из .env попадает в бандл)
 ```
 
 Все проверки заканчиваются кодом возврата и печатают `[OK]`/`[X]`. Экран

@@ -1,8 +1,10 @@
 # infra — развёртывание Гоко на одном VPS
 
-Здесь всё, что поднимает прод: Caddy (TLS, статика, прокси `/api/*`) и
-LiveKit (сигналинг и TURN) в Docker Compose. Приложения Node на стадии 0
-живут на ПК; VPS отвечает за домены, TLS и медиа.
+Здесь всё, что поднимает прод в Docker Compose: Caddy (TLS, статика, прокси
+`/api/*`), LiveKit (сигналинг и TURN), `game-server`, `go-engine` и
+`voice-agent`. Этот файл — первичная настройка VPS; эксплуатация после неё
+(чек-лист перед первым деплоем голоса, проверки, логи, откат) —
+[`docs/runbooks/vps.md`](../docs/runbooks/vps.md).
 
 Переменные — в `infra/.env.example`. На VPS файл лежит в `/opt/goko/.env`
 (режим 600), в git не попадает.
@@ -33,8 +35,10 @@ openssl rand -hex 32   # LIVEKIT_API_SECRET
 openssl rand -hex 16   # APP_KEY, ENGINE_KEY
 ```
 
-`API_UPSTREAM` в проде — контейнер game-server, на стадии 0 — адрес ПК в
-tailnet с портом 8787. Значения никуда не копировать и не печатать в логи.
+`API_UPSTREAM` в проде — контейнер game-server (`127.0.0.1:8787`), в
+dev-режиме — адрес ПК в tailnet с портом 8787. `APP_KEY` — один и тот же в
+`/opt/goko/.env` и в `.env` на ПК: он вшивается в бандл страницы. Значения
+никуда не копировать и не печатать в логи.
 
 `ACME_EMAIL` **обязан вписать founder**: это его почта, на неё Let's Encrypt
 шлёт предупреждения об истечении сертификата. Пока строка пуста, compose
@@ -44,12 +48,17 @@ tailnet с портом 8787. Значения никуда не копиров�
 ## 4. Деплой
 
 ```bash
-infra/scripts/deploy.sh                      # только конфиги и compose
-infra/scripts/deploy.sh --web-dir apps/web/dist   # плюс собранная статика
+infra/scripts/deploy.sh --build-web          # сверить APP_KEY ПК и VPS, собрать web на ПК, выложить статику, compose up --build
+infra/scripts/deploy.sh                      # только код, конфиги и образы, статику не трогать
 ```
 
-Скрипт синхронизирует репозиторий в `/opt/goko/src`, подставляет `LK_HOST`
-вместо `__TURN_DOMAIN__` в `livekit.yaml` и поднимает compose.
+Веб собирается на ПК (`npm run build:web` → `apps/web/dist`), не на VPS.
+Перед сборкой `--build-web` сверяет sha256 `APP_KEY` из `.env` ПК и
+`/opt/goko/.env`, значений и хешей не печатает и останавливается при
+расхождении; вместе с `--web-dir` не указывается. Скрипт синхронизирует
+репозиторий в `/opt/goko/src`, подставляет `LK_HOST` вместо `__TURN_DOMAIN__`
+в `livekit.yaml`, создаёт `/opt/goko/data/games` (нужен ssh под root) и
+поднимает compose со сборкой образов.
 
 Синхронизация идёт через `rsync`. Если `rsync` не найден (Git Bash на
 Windows), скрипт сам переключается на `tar` по ssh и печатает `[!]`: этот
@@ -60,17 +69,18 @@ Windows), скрипт сам переключается на `tar` по ssh и 
 
 ```bash
 curl -s  https://<LK_HOST>/     # ожидается OK
-curl -sI https://<WEB_HOST>/    # до стадии 1 ожидается 404, после выкатки статики 200
-ssh goko 'cd /opt/goko/src/infra && docker compose --env-file /opt/goko/.env ps'
+curl -sI https://<WEB_HOST>/    # 200 после deploy.sh --build-web; 404 — статика ещё не выкачена
+ssh goko 'cd /opt/goko/src/infra && set -a && . /opt/goko/.env && set +a && docker compose --env-file /opt/goko/.env ps'
 ```
 
-`404` на `<WEB_HOST>` — норма, пока `apps/web/dist` не собран и не выкачен:
-TLS уже работает, но отдавать нечего. `200` ожидается после
-`deploy.sh --web-dir apps/web/dist`.
+`404` на `<WEB_HOST>` — норма, пока статика не выкачена: TLS уже работает, но
+отдавать нечего.
 
-У обоих сервисов есть `healthcheck`, поэтому `docker compose ps` показывает
-`Up (healthy)`, а не просто `Up`. Статус `unhealthy` или застрявший
-`health: starting` — повод смотреть `docker compose logs`.
+У всех сервисов есть `healthcheck`, поэтому `docker compose ps` показывает
+`Up (healthy)`, а не просто `Up`; `go-engine` до 5 минут после старта в
+`health: starting` (прогрев KataGo). Статус `unhealthy` или застрявший
+`health: starting` — повод смотреть `docker compose logs`. Остальные
+проверки — `docs/runbooks/vps.md`.
 
 Первый запрос после деплоя может быть медленным: Caddy получает
 сертификаты Let's Encrypt.
@@ -92,7 +102,7 @@ TLS уже работает, но отдавать нечего. `200` ожид�
 ## 7. Откат
 
 ```bash
-ssh goko 'cd /opt/goko/src/infra && docker compose --env-file /opt/goko/.env down'
+ssh goko 'cd /opt/goko/src/infra && set -a && . /opt/goko/.env && set +a && docker compose --env-file /opt/goko/.env down'
 ```
 
 Данные Caddy (сертификаты) лежат в томах и переживают `down`. Вернуться к

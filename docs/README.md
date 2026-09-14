@@ -21,7 +21,7 @@
 | `journal/` | журналы исполнения по стадиям: задача, проверка, коммиты | стадия 0, стадия 1 ядро |
 | `decisions/` | журнал решений после спеки, `D-NNNN` | [реестр](decisions/README.md), D-0001…D-0012 |
 | `process/` | как работают агенты и founder | [agent-development](process/agent-development.md) |
-| `runbooks/` | эксплуатация: VPS, LiveKit, KataGo, откат | `[TODO]` стадия 1 |
+| `runbooks/` | эксплуатация: [vps](runbooks/vps.md) — деплой, логи, режимы API, откат, ресурсы | стадия 1 |
 | `reference/` | грабли и находки, на которые больно наступать дважды | `[TODO]` по мере появления |
 
 ## Правила базы знаний
