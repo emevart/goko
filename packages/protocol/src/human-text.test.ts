@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import * as protocol from './index.ts';
 import { ClientTimeoutError, ERROR_CODES } from './errors.ts';
-import { BAD_REQUEST_REASON_TEXT, CLIENT_ERROR_TEXT, ERROR_TEXT, ILLEGAL_REASON_TEXT, humanText } from './human-text.ts';
+import { BAD_REQUEST_REASON_TEXT, CLIENT_ERROR_TEXT, ERROR_TEXT, ILLEGAL_REASON_TEXT, TOO_MANY_GAMES_SCOPE_TEXT, humanText } from './human-text.ts';
 
 describe('текст ошибки для человека', () => {
   it('у каждого кода есть русский текст, лишних кодов в таблице нет', () => {
@@ -30,7 +30,8 @@ describe('текст ошибки для человека', () => {
   });
 
   it('bad_request с причиной not_your_seat (сдача за чужой цвет): «это не твой цвет»; без причины — общий текст', () => {
-    expect(BAD_REQUEST_REASON_TEXT).toEqual({ not_your_seat: 'это не твой цвет' });
+    expect(BAD_REQUEST_REASON_TEXT).toEqual({ not_your_seat: 'это не твой цвет', sessionless_disabled: 'партии создаются только внутри сессии' });
+    expect(humanText('bad_request', { reason: 'sessionless_disabled' })).toBe('партии создаются только внутри сессии');
     expect(humanText('bad_request', { reason: 'not_your_seat' })).toBe('это не твой цвет');
     expect(humanText('bad_request')).toBe(ERROR_TEXT.bad_request);
     expect(humanText('bad_request', { reason: 'toString' })).toBe(ERROR_TEXT.bad_request);
@@ -46,9 +47,16 @@ describe('текст ошибки для человека', () => {
     expect(humanText('engine_gave_up')).toBe(ERROR_TEXT.internal);
   });
 
-  it('лимиты: частые запросы и слишком много партий', () => {
+  it('лимиты: частые запросы и слишком много партий; лимит на клиента — свой текст по details.scope', () => {
     expect(humanText('rate_limited')).toBe('слишком много запросов, подожди немного');
     expect(humanText('too_many_games')).toBe('сейчас идёт слишком много партий, попробуй позже');
+    expect(humanText('too_many_games', { max: 20 })).toBe(ERROR_TEXT.too_many_games);
+    expect(TOO_MANY_GAMES_SCOPE_TEXT).toEqual({ client: 'у тебя слишком много незаконченных партий, новую можно начать позже' });
+    expect(humanText('too_many_games', { max: 3, scope: 'client' })).toBe('у тебя слишком много незаконченных партий, новую можно начать позже');
+    // Своё свойство, а не прототип; scope у другого кода ничего не меняет.
+    expect(humanText('too_many_games', { scope: 'constructor' })).toBe(ERROR_TEXT.too_many_games);
+    expect(humanText('rate_limited', { scope: 'client' })).toBe(ERROR_TEXT.rate_limited);
+    expect(protocol.TOO_MANY_GAMES_SCOPE_TEXT).toBe(TOO_MANY_GAMES_SCOPE_TEXT);
   });
 
   it('таймаут клиента — не код сервера, но текст у него есть', () => {

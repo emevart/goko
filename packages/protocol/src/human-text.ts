@@ -12,11 +12,21 @@ export const ILLEGAL_REASON_TEXT: Record<IllegalReasonCode, string> = {
   suicide: 'самоубийство: у камня не будет дыханий',
 };
 
-export type BadRequestReasonCode = 'not_your_seat';
+export type BadRequestReasonCode = 'not_your_seat' | 'sessionless_disabled';
 
-// Причины bad_request, у которых есть своя фраза: сдача за цвет, которым человек не управляет.
+// Причины bad_request, у которых есть своя фраза: сдача за цвет, которым человек не управляет, и партия
+// без сессии там, где такие выключены (D-0012).
 export const BAD_REQUEST_REASON_TEXT: Record<BadRequestReasonCode, string> = {
   not_your_seat: 'это не твой цвет',
+  sessionless_disabled: 'партии создаются только внутри сессии',
+};
+
+export type TooManyGamesScope = 'client';
+
+// too_many_games без scope — общий лимит сервера; scope client — лимит незавершённых партий на адрес (D-0012).
+// Старые партии с телефона не открыть, поэтому текст не зовёт их доигрывать.
+export const TOO_MANY_GAMES_SCOPE_TEXT: Record<TooManyGamesScope, string> = {
+  client: 'у тебя слишком много незаконченных партий, новую можно начать позже',
 };
 
 export const ERROR_TEXT: Record<ErrorCode, string> = {
@@ -52,6 +62,7 @@ const own = <T extends object>(table: T, key: unknown): key is keyof T => typeof
 export function humanText(code: string, details?: Record<string, unknown>): string {
   if (code === 'illegal_move' && own(ILLEGAL_REASON_TEXT, details?.reason)) return ILLEGAL_REASON_TEXT[details.reason];
   if (code === 'bad_request' && own(BAD_REQUEST_REASON_TEXT, details?.reason)) return BAD_REQUEST_REASON_TEXT[details.reason];
+  if (code === 'too_many_games' && own(TOO_MANY_GAMES_SCOPE_TEXT, details?.scope)) return TOO_MANY_GAMES_SCOPE_TEXT[details.scope];
   if (own(CLIENT_ERROR_TEXT, code)) return CLIENT_ERROR_TEXT[code];
   return own(ERROR_TEXT, code) ? ERROR_TEXT[code] : ERROR_TEXT.internal;
 }
