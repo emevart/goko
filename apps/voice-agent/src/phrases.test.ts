@@ -35,6 +35,22 @@ describe('parseRank', () => {
     expect(parseRank('115 кю')).toBeNull();
     expect(parseRank('005 кю')).toBeNull();
   });
+  it('родительный «дана» и порядковые -ой, -ий, -й у дан и кю', () => {
+    expect(parseRank('3 дана')).toBe('3d');
+    expect(parseRank('до 2-го дана')).toBe('2d');
+    expect(parseRank('2-ой дан')).toBe('2d');
+    expect(parseRank('3-ий дан')).toBe('3d');
+    expect(parseRank('2-й дан')).toBe('2d');
+    expect(parseRank('2-ой кю')).toBe('2k');
+    expect(parseRank('3-ий кю')).toBe('3k');
+    expect(parseRank('3 данные')).toBeNull();
+  });
+  it('дробное число — не ранг; запятая перед числом через пробел не мешает', () => {
+    expect(parseRank('2,5 кю')).toBeNull();
+    expect(parseRank('2.5 кю')).toBeNull();
+    expect(parseRank('1,5 дан')).toBeNull();
+    expect(parseRank('итак, 5 кю')).toBe('5k');
+  });
 });
 
 describe('speakRank / speakMove / colorName', () => {

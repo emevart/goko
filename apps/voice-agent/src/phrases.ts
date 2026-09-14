@@ -6,15 +6,16 @@ import { type Color, RANKS, type Rank, type Result } from '@goko/protocol';
 export const colorName = (c: Color): string => (c === 'B' ? 'чёрные' : 'белые');
 export const colorNameInstrumental = (c: Color): string => (c === 'B' ? 'чёрными' : 'белыми');
 
-// «10 кю», «10k», «3 дан», «3d», «1-й дан» -> Rank; null, если не разобрали или ранга нет в списке.
-// Конец слова — просмотр вперёд по буквам и цифрам Unicode: \b в JS знает только [A-Za-z0-9_]
-// и после «кю» или «дан» границы не видит. Просмотр назад по цифрам: без него из «115 кю»
-// выражение берёт хвост «15 кю».
+// «10 кю», «10k», «3 дан», «3 дана», «3d», «1-й дан», «2-ой кю» -> Rank; null, если не разобрали
+// или ранга нет в списке. Конец слова — просмотр вперёд по буквам и цифрам Unicode: \b в JS знает
+// только [A-Za-z0-9_] и после «кю» или «дан» границы не видит. Просмотр назад — по цифре и по цифре
+// с точкой или запятой: без него из «115 кю» выражение берёт хвост «15 кю», а из «2,5 кю» — «5 кю».
+// Единицы перечислены один раз: группа 2 — кю, группа 3 — дан.
 export function parseRank(text: string): Rank | null {
-  const m = /(?<!\p{N})(\d{1,2})\s*(?:-?\s*(?:й|го|ый|ого))?\s*(k|kyu|кю|d|dan|дан)(?![\p{L}\p{N}])/iu.exec(text.trim());
+  const m = /(?<!\p{N}[.,]?)(\d{1,2})\s*(?:-?\s*(?:й|ый|ой|ий|го|ого))?\s*(?:(k|kyu|кю)|(d|dan|дана?))(?![\p{L}\p{N}])/iu.exec(text.trim());
   if (!m) return null;
   const n = Number(m[1]);
-  const kyu = /^(k|kyu|кю)$/iu.test(m[2] ?? '');
+  const kyu = m[2] !== undefined;
   const rank = `${n}${kyu ? 'k' : 'd'}`;
   return (RANKS as readonly string[]).includes(rank) ? (rank as Rank) : null;
 }
