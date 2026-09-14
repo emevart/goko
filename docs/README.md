@@ -19,10 +19,14 @@
 | `superpowers/plans/` | планы реализации (writing-plans) | стадия 0, стадия 1 ядро, стадия 1 голос и веб |
 | `research/` | результаты замеров, спайков и приёмки | [стадия 0](research/stage0-results.md), [приёмка стадии 1](research/2026-09-14-stage1-acceptance.md), [отзыв с телефона](research/2026-09-14-voice-feedback.md) |
 | `journal/` | журналы исполнения по стадиям: задача, проверка, коммиты | стадия 0, [стадия 1 ядро](journal/2026-09-08-stage1-core.md), [голос и веб](journal/2026-09-14-stage1-voice-web.md) |
-| `decisions/` | журнал решений после спеки, `D-NNNN` | [реестр](decisions/README.md), D-0001…D-0013 |
+| `decisions/` | журнал решений после спеки, `D-NNNN` | [реестр](decisions/README.md), D-0001…D-0014 |
 | `process/` | как работают агенты и founder | [agent-development](process/agent-development.md) |
 | `runbooks/` | эксплуатация: [vps](runbooks/vps.md) — деплой, логи, режимы API, откат, ресурсы | стадия 1 |
 | `reference/` | грабли и находки, на которые больно наступать дважды | `[TODO]` по мере появления |
+
+Итерация 15.09: [спека общего разговора](superpowers/specs/2026-09-15-goko-conversation-design.md),
+[журнал](journal/2026-09-15-conversation.md),
+[проверка с записью](research/2026-09-15-conversation-acceptance.md).
 
 ## Правила базы знаний
 
