@@ -22,6 +22,9 @@ export type AgentState = {
   // Ревизия партии, на которой её итог (finished, announcedFinish) стал известен: событие state.updated законченной
   // партии или ответ инструмента. По ней forgetFinishIfReopened отличает возобновлённую партию от устаревшего события.
   finishRevision: { gameId: string; revision: number } | null;
+  // Номер последнего хода партии из последнего обработанного state.updated (0 — доска пуста). По нему sync после
+  // переподключения отличает ход, сделанный в разрыве, от уже показанного потоком. Запись другой партии не в счёт.
+  seenMove: { gameId: string; n: number } | null;
   blockedUntil: number; // до этого момента (мс, часы deps.now) запросы к game-server не шлём: rate_limited с Retry-After
 };
 
@@ -47,6 +50,7 @@ export function newAgentState(sessionId: string): AgentState {
     awaitingFinish: null,
     finished: null,
     finishRevision: null,
+    seenMove: null,
     blockedUntil: 0,
   };
 }

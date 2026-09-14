@@ -200,6 +200,100 @@ describe('handleEvent: переподключение к той же парти�
     expect(s.awaitingReply).toBe(false);
     expect(s.lastTap).toBeNull();
   });
+  it('seenMove: каждый state.updated запоминает номер последнего хода партии, пустая доска — 0', () => {
+    const s = waiting({});
+    handleEvent(upd(pending(), { cause: 'play', by: 'human', via: 'voice' }), s);
+    expect(s.seenMove).toEqual({ gameId: 'g1', n: 1 });
+    handleEvent(upd(fakeGame({ moves: [], revision: 3 }), { cause: 'undo', by: 'human', via: 'tap' }), s);
+    expect(s.seenMove).toEqual({ gameId: 'g1', n: 0 });
+    const done = fakeGame({ moves: [mv(1, 'B', 'D4'), mv(2, 'W', 'pass'), mv(3, 'B', 'pass')], status: 'finished', result: { winner: 'B', reason: 'resign' }, revision: 4 });
+    handleEvent(upd(done, { cause: 'pass', by: 'human', via: 'voice' }), s);
+    expect(s.seenMove).toEqual({ gameId: 'g1', n: 3 });
+    handleEvent(upd(fakeGame({ id: 'g2', moves: [mv(1, 'B', 'C3')], revision: 1 }), { cause: 'sync', by: 'system' }), s);
+    expect(s.seenMove).toEqual({ gameId: 'g2', n: 1 });
+  });
+  it('голосовой ход в полёте при переподключении: поток уже показал ход, sync того же хода ожидание не ставит — ход движка назовёт инструмент, а не событие', () => {
+    const s = waiting({});
+    expect(handleEvent(upd(pending(), { cause: 'play', by: 'human', via: 'voice' }), s)).toBeNull();
+    handleEvent({ type: 'session.game', gameId: 'g1' }, s);
+    expect(handleEvent(upd(pending(), { cause: 'sync', by: 'system' }), s)).toBeNull();
+    expect(s.awaitingReply).toBe(false);
+    expect(handleEvent(upd(replied(), { cause: 'engine', by: 'engine' }), s)).toBeNull();
+    // Движок ответил в разрыве, инструмент ещё ждёт: sync тоже молчит.
+    const gap = waiting({});
+    handleEvent(upd(pending(), { cause: 'play', by: 'human', via: 'voice' }), gap);
+    handleEvent({ type: 'session.game', gameId: 'g1' }, gap);
+    expect(handleEvent(upd(replied(), { cause: 'sync', by: 'system' }), gap)).toBeNull();
+  });
+  it('с прежним ожиданием sync того же хода его не снимает: таймаут инструмента уже случился', () => {
+    const s = waiting({});
+    handleEvent(upd(pending(), { cause: 'play', by: 'human', via: 'voice' }), s);
+    s.awaitingReply = true; // play вернул replyTimedOut
+    handleEvent({ type: 'session.game', gameId: 'g1' }, s);
+    expect(handleEvent(upd(pending(), { cause: 'sync', by: 'system' }), s)).toBeNull();
+    expect(s.awaitingReply).toBe(true);
+    expect(handleEvent(upd(replied(), { cause: 'engine', by: 'engine' }), s)).toContain('Твой ход готов: ка десять');
+  });
+  it('ход человека в разрыве без прежнего ожидания: sync нового хода ставит ожидание, ход движка озвучен событием', () => {
+    const s = waiting({});
+    handleEvent(upd(replied(), { cause: 'engine', by: 'engine' }), s); // поток показал ход движка n=2
+    expect(s.seenMove).toEqual({ gameId: 'g1', n: 2 });
+    handleEvent({ type: 'session.game', gameId: 'g1' }, s);
+    const tapped = fakeGame({ moves: [mv(1, 'B', 'D4'), mv(2, 'W', 'K10'), mv(3, 'B', 'C3')], toPlay: 'W', pendingEngineMove: true, revision: 3 });
+    expect(handleEvent(upd(tapped, { cause: 'sync', by: 'system' }), s)).toBeNull();
+    expect(s.awaitingReply).toBe(true);
+    const answered = fakeGame({ moves: [...tapped.moves, mv(4, 'W', 'G7')], toPlay: 'B', revision: 4 });
+    expect(handleEvent(upd(answered, { cause: 'engine', by: 'engine' }), s)).toBe('Твой ход готов: гэ семь. Назови его одной фразой.');
+  });
+  it('отмена в разрыве, последним остался старый ход движка: sync молчит и снимает флаги', () => {
+    for (const flags of [{ awaitingReply: true }, { lastTap: true }]) {
+      const s = waiting(flags);
+      const humanLast = fakeGame({ moves: [mv(1, 'B', 'D4'), mv(2, 'W', 'K10'), mv(3, 'B', 'C3')], toPlay: 'W', pendingEngineMove: true, revision: 3 });
+      handleEvent(upd(humanLast, { cause: 'play', by: 'human', via: 'voice' }), s); // поток показал ход человека n=3
+      handleEvent({ type: 'session.game', gameId: 'g1' }, s);
+      expect(handleEvent(upd(fakeGame({ moves: [mv(1, 'B', 'D4'), mv(2, 'W', 'K10')], toPlay: 'B', revision: 4 }), { cause: 'sync', by: 'system' }), s)).toBeNull();
+      expect(s.awaitingReply).toBe(false);
+      expect(s.lastTap).toBeNull();
+    }
+  });
+  it('движок сходил в разрыве, но это ход, который поток уже показал: sync молчит (n не новее)', () => {
+    const s = waiting({});
+    handleEvent(upd(replied(), { cause: 'engine', by: 'engine' }), s);
+    s.awaitingReply = true; // устаревший флаг
+    handleEvent({ type: 'session.game', gameId: 'g1' }, s);
+    expect(handleEvent(upd(replied(), { cause: 'sync', by: 'system' }), s)).toBeNull();
+    expect(s.awaitingReply).toBe(false);
+  });
+  it('тап в разрыве после ответа движка: названа координата свежего тапа по позиции, а не старый lastTap', () => {
+    const moves = [mv(1, 'B', 'D4'), mv(2, 'W', 'K10'), mv(3, 'B', 'C3')];
+    // Движок успел ответить и на свежий тап: sync называет оба хода.
+    const s = waiting({ lastTap: true });
+    handleEvent(upd(pending(), { cause: 'play', by: 'human', via: 'tap' }), s); // тап D4, движок думает
+    handleEvent({ type: 'session.game', gameId: 'g1' }, s);
+    const answered = fakeGame({ moves: [...moves, mv(4, 'W', 'G7')], toPlay: 'B', revision: 4 });
+    expect(handleEvent(upd(answered, { cause: 'sync', by: 'system' }), s)).toBe('Человек сыграл цэ три на экране, ты ответил гэ семь. Назови свой ход одной фразой.');
+    // Движок ещё думает над свежим тапом: ожидание остаётся, событие хода назовёт свежий тап.
+    const t = waiting({ lastTap: true });
+    handleEvent(upd(pending(), { cause: 'play', by: 'human', via: 'tap' }), t);
+    handleEvent({ type: 'session.game', gameId: 'g1' }, t);
+    expect(handleEvent(upd(fakeGame({ moves, toPlay: 'W', pendingEngineMove: true, revision: 3 }), { cause: 'sync', by: 'system' }), t)).toBeNull();
+    expect(handleEvent(upd(answered, { cause: 'engine', by: 'engine' }), t)).toBe('Человек сыграл цэ три на экране, ты ответил гэ семь. Назови свой ход одной фразой.');
+  });
+  it('запись seenMove другой партии (партию сменил инструмент, session.game не менял gameId) не считается показанным ходом', () => {
+    const s = waiting({});
+    s.seenMove = { gameId: 'g0', n: 40 };
+    handleEvent({ type: 'session.game', gameId: 'g1' }, s);
+    expect(handleEvent(upd(pending(), { cause: 'sync', by: 'system' }), s)).toBeNull();
+    expect(s.awaitingReply).toBe(true);
+    const e = waiting({ awaitingReply: true });
+    e.seenMove = { gameId: 'g0', n: 40 };
+    expect(handleEvent(upd(replied(), { cause: 'sync', by: 'system' }), e)).toBe('Твой ход готов: ка десять. Назови его одной фразой.');
+  });
+  it('устаревший тап при первом ходе движка: ход человека не из чего взять — фраза по запомненному тапу', () => {
+    const s = waiting({ lastTap: true });
+    const g = fakeGame({ seats: { B: { controller: 'engine', rank: '10k' }, W: { controller: 'human' } }, moves: [mv(1, 'B', 'K10')], toPlay: 'W', revision: 1 });
+    expect(handleEvent(upd(g, { cause: 'engine', by: 'engine' }), s)).toBe('Человек сыграл дэ четыре на экране, ты ответил ка десять. Назови свой ход одной фразой.');
+  });
   it('sync другой партии без session.game — «продолжаем», флаги прежней партии сняты', () => {
     const s = waiting({ awaitingReply: true, lastTap: true });
     const other = fakeGame({ id: 'g2', moves: [mv(1, 'B', 'D4')], toPlay: 'W', pendingEngineMove: true, revision: 1 });

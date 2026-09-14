@@ -88,6 +88,7 @@ describe('newAgentState', () => {
       awaitingFinish: null,
       finished: null,
       finishRevision: null,
+      seenMove: null,
       blockedUntil: 0,
     });
   });

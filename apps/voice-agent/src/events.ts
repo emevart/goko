@@ -48,14 +48,15 @@ function describeMove(coord: string): string {
 
 // Ход движка, которого ждали: после тапа — оба хода, после таймаута инструмента — «Твой ход готов». Флаги снимаются.
 // Не ждали (ответ на голосовой ход уже вернул инструмент) — null. Общая фраза для события engine и для sync,
-// в разрыве перед которым движок сходил.
-function engineReplyText(state: AgentState, last: Move): string | null {
+// в разрыве перед которым движок сходил. Ход человека — по позиции (prev, предпоследний ход): в разрыве потока
+// человек мог тапнуть ещё раз, и запомненный тап устарел. Без предыдущего хода — по запомненному тапу.
+function engineReplyText(state: AgentState, last: Move, prev: Move | undefined): string | null {
   const tap = state.lastTap;
   const awaiting = state.awaitingReply;
   resetTurnFlags(state);
   if (tap) {
     const reply = last.coord === 'pass' ? 'ответил пасом' : `ответил ${speakMove(last.coord)}`;
-    return `Человек ${describeMove(tap.coord)} на экране, ты ${reply}. Назови свой ход одной фразой.`;
+    return `Человек ${describeMove((prev ?? tap).coord)} на экране, ты ${reply}. Назови свой ход одной фразой.`;
   }
   if (awaiting) return `Твой ход готов: ${speakMove(last.coord)}. Назови его одной фразой.`;
   return null;
@@ -70,6 +71,11 @@ function onStateUpdated(ev: Extract<GameEvent, { type: 'state.updated' }>, state
   state.humanColor = hasEngine(g) ? humanColorOf(g) : null;
   state.retriesExhausted = false; // был коммит или открытие потока: серия повторов перезапущена (D-0006)
   const last = g.moves.at(-1);
+  // Последний ход, который поток уже показывал по этой партии; null — не показывал (или только другую партию).
+  const seen = state.seenMove?.gameId === g.id ? state.seenMove.n : null;
+  state.seenMove = { gameId: g.id, n: last?.n ?? 0 };
+  // Последний ход новее показанного: сделан в разрыве потока. Не знаем, что показывали, — считаем новым.
+  const madeInGap = seen === null || (last?.n ?? 0) > seen;
 
   // Партия снова идёт: отмена (кнопкой на экране или инструментом — via не важен) или снимок нового подключения
   // (отмена могла случиться в разрыве). Итог, известный на ревизии не новее, устарел (state.ts). Только undo и
@@ -89,15 +95,18 @@ function onStateUpdated(ev: Extract<GameEvent, { type: 'state.updated' }>, state
         return `Продолжаем партию: ${seatsText(g)}, сделано ходов: ${g.moves.length}, ${whoseTurn(g)}. ${ONE_PHRASE} Ход не называй, пока его не вернул инструмент.`;
       }
       // Переподключение к знакомой партии: сверяем ожидание хода движка с присланной позицией (I1).
-      // Движок ещё думает — ответ впереди: ждём его, даже если флага не было (ход с экрана в разрыве).
+      // Движок ещё думает — ответ впереди. Прежнее ожидание остаётся. Без него ждём, только если ход человека
+      // сделан в разрыве: ход, который поток уже показал, был голосовым, и ответ на него вернёт инструмент.
       if (g.pendingEngineMove) {
-        if (!state.lastTap) state.awaitingReply = true;
+        if (madeInGap && !state.lastTap) state.awaitingReply = true;
         return null;
       }
-      // Ждали ответа, и последний ход — движка: он случился в разрыве, называем его той же фразой. Иначе ответа
-      // ждать нечего (в разрыве сходил человек, партия двух людей): флаги снимаем, чтобы старый тап не
-      // приклеился к следующему ходу движка.
-      if (last && (state.lastTap || state.awaitingReply) && last.color === seatColor(g.seats, 'engine')) return engineReplyText(state, last);
+      // Ждали ответа, и последний ход — новый ход движка: он случился в разрыве, называем его той же фразой.
+      // Иначе ответа ждать нечего (в разрыве сходил человек, отменили ход движка, партия двух людей): флаги
+      // снимаем молча, чтобы старый ход не прозвучал как новый, а старый тап не приклеился к следующему ответу.
+      if (last && madeInGap && (state.lastTap || state.awaitingReply) && last.color === seatColor(g.seats, 'engine')) {
+        return engineReplyText(state, last, g.moves.at(-2));
+      }
       resetTurnFlags(state);
       return null;
     case 'new': {
@@ -135,7 +144,7 @@ function onStateUpdated(ev: Extract<GameEvent, { type: 'state.updated' }>, state
       // Ход с тем же или меньшим номером без признака значит, что прежний ход сняли или заменили.
       if (ev.humanFallback) state.fallbackMove = last.n;
       else if (state.fallbackMove !== null && last.n <= state.fallbackMove) state.fallbackMove = null;
-      return engineReplyText(state, last);
+      return engineReplyText(state, last, g.moves.at(-2));
     }
     case 'rank':
     case 'resign':
