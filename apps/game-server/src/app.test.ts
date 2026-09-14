@@ -1411,9 +1411,11 @@ describe('createApp: партии только в сессии и не боль�
     for (const path of ['play', 'pass', 'pass']) expect((await post(app, `/api/games/${g}/${path}`, '192.0.2.70', path === 'play' ? { coord: 'D4' } : {})).status).toBe(200);
     await untilTick(() => service.get(g).status === 'finished');
     expect((await post(app, '/api/games', '192.0.2.71', HUMAN_ONLY)).status).toBe(200);
-    const refused = await post(app, `/api/games/${g}/undo`, '192.0.2.71', {});
-    expect(refused.status).toBe(429);
-    expect(((await refused.json()) as ErrorJson).error.details).toEqual({ max: 1, scope: 'client' });
+    for (const [path, body] of [[`/api/games/${g}/undo`, {}], [`/api/games/${g}/correct`, { coord: 'E5' }]] as const) {
+      const refused = await post(app, path, '192.0.2.71', body);
+      expect(refused.status, path).toBe(429);
+      expect(((await refused.json()) as ErrorJson).error.details, path).toEqual({ max: 1, scope: 'client' });
+    }
     expect((await post(app, `/api/games/${g}/undo`, '192.0.2.72', {})).status).toBe(200);
     expect((await post(app, '/api/games', '192.0.2.72', HUMAN_ONLY)).status).toBe(429);
   });

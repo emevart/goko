@@ -3762,6 +3762,17 @@ describe('GameService: лимит партий и старые снапшоты 
     await expect(service.undo(done, { via: 'api' }, 'human', { clientKey: 'A' })).rejects.toMatchObject({ code: 'game_finished' });
   });
 
+  it('действия без отката в завершённой счётом партии лимит не проходят: ход и пас — game_finished, смена ранга проходит', async () => {
+    const { service } = await make(createFakeEngine(), { maxActiveGames: 1 });
+    const scored = (await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false })).state.id;
+    await finishByPasses(service, scored);
+    await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false });
+    await expect(service.play(scored, { coord: 'E5', waitForReply: false, via: 'api' })).rejects.toMatchObject({ code: 'game_finished' });
+    await expect(service.pass(scored, { waitForReply: false, via: 'api' })).rejects.toMatchObject({ code: 'game_finished' });
+    const ranked = await service.setRank(scored, { color: 'B', rank: '5k' });
+    expect(ranked.state).toMatchObject({ status: 'finished', result: { reason: 'score' } });
+  });
+
   it('открываемая откатом партия в счёте с проверки: одновременные create и второй undo на границе лимита отклонены', async () => {
     const { service } = await make(createFakeEngine(), { maxActiveGames: 1 });
     const a = (await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false })).state.id;
