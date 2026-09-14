@@ -56,4 +56,12 @@ describe('followMode', () => {
     expect(f.mode).toBe('voice');
     expect(s.calls).toEqual(['out:false', 'in:false', 'out:true', 'in:true']);
   });
+  it('каждая смена режима пишется в лог, повтор того же режима — нет', () => {
+    const logs: string[] = [];
+    const f = followMode({ participant: { identity: 'phone-s1', attributes: {} }, session: fakeSession(), log: (l) => void logs.push(l) });
+    f.onAttributes({ identity: 'phone-s1', attributes: { 'goko.mode': 'chat' } });
+    f.onAttributes({ identity: 'phone-s1', attributes: { 'goko.mode': 'chat' } });
+    f.onAttributes({ identity: 'phone-s1', attributes: { 'goko.mode': 'voice' } });
+    expect(logs).toEqual(['[OK] voice-agent: режим voice', '[OK] voice-agent: режим chat', '[OK] voice-agent: режим voice']);
+  });
 });
