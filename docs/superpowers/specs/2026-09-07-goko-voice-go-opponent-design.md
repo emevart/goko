@@ -456,8 +456,9 @@ Node 22, Hono, zod-схемы из `packages/protocol`.
   окружения считается не заданной.
 - LiveKit через `livekit-server-sdk`: комнату `goko-<id>` создаёт сервер
   (`RoomServiceClient.createRoom`, `agents` с `agentName: "goko"` и
-  `metadata: { sessionId }`, `emptyTimeout` 300 с); токен телефона — только
-  `roomJoin` на эту комнату, TTL равен TTL сессии (D-0001).
+  `metadata: { sessionId }`, `emptyTimeout` 300 с, `departureTimeout` 900 с —
+  комната ждёт возврата телефона 15 минут, агенты её не держат); токен
+  телефона — только `roomJoin` на эту комнату, TTL равен TTL сессии (D-0001).
 - Забор: заголовок `X-App-Key` для всех `/api/*`, значение из `.env`; веб
   получает его из своего конфига сборки. Это не аутентификация, а защита от
   случайных прохожих; настоящая авторизация — при интеграции в sdamex.

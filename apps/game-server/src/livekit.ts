@@ -18,6 +18,10 @@ export type MintTokenOptions = {
 
 // Комната без участников закрывается через 5 минут; агент в ней не платит, пока телефон не вошёл.
 export const ROOM_EMPTY_TIMEOUT_SECONDS = 300;
+// Агенты комнату не держат: после ухода телефона (последнего не-агента) комната живёт этот срок,
+// пока он не вернётся. Равен сроку ожидания возврата у воркера (apps/voice-agent/src/departure.ts,
+// RETURN_GRACE_MS) — менять оба значения вместе.
+export const ROOM_DEPARTURE_TIMEOUT_SECONDS = 900;
 // Запрос к LiveKit ограничен: POST /api/sessions не должен висеть на недоступном сервере.
 export const ROOM_SERVICE_TIMEOUT_SECONDS = 10;
 
@@ -46,6 +50,7 @@ export async function createSessionRoom(rooms: RoomCreator, opts: SessionRoomOpt
   await rooms.createRoom({
     name: opts.room,
     emptyTimeout: ROOM_EMPTY_TIMEOUT_SECONDS,
+    departureTimeout: ROOM_DEPARTURE_TIMEOUT_SECONDS,
     agents: [new RoomAgentDispatch({ agentName: opts.agentName, metadata: JSON.stringify({ sessionId: opts.sessionId }) })],
   });
 }

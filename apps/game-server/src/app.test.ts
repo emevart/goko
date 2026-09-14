@@ -32,7 +32,7 @@ afterEach(async () => {
   }
 });
 
-type RoomCall = { name: string; emptyTimeout: number; agents: RoomAgentDispatch[] };
+type RoomCall = { name: string; emptyTimeout: number; departureTimeout: number; agents: RoomAgentDispatch[] };
 
 function fakeRooms(fail?: Error): RoomCreator & { calls: RoomCall[] } {
   const calls: RoomCall[] = [];
@@ -176,6 +176,7 @@ describe('createApp: маршруты брифа', () => {
     expect(rooms.calls).toHaveLength(1);
     expect(rooms.calls[0]?.name).toBe(session.room);
     expect(rooms.calls[0]?.emptyTimeout).toBe(300);
+    expect(rooms.calls[0]?.departureTimeout).toBe(900);
     expect(rooms.calls[0]?.agents).toHaveLength(1);
     expect(rooms.calls[0]?.agents[0]?.agentName).toBe(LK.agentName);
     expect(JSON.parse(rooms.calls[0]?.agents[0]?.metadata ?? '')).toEqual({ sessionId: session.id });

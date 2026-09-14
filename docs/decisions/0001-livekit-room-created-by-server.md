@@ -26,9 +26,10 @@ updated: 2026-09-13
 ## Решение
 
 - `POST /api/sessions`: game-server сам создаёт комнату через `RoomServiceClient.createRoom`
-  с `agents: [{ agentName, metadata: { sessionId } }]` и `emptyTimeout: 300`. Телефон
-  получает токен только с `roomJoin` на `goko-<id>` (плюс publish/subscribe/data), без
-  `roomCreate` и без `roomConfig`.
+  с `agents: [{ agentName, metadata: { sessionId } }]`, `emptyTimeout: 300` и
+  `departureTimeout: 900` — комната ждёт возврата телефона 15 минут, агенты её не держат.
+  Телефон получает токен только с `roomJoin` на `goko-<id>` (плюс publish/subscribe/data),
+  без `roomCreate` и без `roomConfig`.
 - TTL токена равен TTL сессии (`SESSION_TTL_MS`, по умолчанию 2 ч). Сессия продлевается от
   момента создания, поэтому токен никогда не переживает сессию.
 - Webhook `room_started` для сверки комнат отложен.

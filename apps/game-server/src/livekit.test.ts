@@ -77,7 +77,7 @@ describe('mintToken (D-0001, D-0011): roomJoin на комнату сессии 
 });
 
 describe('createSessionRoom (D-0001): комнату и агента создаёт сервер', () => {
-  it('имя комнаты, emptyTimeout 300 и ровно один агент с sessionId в metadata', async () => {
+  it('имя комнаты, emptyTimeout 300, departureTimeout 900 и ровно один агент с sessionId в metadata', async () => {
     const calls: unknown[] = [];
     const rooms = {
       createRoom: async (options: unknown) => {
@@ -88,10 +88,11 @@ describe('createSessionRoom (D-0001): комнату и агента созда�
     await createSessionRoom(rooms, { room: 'goko-s1', agentName: 'goko', sessionId: 's1' });
     expect(ROOM_EMPTY_TIMEOUT_SECONDS).toBe(300);
     expect(calls).toHaveLength(1);
-    const options = calls[0] as { name: string; emptyTimeout: number; agents: RoomAgentDispatch[] };
-    expect(Object.keys(options).sort()).toEqual(['agents', 'emptyTimeout', 'name']);
+    const options = calls[0] as { name: string; emptyTimeout: number; departureTimeout: number; agents: RoomAgentDispatch[] };
+    expect(Object.keys(options).sort()).toEqual(['agents', 'departureTimeout', 'emptyTimeout', 'name']);
     expect(options.name).toBe('goko-s1');
     expect(options.emptyTimeout).toBe(300);
+    expect(options.departureTimeout).toBe(900);
     expect(options.agents).toHaveLength(1);
     expect(options.agents[0]).toBeInstanceOf(RoomAgentDispatch);
     expect(options.agents[0]?.agentName).toBe('goko');
@@ -146,9 +147,10 @@ describe('RoomServiceClient из LIVEKIT_URL', () => {
     const token = (seen[0]?.auth ?? '').replace(/^Bearer /, '');
     const claims = await new TokenVerifier(KEY, SECRET).verify(token);
     expect(claims.video?.roomCreate).toBe(true);
-    const body = JSON.parse(seen[0]?.body ?? '{}') as { name: string; emptyTimeout: number; agents: Array<{ agentName: string; metadata: string }> };
+    const body = JSON.parse(seen[0]?.body ?? '{}') as { name: string; emptyTimeout: number; departureTimeout: number; agents: Array<{ agentName: string; metadata: string }> };
     expect(body.name).toBe('goko-s1');
     expect(body.emptyTimeout).toBe(300);
+    expect(body.departureTimeout).toBe(900);
     expect(body.agents).toEqual([{ agentName: 'goko', metadata: '{"sessionId":"s1"}' }]);
   });
 

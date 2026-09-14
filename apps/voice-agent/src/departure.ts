@@ -2,8 +2,8 @@
 // сессию и ту же комнату с тем же identity (phone-<sid>), а новой диспетчеризации агента нет (D-0001).
 // Поэтому сеанс при уходе не закрываем, а ждём возврата: не вернулся за RETURN_GRACE_MS — onGone
 // (в main.ts — ctx.shutdown), и Realtime не живёт в комнате без человека дольше срока. Пока агент в
-// комнате, она не пуста, и emptyTimeout комнаты в game-server (300 с) не срабатывает; срок не зависит
-// от того, как LiveKit считает агента в departure_timeout.
+// комнате, она не пуста, и emptyTimeout комнаты в game-server (300 с) не срабатывает; срок согласован
+// с departureTimeout комнаты в game-server (900 с).
 
 import { type Clock, realClock } from './clock.ts';
 
