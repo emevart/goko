@@ -160,7 +160,7 @@ describe('createApp: маршруты брифа', () => {
     expect(await health.json()).toEqual({ ok: true, games: 0, sessions: 0 });
   });
 
-  it('создание сессии (D-0001): комнату с агентом создаёт сервер, токен только roomJoin; session.game в потоке', async () => {
+  it('создание сессии (D-0001, D-0011): комнату с агентом создаёт сервер, токен — roomJoin и право на свои атрибуты; session.game в потоке', async () => {
     const { client, app, rooms } = await make({ script: ['E5'] });
     vi.useFakeTimers({ toFake: ['Date'] });
     const { session, livekit } = await client.createSession();
@@ -168,7 +168,7 @@ describe('createApp: маршруты брифа', () => {
     // Часы заморожены и на проверке: иначе токен на час мог бы истечь по настоящим часам машины.
     const claims = await new TokenVerifier(LK.apiKey, LK.apiSecret).verify(livekit.token);
     vi.useRealTimers();
-    expect(claims.video).toEqual({ room: session.room, roomJoin: true, canPublish: true, canSubscribe: true, canPublishData: true });
+    expect(claims.video).toEqual({ room: session.room, roomJoin: true, canPublish: true, canSubscribe: true, canPublishData: true, canUpdateOwnMetadata: true });
     expect(claims.roomConfig).toBeUndefined();
     expect(claims.sub).toBe(`phone-${session.id}`);
     expect((claims.exp ?? 0) - (claims.nbf ?? 0)).toBe(LK.tokenTtlSeconds);

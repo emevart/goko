@@ -6,7 +6,7 @@ const KEY = 'devkey';
 const SECRET = 'secret-of-at-least-32-characters-long';
 const base = { apiKey: KEY, apiSecret: SECRET, room: 'goko-s1', identity: 'phone-s1', ttlSeconds: 7200 };
 
-describe('mintToken (D-0001): только roomJoin на комнату сессии', () => {
+describe('mintToken (D-0001, D-0011): roomJoin на комнату сессии и право на свои атрибуты', () => {
   afterEach(() => {
     vi.useRealTimers();
     vi.unstubAllEnvs();
@@ -16,7 +16,7 @@ describe('mintToken (D-0001): только roomJoin на комнату сесс
     const claims = await new TokenVerifier(KEY, SECRET).verify(await mintToken(base));
     expect(claims.iss).toBe(KEY);
     expect(claims.sub).toBe('phone-s1');
-    expect(claims.video).toEqual({ roomJoin: true, room: 'goko-s1', canPublish: true, canSubscribe: true, canPublishData: true });
+    expect(claims.video).toEqual({ roomJoin: true, room: 'goko-s1', canPublish: true, canSubscribe: true, canPublishData: true, canUpdateOwnMetadata: true });
     expect(claims.roomConfig).toBeUndefined();
   });
 

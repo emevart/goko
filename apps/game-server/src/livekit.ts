@@ -1,6 +1,7 @@
 // LiveKit по D-0001 (раздел 7 спеки): комнату сессии и диспетчеризацию агента создаёт сервер через
-// RoomServiceClient.createRoom, телефон получает токен только с roomJoin на эту комнату, без roomCreate
+// RoomServiceClient.createRoom, телефон получает токен с roomJoin на эту комнату, без roomCreate
 // и без roomConfig. Токен с roomCreate дал бы любому, кто открыл веб, неограниченное число платных агентов.
+// canUpdateOwnMetadata (D-0011) — только свои атрибуты: веб выставляет goko.mode = voice | chat.
 // Ключ и секрет приходят только аргументами. SDK на пустой строке молча берёт LIVEKIT_API_KEY и
 // LIVEKIT_API_SECRET из process.env, поэтому пустые значения отклоняем сами. Тексты ошибок называют
 // только поле, значений не содержат. Это ошибки программиста: текст по-английски.
@@ -32,7 +33,7 @@ export async function mintToken(opts: MintTokenOptions): Promise<string> {
   // 0 и NaN SDK заменил бы своими 6 часами (options.ttl || '6h').
   if (!Number.isInteger(ttl) || ttl <= 0) throw new Error('mintToken: ttlSeconds must be a positive integer');
   const at = new AccessToken(opts.apiKey, opts.apiSecret, { identity: opts.identity, ttl });
-  at.addGrant({ roomJoin: true, room: opts.room, canPublish: true, canSubscribe: true, canPublishData: true });
+  at.addGrant({ roomJoin: true, room: opts.room, canPublish: true, canSubscribe: true, canPublishData: true, canUpdateOwnMetadata: true });
   return at.toJwt();
 }
 
