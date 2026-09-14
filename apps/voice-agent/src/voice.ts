@@ -10,7 +10,7 @@ export type SessionOptions = ConstructorParameters<typeof voice.AgentSession>[0]
 export function parseVoiceMode(v: string | undefined): VoiceMode {
   if (v === undefined || v === '' || v === 'realtime') return 'realtime';
   if (v === 'pipeline') return 'pipeline';
-  throw new Error(`VOICE_MODE: ожидается realtime или pipeline, получено «${v}»`);
+  throw new Error(`VOICE_MODE: expected realtime or pipeline, got "${v}"`); // для разработчика — по-английски, как ошибки ядра
 }
 
 // Параметры VAD — из docs/research/stage0-results.md (стадия 0 подбирала перебивание).
