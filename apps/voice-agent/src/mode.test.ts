@@ -1,6 +1,7 @@
 // mode.test.ts — режим Голос / Чат (D-0011) на замоканном сеансе
 import { describe, expect, it } from 'vitest';
-import { MODE_ATTRIBUTE, applyMode, followMode, modeOf } from './mode.ts';
+import type { Clock } from './clock.ts';
+import { MODE_ATTRIBUTE, MODE_WAIT_MS, type ParticipantLike, applyMode, followMode, modeOf, waitForMode } from './mode.ts';
 
 function fakeSession() {
   const calls: string[] = [];
@@ -63,5 +64,88 @@ describe('followMode', () => {
     f.onAttributes({ identity: 'phone-s1', attributes: { 'goko.mode': 'chat' } });
     f.onAttributes({ identity: 'phone-s1', attributes: { 'goko.mode': 'voice' } });
     expect(logs).toEqual(['[OK] voice-agent: режим voice', '[OK] voice-agent: режим chat', '[OK] voice-agent: режим voice']);
+  });
+});
+
+describe('followMode.onRejoin', () => {
+  it('вернувшийся без атрибута не сбрасывает режим в voice: атрибут придёт следом', () => {
+    const s = fakeSession();
+    const f = followMode({ participant: { identity: 'phone-s1', attributes: { 'goko.mode': 'chat' } }, session: s });
+    s.calls.length = 0;
+    f.onRejoin({ identity: 'phone-s1', attributes: {} });
+    expect(f.mode).toBe('chat');
+    expect(s.calls).toEqual([]);
+    f.onRejoin({ identity: 'someone-else', attributes: { 'goko.mode': 'voice' } });
+    expect(s.calls).toEqual([]);
+    f.onRejoin({ identity: 'phone-s1', attributes: { 'goko.mode': 'voice' } });
+    expect(f.mode).toBe('voice');
+    expect(s.calls).toEqual(['out:true', 'in:true']);
+  });
+});
+
+function fakeAttributes() {
+  let listeners: ((p: ParticipantLike) => void)[] = [];
+  let timers: { ms: number; fn: () => void; cancelled: boolean }[] = [];
+  const clock: Clock = {
+    after(ms, fn) {
+      const t = { ms, fn, cancelled: false };
+      timers.push(t);
+      return () => {
+        t.cancelled = true;
+      };
+    },
+  };
+  return {
+    clock,
+    subscribe(listener: (p: ParticipantLike) => void) {
+      listeners.push(listener);
+      return () => {
+        listeners = listeners.filter((l) => l !== listener);
+      };
+    },
+    emit: (p: ParticipantLike) => {
+      for (const l of [...listeners]) l(p);
+    },
+    listeners: () => listeners.length,
+    live: () => timers.filter((t) => !t.cancelled),
+    fire() {
+      const live = timers.filter((t) => !t.cancelled);
+      timers = [];
+      for (const t of live) t.fn();
+    },
+  };
+}
+
+describe('waitForMode', () => {
+  it('атрибут уже есть — сразу true, без подписки и таймера', async () => {
+    const r = fakeAttributes();
+    const got = await waitForMode({ participant: { identity: 'phone-s1', attributes: { 'goko.mode': 'voice' } }, subscribe: r.subscribe, clock: r.clock });
+    expect(got).toBe(true);
+    expect(r.listeners()).toBe(0);
+    expect(r.live()).toEqual([]);
+  });
+
+  it('атрибут пришёл от этого участника — true, подписка и таймер сняты', async () => {
+    const r = fakeAttributes();
+    const p = { identity: 'phone-s1', attributes: {} };
+    const wait = waitForMode({ participant: p, subscribe: r.subscribe, clock: r.clock });
+    expect(r.live().map((t) => t.ms)).toEqual([MODE_WAIT_MS]);
+    r.emit({ identity: 'someone-else', attributes: { 'goko.mode': 'chat' } });
+    r.emit({ identity: 'phone-s1', attributes: { other: 'x' } });
+    expect(r.listeners()).toBe(1);
+    r.emit({ identity: 'phone-s1', attributes: { 'goko.mode': 'chat' } });
+    expect(await wait).toBe(true);
+    expect(r.listeners()).toBe(0);
+    expect(r.live()).toEqual([]);
+  });
+
+  it('атрибута нет за срок — false, подписка снята; срок по умолчанию 2 с', async () => {
+    expect(MODE_WAIT_MS).toBe(2_000);
+    const r = fakeAttributes();
+    const wait = waitForMode({ participant: { identity: 'phone-s1', attributes: {} }, subscribe: r.subscribe, clock: r.clock, timeoutMs: 700 });
+    expect(r.live().map((t) => t.ms)).toEqual([700]);
+    r.fire();
+    expect(await wait).toBe(false);
+    expect(r.listeners()).toBe(0);
   });
 });
