@@ -243,12 +243,13 @@ export class GameService {
   }
 
   // Шов для тестов на утечки: размеры внутренних таблиц, которые публичным API не видны.
-  internalSizes(): { sessionsByGame: number; currentGames: number; waiters: number; gaveUp: number; taskAborts: number } {
+  internalSizes(): { sessionsByGame: number; currentGames: number; clientGames: number; waiters: number; gaveUp: number; taskAborts: number } {
     let waiters = 0;
     for (const list of this.waiters.values()) waiters += list.length;
     return {
       sessionsByGame: this.sessionsByGame.size,
       currentGames: this.currentGameBySession.size,
+      clientGames: this.clientByGame.size,
       waiters,
       gaveUp: this.gaveUp.size,
       taskAborts: this.taskAborts.size,

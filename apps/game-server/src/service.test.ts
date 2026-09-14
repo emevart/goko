@@ -949,7 +949,7 @@ describe('GameService: фоновые задачи, дедлайны и мьют
     const { service, bus } = await make(engine, { store, replyTimeoutMs: undefined });
     const seen = record(bus, 'session:s1');
     await expect(service.create({ ...ENGINE_BLACK, ...S9, waitForReply: true }, { sessionId: 's1' })).rejects.toThrow('disk full');
-    expect(service.internalSizes()).toEqual({ sessionsByGame: 0, currentGames: 0, waiters: 0, gaveUp: 0, taskAborts: 0 });
+    expect(service.internalSizes()).toEqual({ sessionsByGame: 0, currentGames: 0, clientGames: 0, waiters: 0, gaveUp: 0, taskAborts: 0 });
     expect(seen).toEqual([]);
     expect(engine.calls.genmove).toBe(0);
     // Следующая партия той же сессии: объявляется, движок отвечает, ожидающий получает ход.
@@ -959,7 +959,7 @@ describe('GameService: фоновые задачи, дедлайны и мьют
     // Задача движка к этому моменту может ещё не выйти: её сигнал в таблице не проверяется.
     expect(service.internalSizes()).toMatchObject({ sessionsByGame: 1, currentGames: 1, waiters: 0, gaveUp: 0 });
     await closeWithin(service);
-    expect(service.internalSizes()).toEqual({ sessionsByGame: 1, currentGames: 1, waiters: 0, gaveUp: 0, taskAborts: 0 });
+    expect(service.internalSizes()).toEqual({ sessionsByGame: 1, currentGames: 1, clientGames: 0, waiters: 0, gaveUp: 0, taskAborts: 0 });
     expect(vi.getTimerCount()).toBe(0);
   });
 
@@ -971,7 +971,7 @@ describe('GameService: фоновые задачи, дедлайны и мьют
     });
     const { service } = await make(createFakeEngine(), { store });
     await expect(service.create({ ...HUMAN_BLACK, ...S9, waitForReply: false })).rejects.toThrow('disk full');
-    expect(service.internalSizes()).toEqual({ sessionsByGame: 0, currentGames: 0, waiters: 0, gaveUp: 0, taskAborts: 0 });
+    expect(service.internalSizes()).toEqual({ sessionsByGame: 0, currentGames: 0, clientGames: 0, waiters: 0, gaveUp: 0, taskAborts: 0 });
     expect(service.list()).toEqual([]);
   });
 
@@ -3387,6 +3387,110 @@ describe('GameService: лимит партий и старые снапшоты 
     // a не в счёте: в новой сессии место есть.
     await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, { sessionId: 's2' });
     expect(service.list()).toHaveLength(3);
+  });
+
+  it('init снимает отметки завершённой и удалённой партии; отметка идущей остаётся и действует', async () => {
+    const store = memoryStore([seedGame('playing1', HOUR), seedGame('finished1', HOUR, { finished: true })]);
+    const marks = memoryMarks();
+    for (const id of ['finished1', 'gone1', 'playing1']) marks.ids.add(id);
+    const { service } = await make(createFakeEngine(), { store, marks, now: () => NOW, maxActiveGames: 1 });
+    await untilTick(() => marks.ids.size === 1);
+    expect([...marks.ids]).toEqual(['playing1']);
+    // playing1 брошена: лимит 1 свободен.
+    await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false });
+  });
+
+  it('записи отметок идут по очереди: снятие ждёт отметку; close ждёт последнюю запись', async () => {
+    const base = memoryMarks();
+    const calls: string[] = [];
+    let release: (() => void) | undefined;
+    const marks = {
+      ...base,
+      markAbandoned: async (id: string) => {
+        calls.push(`mark ${id}`);
+        await new Promise<void>((r) => (release = r));
+        await base.markAbandoned(id);
+      },
+      clearAbandoned: async (id: string) => {
+        calls.push(`clear ${id}`);
+        await base.clearAbandoned(id);
+      },
+    };
+    const { service } = await make(createFakeEngine(), { marks });
+    const a = (await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, { sessionId: 's1' })).state.id;
+    await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, { sessionId: 's1' });
+    await untilTick(() => release !== undefined);
+    service.resume(a);
+    let closed = false;
+    const closing = service.close().then(() => {
+      closed = true;
+    });
+    await tick(20);
+    expect(calls).toEqual([`mark ${a}`]);
+    expect(closed).toBe(false);
+    release?.();
+    await closing;
+    expect(calls).toEqual([`mark ${a}`, `clear ${a}`]);
+    expect(base.ids.size).toBe(0);
+  });
+
+  it('действие человека в неброшенной партии отметок на диске не трогает; действие от имени движка брошенную партию не возвращает', async () => {
+    const base = memoryMarks();
+    const cleared: string[] = [];
+    const marks = {
+      ...base,
+      clearAbandoned: async (id: string) => {
+        cleared.push(id);
+        await base.clearAbandoned(id);
+      },
+    };
+    const { service } = await make(createFakeEngine(), { marks, maxActiveGames: 3 });
+    const create = (sessionId: string) => service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, { sessionId });
+    const a = (await create('s1')).state.id;
+    const b = (await create('s2')).state.id;
+    await service.play(b, { coord: 'D4', waitForReply: false, via: 'api' });
+    service.resume(b);
+    await create('s1');
+    // a брошена; undo от имени движка её не возвращает: в счёте две текущие партии, место для третьей есть.
+    await expect(service.undo(a, { via: 'api' }, 'engine')).rejects.toBeInstanceOf(ApiError);
+    await create('s3');
+    await service.close();
+    expect(cleared).toEqual([]);
+    expect([...base.ids]).toEqual([a]);
+  });
+
+  it('счёт клиентов не держит лишних записей: отказавший create и завершённая партия уходят; пишущийся create без клиента в счёт клиента не идёт', async () => {
+    const real = memoryStore();
+    let release: (() => void) | undefined;
+    let hang = 1;
+    let fail = 0;
+    // Первая запись висит до release и отказывает; следующая запись отказывает, когда fail > 0.
+    const store = {
+      load: () => real.load(),
+      save: async (state: GameState) => {
+        if (hang-- > 0) {
+          await new Promise<void>((r) => (release = r));
+          throw new Error('disk full');
+        }
+        if (fail-- > 0) throw new Error('disk full');
+        return real.save(state);
+      },
+    } as unknown as GameStore;
+    const { service } = await make(createFakeEngine(), { store, maxGamesPerClient: 1 });
+    const pending = service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false });
+    const pendingFails = expect(pending).rejects.toThrow('disk full');
+    await untilTick(() => release !== undefined);
+    const mine = await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, { clientKey: 'c1' });
+    release?.();
+    await pendingFails;
+    expect(service.internalSizes()).toMatchObject({ clientGames: 1 });
+    fail = 1;
+    await expect(service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, { clientKey: 'c2' })).rejects.toThrow('disk full');
+    expect(service.internalSizes()).toMatchObject({ clientGames: 1 });
+    await service.resign(mine.state.id, { color: 'B', via: 'api' });
+    // Проверка лимита c3 вычищает запись завершённой партии c1.
+    await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, { clientKey: 'c3' });
+    expect(service.internalSizes()).toMatchObject({ clientGames: 1 });
   });
 
   it('init не ставит фоновую задачу устаревшей партии, свежей — ставит; порог берётся из staleGameMs', async () => {

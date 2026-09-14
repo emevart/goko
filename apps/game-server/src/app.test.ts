@@ -62,7 +62,8 @@ type MakeOptions = {
   rateLimits?: AppDeps['rateLimits'];
   trustProxy?: boolean;
   maxGamesPerClient?: number;
-  sessionlessGames?: boolean;
+  // 'default' — не передавать флаг в createApp: проверка умолчания.
+  sessionlessGames?: boolean | 'default';
 };
 
 async function make(opts: MakeOptions = {}) {
@@ -93,7 +94,7 @@ async function make(opts: MakeOptions = {}) {
     engineKey: opts.engineKey,
     rateLimits: opts.rateLimits,
     trustProxy: opts.trustProxy,
-    sessionlessGames: opts.sessionlessGames ?? true,
+    sessionlessGames: opts.sessionlessGames === 'default' ? undefined : (opts.sessionlessGames ?? true),
     log: (line) => logs.push(line),
   });
   // Клиент протокола поверх app.request: без сети.
@@ -1373,5 +1374,21 @@ describe('createApp: партии только в сессии и не боль�
     expect((await post(app, '/api/games', '192.0.2.42', HUMAN_ONLY)).status).toBe(200);
     expect((await post(app, '/api/games', '2001:db8:5:6::1', HUMAN_ONLY)).status).toBe(200);
     expect((await post(app, '/api/games', '2001:db8:5:6::2', HUMAN_ONLY)).status).toBe(429);
+  });
+
+  it('умолчание createApp — партии без сессии выключены', async () => {
+    const { app } = await make({ sessionlessGames: 'default' });
+    const res = await post(app, '/api/games', '192.0.2.60', HUMAN_ONLY);
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as ErrorJson).error.details).toEqual({ reason: 'sessionless_disabled' });
+  });
+
+  it('сессия без записанного владельца (создана до рестарта) — партии в счёт адреса запроса', async () => {
+    const { app, sessions } = await make({ maxGamesPerClient: 1, ttlMs: 60 * MIN });
+    const a = sessions.create().id;
+    const b = sessions.create().id;
+    await gameIn(app, a, '192.0.2.50');
+    expect((await post(app, `/api/sessions/${b}/games`, '192.0.2.50', HUMAN_ONLY)).status).toBe(429);
+    await gameIn(app, b, '192.0.2.51');
   });
 });
