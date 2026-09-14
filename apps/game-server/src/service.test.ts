@@ -949,7 +949,7 @@ describe('GameService: фоновые задачи, дедлайны и мьют
     const { service, bus } = await make(engine, { store, replyTimeoutMs: undefined });
     const seen = record(bus, 'session:s1');
     await expect(service.create({ ...ENGINE_BLACK, ...S9, waitForReply: true }, { sessionId: 's1' })).rejects.toThrow('disk full');
-    expect(service.internalSizes()).toEqual({ sessionsByGame: 0, currentGames: 0, clientGames: 0, waiters: 0, gaveUp: 0, taskAborts: 0 });
+    expect(service.internalSizes()).toEqual({ sessionsByGame: 0, currentGames: 0, clientGames: 0, waiters: 0, gaveUp: 0, taskAborts: 0, reopening: 0 });
     expect(seen).toEqual([]);
     expect(engine.calls.genmove).toBe(0);
     // Следующая партия той же сессии: объявляется, движок отвечает, ожидающий получает ход.
@@ -959,7 +959,7 @@ describe('GameService: фоновые задачи, дедлайны и мьют
     // Задача движка к этому моменту может ещё не выйти: её сигнал в таблице не проверяется.
     expect(service.internalSizes()).toMatchObject({ sessionsByGame: 1, currentGames: 1, waiters: 0, gaveUp: 0 });
     await closeWithin(service);
-    expect(service.internalSizes()).toEqual({ sessionsByGame: 1, currentGames: 1, clientGames: 0, waiters: 0, gaveUp: 0, taskAborts: 0 });
+    expect(service.internalSizes()).toEqual({ sessionsByGame: 1, currentGames: 1, clientGames: 0, waiters: 0, gaveUp: 0, taskAborts: 0, reopening: 0 });
     expect(vi.getTimerCount()).toBe(0);
   });
 
@@ -971,7 +971,7 @@ describe('GameService: фоновые задачи, дедлайны и мьют
     });
     const { service } = await make(createFakeEngine(), { store });
     await expect(service.create({ ...HUMAN_BLACK, ...S9, waitForReply: false })).rejects.toThrow('disk full');
-    expect(service.internalSizes()).toEqual({ sessionsByGame: 0, currentGames: 0, clientGames: 0, waiters: 0, gaveUp: 0, taskAborts: 0 });
+    expect(service.internalSizes()).toEqual({ sessionsByGame: 0, currentGames: 0, clientGames: 0, waiters: 0, gaveUp: 0, taskAborts: 0, reopening: 0 });
     expect(service.list()).toEqual([]);
   });
 
@@ -3798,6 +3798,124 @@ describe('GameService: лимит партий и старые снапшоты 
     const results = await Promise.allSettled([service.undo(a, { via: 'api' }, 'human', { clientKey: 'A' }), service.undo(a, { via: 'api' }, 'human', { clientKey: 'A' })]);
     expect(results.map((r) => r.status)).toEqual(['fulfilled', 'fulfilled']);
     expect(service.get(a)).toMatchObject({ status: 'playing', moves: [] });
+  });
+
+  // Снапшоты в памяти с воротами: запись состояния, для которого hold вернул true, ждёт отпускания. gates — по порядку
+  // задержанных записей; hold меняется по ходу теста, чтобы держать только нужную запись.
+  const gatedSaves = () => {
+    const real = memoryStore();
+    const gates: Array<() => void> = [];
+    const control: { hold?: (state: GameState) => boolean } = {};
+    const store: SnapshotStore = {
+      ...real,
+      save: async (state: GameState) => {
+        if (control.hold?.(state)) await new Promise<void>((r) => gates.push(r));
+        return real.save(state);
+      },
+    };
+    return { store, gates, control };
+  };
+  const A = { clientKey: 'A' };
+  const createA = (service: GameService) => service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, A);
+  const REFUSED_A = { code: 'too_many_games', details: { max: 1, scope: 'client' } };
+
+  it('удержание открываемой откатом партии снимает только сам откат: rank в очереди перед undo партию из счёта не выводит, и в окно записи undo create владельца и undo другой партии — 429', async () => {
+    const { store, gates, control } = gatedSaves();
+    const { service } = await make(createFakeEngine(), { store, maxGamesPerClient: 1 });
+    const a = (await createA(service)).state.id;
+    await finishByPasses(service, a);
+    const b = (await createA(service)).state.id;
+    await finishByPasses(service, b);
+    control.hold = (state) => state.id === a;
+    // rank держит мьютекс a своей записью; undo прошёл проверку при запросе и ждёт очереди.
+    const ranking = service.setRank(a, { color: 'B', rank: '5k' });
+    const undoing = service.undo(a, { via: 'api' }, 'human', A);
+    await untilTick(() => gates.length === 1);
+    gates[0]?.();
+    await ranking;
+    // Запись самого undo: в памяти a ещё завершена, но в счёте с момента проверки.
+    await untilTick(() => gates.length === 2);
+    await expect(createA(service)).rejects.toMatchObject(REFUSED_A);
+    await expect(service.undo(b, { via: 'api' }, 'human', A)).rejects.toMatchObject(REFUSED_A);
+    gates[1]?.();
+    await undoing;
+    expect(service.get(a).status).toBe('playing');
+    expect(service.get(b).status).toBe('finished');
+    expect(gates).toHaveLength(2);
+    // Удержание снято вместе с операцией: после сдачи a место свободно.
+    control.hold = undefined;
+    await service.resign(a, { color: 'B', via: 'api' });
+    await createA(service);
+    expect(service.internalSizes().reopening).toBe(0);
+  });
+
+  it('неудачный undo (revision_conflict) в очереди перед удачным чужое удержание не снимает: в окно записи удачного undo create владельца — 429', async () => {
+    const { store, gates, control } = gatedSaves();
+    const { service } = await make(createFakeEngine(), { store, maxGamesPerClient: 1 });
+    const a = (await createA(service)).state.id;
+    await finishByPasses(service, a);
+    control.hold = (state) => state.id === a;
+    const bad = service.undo(a, { via: 'api', expectedRevision: service.get(a).revision + 1 }, 'human', A);
+    const good = service.undo(a, { via: 'api' }, 'human', A);
+    await expect(bad).rejects.toMatchObject({ code: 'revision_conflict' });
+    await untilTick(() => gates.length === 1);
+    await expect(createA(service)).rejects.toMatchObject(REFUSED_A);
+    gates[0]?.();
+    await good;
+    expect(service.get(a).status).toBe('playing');
+    expect(gates).toHaveLength(1);
+    expect(service.internalSizes().reopening).toBe(0);
+  });
+
+  it('undo, пришедший во время записи итога автосчёта: откат проверяется под мьютексом по свежему состоянию — при полном счёте владельца 429, партия остаётся завершённой', async () => {
+    const { store, gates, control } = gatedSaves();
+    const { service } = await make(createFakeEngine(), { store, maxGamesPerClient: 1 });
+    const a = (await createA(service)).state.id;
+    await service.play(a, { coord: 'D4', waitForReply: false, via: 'api' });
+    await service.pass(a, { waitForReply: false, via: 'api' });
+    control.hold = (state) => state.id === a && state.status === 'finished';
+    await service.pass(a, { waitForReply: false, via: 'api' });
+    await untilTick(() => gates.length === 1);
+    // Итог пишется: в памяти a ещё идёт и в счёте, проверять при запросе нечего. rank и undo встают в очередь за счётом.
+    control.hold = (state) => state.id === a;
+    const ranking = service.setRank(a, { color: 'B', rank: '5k' });
+    const undoing = service.undo(a, { via: 'api' }, 'human', A);
+    gates[0]?.();
+    await untilTick(() => gates.length === 2);
+    // a завершена счётом и вне счёта, rank пишет её снапшот: create владельца занимает его единственное место.
+    const fresh = (await createA(service)).state.id;
+    control.hold = undefined;
+    gates[1]?.();
+    await ranking;
+    await expect(undoing).rejects.toMatchObject({ ...REFUSED_A, status: 429 });
+    expect(service.get(a)).toMatchObject({ status: 'finished', result: { reason: 'score' }, seats: { B: { rank: '5k' } } });
+    expect(gates).toHaveLength(2);
+    await service.resign(fresh, { color: 'B', via: 'api' });
+    expect((await service.undo(a, { via: 'api' }, 'human', A)).state.status).toBe('playing');
+    expect(service.internalSizes().reopening).toBe(0);
+  });
+
+  it('undo во время записи итога автосчёта в пределах лимита: открываемая партия в счёте с проверки под мьютексом до записи — параллельный create владельца отклонён', async () => {
+    const { store, gates, control } = gatedSaves();
+    const { service } = await make(createFakeEngine(), { store, maxGamesPerClient: 1 });
+    const a = (await createA(service)).state.id;
+    await service.play(a, { coord: 'D4', waitForReply: false, via: 'api' });
+    await service.pass(a, { waitForReply: false, via: 'api' });
+    control.hold = (state) => state.id === a && state.status === 'finished';
+    await service.pass(a, { waitForReply: false, via: 'api' });
+    await untilTick(() => gates.length === 1);
+    const undoing = service.undo(a, { via: 'api' }, 'human', A);
+    control.hold = (state) => state.id === a;
+    gates[0]?.();
+    // Запись undo: в памяти a завершена счётом, но откат уже прошёл проверку под мьютексом и держит её в счёте.
+    await untilTick(() => gates.length === 2);
+    await expect(createA(service)).rejects.toMatchObject(REFUSED_A);
+    control.hold = undefined;
+    gates[1]?.();
+    await undoing;
+    expect(service.get(a)).toMatchObject({ status: 'playing', moves: [{ coord: 'D4' }] });
+    await expect(createA(service)).rejects.toMatchObject(REFUSED_A);
+    expect(service.internalSizes().reopening).toBe(0);
   });
 
   it('close дожидается и записи отметки, поставленной во время close', async () => {

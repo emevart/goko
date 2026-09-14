@@ -126,6 +126,10 @@ function reopensOnUndo(state: GameState): boolean {
   return state.status === 'finished' && state.result?.reason !== 'resign';
 }
 
+// Итог возврата к партии вне счёта (D-0012): отказ сверх лимита, либо снятие удержания у отката, который
+// держит открываемую партию в счёте до конца операции; у обычного возврата ни того, ни другого.
+type Reactivation = { refused?: ApiError; release?: () => void };
+
 // Партии нужна фоновая задача: автосчёт после двух пасов или ход движка (то же условие, что в kick).
 function needsTask(state: GameState): boolean {
   return state.status === 'playing' && (state.consecutivePasses >= 2 || state.pendingEngineMove);
@@ -162,8 +166,10 @@ export class GameService {
   // Время последнего возврата к партии вне счёта, прошедшего лимиты: для порога устаревания это активность.
   // Только память; записей не больше, чем партий в памяти.
   private readonly returnedAt = new Map<string, number>();
-  // Завершённые партии, которые откат (undo, correct) прошёл лимиты и сейчас снимает с итога: в счёте до конца операции.
-  private readonly reopening = new Set<string>();
+  // Завершённые партии, которые откат (undo, correct) прошёл лимиты и сейчас снимает с итога: в счёте до конца
+  // операции. Число удержаний, а не множество: снимает только сама операция, поставившая удержание, поэтому
+  // другая операция на той же партии (rank, неудачный undo), кончившаяся раньше, чужое удержание не трогает.
+  private readonly reopening = new Map<string, number>();
   private marksWrite: Promise<void> = Promise.resolve();
   private closed = false;
 
@@ -237,33 +243,45 @@ export class GameService {
   // Партия вне счёта (брошенная сменой или устаревшая) сверх лимита (D-0012) остаётся вне счёта: поток открыт,
   // но задача не ставится.
   resume(id: string): void {
-    if (this.reactivate(id)) return;
+    if (this.reactivate(id).refused) return;
     if (!this.gaveUp.delete(id)) return;
     const state = this.games.get(id);
     if (state) this.kick(state);
   }
 
-  // Мутирующее действие человека: отметка исчерпанной серии снимается до операции, а задача
-  // ставится после неё. Удачный коммит поставит задачу сам и уже по новому состоянию: после сдачи
+  // Мутирующее действие человека под мьютексом партии: отметка исчерпанной серии снимается до операции, а
+  // задача ставится после неё. Удачный коммит поставит задачу сам и уже по новому состоянию: после сдачи
   // движок не зовётся. Отклонённая операция (not_your_turn, nothing_to_undo, отказ записи) задачу
   // ставит здесь, и серия идёт заново. resume (открытие потока) ставит задачу сразу: операции нет.
   // reopen передаёт откат (undo, correct): партия, с которой он снимет итог, проверяется как возврат (D-0012).
   private async humanAction<T>(id: string, human: boolean, op: () => Promise<T>, reopen?: { clientKey?: string }): Promise<T> {
     // Возврат к партии вне счёта сверх лимита — отказ до операции: партия не меняется и остаётся вне счёта.
-    const refused = human ? this.reactivate(id, reopen) : undefined;
+    const { refused, release }: Reactivation = human ? this.reactivate(id, reopen) : {};
     if (refused) throw refused;
     const resumed = human && this.gaveUp.delete(id);
+    // Удержание открываемой откатом партии в счёте: снимает только эта операция, когда её запись кончилась.
+    let held = release;
     try {
-      return await op();
+      return await this.locked(id, () => {
+        // Партия завершилась счётом, пока откат ждал очереди (автосчёт писал итог): при запросе проверять было
+        // нечего. Откат проходит лимиты здесь, по состоянию под мьютексом, и держит партию в счёте до записи.
+        const state = this.games.get(id);
+        if (human && reopen !== undefined && held === undefined && state !== undefined && reopensOnUndo(state)) {
+          const late = this.reactivate(id, reopen);
+          if (late.refused) throw late.refused;
+          held = late.release;
+        }
+        return op();
+      });
     } finally {
-      this.reopening.delete(id);
+      held?.();
       const state = resumed ? this.games.get(id) : undefined;
       if (state) this.kick(state);
     }
   }
 
   // Шов для тестов на утечки: размеры внутренних таблиц, которые публичным API не видны.
-  internalSizes(): { sessionsByGame: number; currentGames: number; clientGames: number; waiters: number; gaveUp: number; taskAborts: number } {
+  internalSizes(): { sessionsByGame: number; currentGames: number; clientGames: number; waiters: number; gaveUp: number; taskAborts: number; reopening: number } {
     let waiters = 0;
     for (const list of this.waiters.values()) waiters += list.length;
     return {
@@ -273,6 +291,7 @@ export class GameService {
       waiters,
       gaveUp: this.gaveUp.size,
       taskAborts: this.taskAborts.size,
+      reopening: this.reopening.size,
     };
   }
 
@@ -328,7 +347,7 @@ export class GameService {
 
   async play(id: string, req: PlayInput, by: By = 'human'): Promise<PlayResponse> {
     // На ходе движка ход человека отклоняется (not_your_turn), но серию всё равно перезапускает.
-    const { state, move, waiter } = await this.humanAction(id, by === 'human', () => this.locked(id, async () => {
+    const { state, move, waiter } = await this.humanAction(id, by === 'human', async () => {
       const prev = this.get(id);
       this.checkRevision(prev, req.expectedRevision);
       const color = req.color ?? prev.toPlay;
@@ -337,7 +356,7 @@ export class GameService {
       const waiter = req.waitForReply && next.state.pendingEngineMove ? this.registerWaiter(id, next.state.revision) : null;
       await this.commitOrReleaseWaiter(next.state, next.move.coord === 'pass' ? 'pass' : 'play', by, req.via);
       return { ...next, waiter };
-    }));
+    });
     return this.withReply(id, state, move, waiter);
   }
 
@@ -346,7 +365,7 @@ export class GameService {
   }
 
   async resign(id: string, req: ResignInput, by: By = 'human'): Promise<StateResponse> {
-    return this.humanAction(id, by === 'human', () => this.locked(id, async () => {
+    return this.humanAction(id, by === 'human', async () => {
       const prev = this.get(id);
       // Сдаться за место движка может только сам движок (раздел 5 спеки). Отказ связан с местом, а не
       // с очередью хода: bad_request с причиной not_your_seat, а не not_your_turn.
@@ -357,23 +376,23 @@ export class GameService {
       const next = resignGame(prev, req.color);
       await this.commit(next, 'resign', by, req.via);
       return { state: next };
-    }));
+    });
   }
 
   // clientKey — адрес запроса: в его счёт идёт партия без владельца, которую откат снимает с итога (D-0012).
   async undo(id: string, req: UndoInput, by: By = 'human', opts: { clientKey?: string } = {}): Promise<UndoResponse> {
-    return this.humanAction(id, by === 'human', () => this.locked(id, async () => {
+    return this.humanAction(id, by === 'human', async () => {
       const prev = this.get(id);
       this.checkRevision(prev, req.expectedRevision);
       const rolled = undoGame(prev);
       await this.commit(rolled.state, 'undo', by, req.via);
       return { state: this.get(id), removed: rolled.removed };
-    }), opts);
+    }, opts);
   }
 
   // Атомарно: откат пары, новый ход человека, новый ответ движка. Одно событие state.updated cause 'correct'.
   async correct(id: string, req: CorrectInput, by: By = 'human', opts: { clientKey?: string } = {}): Promise<PlayResponse> {
-    const { state, move, waiter } = await this.humanAction(id, by === 'human', () => this.locked(id, async () => {
+    const { state, move, waiter } = await this.humanAction(id, by === 'human', async () => {
       const rolled = undoGame(this.get(id));
       const color = rolled.state.toPlay;
       this.checkSeat(rolled.state, color, by);
@@ -381,16 +400,16 @@ export class GameService {
       const waiter = req.waitForReply && next.state.pendingEngineMove ? this.registerWaiter(id, next.state.revision) : null;
       await this.commitOrReleaseWaiter(next.state, 'correct', by, req.via);
       return { ...next, waiter };
-    }), opts);
+    }, opts);
     return this.withReply(id, state, move, waiter);
   }
 
   async setRank(id: string, req: SetRankInput): Promise<StateResponse> {
-    return this.humanAction(id, true, () => this.locked(id, async () => {
+    return this.humanAction(id, true, async () => {
       const next = setRankGame(this.get(id), req.color, req.rank);
       await this.commit(next, 'rank', 'human');
       return { state: next };
-    }));
+    });
   }
 
   async analyze(id: string, req: AnalyzeInput): Promise<Analysis> {
@@ -568,23 +587,36 @@ export class GameService {
   // записи клиента (создана до рестарта) проходит только общий лимит. Партия в счёте проверку не проходит.
   // Откат (reopen: undo, correct) партии, завершённой не сдачей, — тоже возврат: он снимает итог. Партия без
   // владельца идёт в счёт адреса запроса, и адрес записывается владельцем.
-  private reactivate(id: string, reopen?: { clientKey?: string }): ApiError | undefined {
+  private reactivate(id: string, reopen?: { clientKey?: string }): Reactivation {
     const state = this.games.get(id);
     const now = (this.deps.now?.() ?? new Date()).getTime();
-    if (state === undefined) return undefined;
+    if (state === undefined) return {};
     const reopening = reopen !== undefined && reopensOnUndo(state);
-    if (!reopening && (state.status === 'finished' || !this.isStale(state, now))) return undefined;
+    if (!reopening && (state.status === 'finished' || !this.isStale(state, now))) return {};
     const clientKey = this.clientByGame.get(id) ?? reopen?.clientKey;
     // Сама партия себе не мешает: второй одновременный откат той же партии уже видит её в счёте.
     const refused = this.activeLimitError(id) ?? (clientKey === undefined ? undefined : this.clientLimitError(clientKey, id));
-    if (refused) return refused;
+    if (refused) return { refused };
     if (clientKey !== undefined) this.clientByGame.set(id, clientKey);
-    // В счёте сразу, до хода: одновременные возвраты видят друг друга. Открываемая откатом до коммита ещё
-    // завершена, поэтому до конца операции её держит reopening.
-    if (reopening) this.reopening.add(id);
     this.returnedAt.set(id, now);
     if (this.abandoned.delete(id)) this.persistMark(id, false);
-    return undefined;
+    // В счёте сразу, до хода: одновременные возвраты видят друг друга. Открываемая откатом до коммита ещё
+    // завершена, поэтому до конца операции её держит удержание, и снимает его сама операция.
+    return reopening ? { release: this.holdReopening(id) } : {};
+  }
+
+  // Удержание завершённой партии в счёте на время отката; возвращает снятие, повтор снятия ничего не делает.
+  // Удержания считаются: два отката одной партии, или откат и его неудачный близнец, держат её по отдельности.
+  private holdReopening(id: string): () => void {
+    this.reopening.set(id, (this.reopening.get(id) ?? 0) + 1);
+    let held = true;
+    return () => {
+      if (!held) return;
+      held = false;
+      const left = (this.reopening.get(id) ?? 1) - 1;
+      if (left > 0) this.reopening.set(id, left);
+      else this.reopening.delete(id);
+    };
   }
 
   // Отказ записи — строка [!], память уже верна. После рестарта незаписанная отметка значит, что партия
