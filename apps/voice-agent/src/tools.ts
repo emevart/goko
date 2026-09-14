@@ -333,6 +333,8 @@ export function createToolFns(deps: ToolDeps) {
           opts,
         );
         if (state.gameGeneration !== generation && state.gameId !== res.state.id) return staleGame();
+        const observed = state.observedRevision;
+        if (observed?.gameId === res.state.id && observed.revision > res.state.revision) return staleGame();
         const g = note(res.state);
         state.gameId = g.id;
         state.humanColor = human;

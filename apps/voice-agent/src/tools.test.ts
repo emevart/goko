@@ -138,6 +138,23 @@ describe('start_game', () => {
     expect(state.awaitingReply).toBe(true);
     expect(state.toolGames.has('voice-game')).toBe(true);
   });
+  it('поздний start_game rev1 не стирает ожидание tap rev2 той же созданной партии', async () => {
+    const { fns, state, client } = setup();
+    let resolve!: (value: Awaited<ReturnType<typeof client.newGame>>) => void;
+    client.newGame = () => new Promise((r) => { resolve = r; });
+    const pending = fns.startGame({ my_color: 'white' });
+    const seats = { B: { controller: 'engine' as const, rank: '10k' as const }, W: { controller: 'human' as const } };
+    const engineMove = { n: 1, color: 'B' as const, coord: 'K10', captured: 0, at: 't' };
+    const tapMove = { n: 2, color: 'W' as const, coord: 'D4', captured: 0, at: 't' };
+    handleEvent({ type: 'session.game', gameId: 'g1' }, state);
+    handleEvent({ type: 'state.updated', cause: 'new', by: 'system', via: 'voice', state: fakeGame({ id: 'g1', seats, revision: 0, pendingEngineMove: true }) }, state);
+    handleEvent({ type: 'state.updated', cause: 'engine', by: 'engine', state: fakeGame({ id: 'g1', seats, revision: 1, moves: [engineMove], toPlay: 'W' }) }, state);
+    handleEvent({ type: 'state.updated', cause: 'play', by: 'human', via: 'tap', state: fakeGame({ id: 'g1', seats, revision: 2, moves: [engineMove, tapMove], pendingEngineMove: true }) }, state);
+    resolve({ state: fakeGame({ id: 'g1', seats, revision: 1, moves: [engineMove], toPlay: 'W' }), firstMove: engineMove });
+    expect(await pending).toEqual({ ok: false, reason: 'партия уже сменилась: посмотри текущую позицию и скажи человеку' });
+    expect(state.lastTap).toEqual({ cause: 'play', coord: 'D4' });
+    expect(state.observedRevision).toEqual({ gameId: 'g1', revision: 2 });
+  });
   it('button-first не маскируется под start_game, а следующий voice commit подтверждает свой ответ', async () => {
     const { fns, state, client } = setup();
     let resolve!: (value: Awaited<ReturnType<typeof client.newGame>>) => void;
