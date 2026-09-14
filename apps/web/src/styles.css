@@ -1,0 +1,72 @@
+/* Несколько переменных, две темы по prefers-color-scheme, никаких библиотек (раздел 10 спеки). Цели касания ≥ 44 px. */
+:root {
+  --bg: #f4f1ea;
+  --fg: #1d1a16;
+  --muted: #6b665c;
+  --panel: #ffffff;
+  --board: #dcb35c;
+  --line: #4a3a1a;
+  --accent: #2f6f4f;
+  --btn: #e8e3d8;
+  --btn-fg: #1d1a16;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #15130f;
+    --fg: #ece7dc;
+    --muted: #9a938a;
+    --panel: #1f1c17;
+    --board: #b98d3f;
+    --line: #2b2110;
+    --accent: #5fb58a;
+    --btn: #2b2721;
+    --btn-fg: #ece7dc;
+  }
+}
+* { box-sizing: border-box; }
+html, body, #root { margin: 0; height: 100%; }
+body { background: var(--bg); color: var(--fg); font: 16px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; -webkit-tap-highlight-color: transparent; }
+.app { display: flex; flex-direction: column; height: 100dvh; padding: env(safe-area-inset-top) 8px env(safe-area-inset-bottom); gap: 8px; }
+.top-row { display: flex; justify-content: flex-end; padding-top: 6px; }
+.status { padding: 0 4px; }
+.status-row { display: flex; align-items: center; gap: 8px; }
+.status-main { flex: 1; font-size: 18px; font-weight: 600; min-height: 26px; }
+.status-sub { font-size: 14px; min-height: 20px; }
+.muted { color: var(--muted); }
+.board { width: min(100%, calc(100dvh - 380px)); max-width: 100%; aspect-ratio: 1; align-self: center; touch-action: manipulation; user-select: none; }
+.board-bg { fill: var(--board); }
+.grid line { stroke: var(--line); stroke-width: 2.5; }
+.coord { fill: var(--line); font-size: 32px; text-anchor: middle; dominant-baseline: middle; }
+.hoshi { fill: var(--line); }
+.stone-b { fill: #111; stroke: #000; stroke-width: 1.5; }
+.stone-w { fill: #f7f7f2; stroke: #555; stroke-width: 1.5; }
+.mark-on-b { fill: none; stroke: #fff; stroke-width: 5; }
+.mark-on-w { fill: none; stroke: #111; stroke-width: 5; }
+.territory-b { fill: #111; opacity: 0.6; }
+.territory-w { fill: #fff; opacity: 0.8; }
+.dead line { stroke: #d33; stroke-width: 6; }
+.controls { display: flex; flex-direction: column; gap: 8px; }
+.controls-row { display: flex; gap: 8px; }
+.btn { min-height: 44px; flex: 1; border: 0; border-radius: 10px; background: var(--btn); color: var(--btn-fg); font-size: 16px; padding: 0 10px; }
+.btn:disabled { opacity: 0.45; }
+.btn-mic { background: var(--accent); color: #fff; font-size: 18px; font-weight: 600; min-height: 52px; }
+.btn-accent { background: var(--accent); color: #fff; font-weight: 600; }
+.btn-inline { flex: 0 0 auto; }
+.btn-square { flex: 0 0 44px; width: 44px; font-size: 22px; padding: 0; }
+.seg { display: flex; gap: 4px; background: var(--btn); border-radius: 12px; padding: 3px; }
+.seg-btn { background: transparent; min-width: 44px; }
+.seg-btn[aria-pressed="true"] { background: var(--accent); color: #fff; font-weight: 600; }
+.mode-switch { width: min(100%, 220px); }
+.newgame { display: flex; flex-direction: column; gap: 6px; background: var(--panel); border-radius: 10px; padding: 8px; }
+.rank-row { display: flex; align-items: center; gap: 8px; }
+.rank-value { flex: 1; text-align: center; font-size: 18px; font-weight: 600; }
+.transcript { flex: 1; min-height: 80px; overflow-y: auto; background: var(--panel); border-radius: 10px; padding: 8px 10px; }
+.line { margin: 0 0 6px; }
+.line .who { font-weight: 600; color: var(--muted); }
+.line-me .who { color: var(--accent); }
+.line-partial { opacity: 0.6; }
+/* Подсказка страницы под диалогом (Гоко вышел из комнаты): не реплика, выделена цветом акцента. */
+.notice { margin: 0 0 6px; font-weight: 600; color: var(--accent); }
+.chat-input { display: flex; gap: 8px; padding-bottom: 4px; }
+/* 16px в поле ввода: iOS не увеличивает страницу при фокусе. */
+.chat-field { flex: 1; min-width: 0; min-height: 44px; font-size: 16px; border-radius: 10px; border: 1px solid var(--muted); background: var(--panel); color: var(--fg); padding: 0 10px; }

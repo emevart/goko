@@ -243,6 +243,12 @@ export function useSession() {
     setMic('connecting');
     try {
       await room.localParticipant.setMicrophoneEnabled(true);
+      // Пока включался микрофон, выбрали «Чат»: запоздавшее включение перекрыло бы выключение ветки «Чата».
+      // Состояние mic выставляет ветка «Чата» (off), здесь его не трогаем.
+      if (modeRef.current !== 'voice') {
+        void room.localParticipant.setMicrophoneEnabled(false);
+        return;
+      }
       setMic('on');
     } catch {
       setMic('failed');
