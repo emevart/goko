@@ -64,6 +64,28 @@ describe('GameStore', () => {
     expect(loaded.map((g) => g.id)).toEqual(['g1']);
   });
 
+  it('отметки брошенных партий: пустой <id>.abandoned рядом со снапшотом; load их не читает; повтор и снятие отсутствующей — не ошибка; id проверяется', async () => {
+    const store = new GameStore(dir);
+    await store.init();
+    await store.save(state());
+    await store.markAbandoned('g1');
+    await store.markAbandoned('g1');
+    expect((await readdir(dir)).sort()).toEqual(['g1.abandoned', 'g1.json']);
+    expect(await readFile(path.join(dir, 'g1.abandoned'), 'utf8')).toBe('');
+    // Имя не по форме id — не отметка.
+    await writeFile(path.join(dir, 'NOT-SAFE.abandoned'), '', 'utf8');
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    expect((await store.load()).map((g) => g.id)).toEqual(['g1']);
+    expect(console.error).not.toHaveBeenCalled();
+    expect(await new GameStore(dir).loadAbandoned()).toEqual(['g1']);
+    await store.clearAbandoned('g1');
+    await store.clearAbandoned('g1');
+    expect(await store.loadAbandoned()).toEqual([]);
+    await expect(store.markAbandoned('../x')).rejects.toMatchObject({ code: 'bad_request' });
+    await expect(store.clearAbandoned('../x')).rejects.toMatchObject({ code: 'bad_request' });
+    expect(await new GameStore(path.join(dir, 'fresh')).loadAbandoned()).toEqual([]);
+  });
+
   it('load сортирует партии по createdAt', async () => {
     const store = new GameStore(dir);
     await store.init();

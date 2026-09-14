@@ -35,7 +35,7 @@ import type { EventBus } from './events.ts';
 import { applyMove, finishByScore, newGame, positionOf, resign as resignGame, setRank as setRankGame, undo as undoGame } from './game.ts';
 import { newId } from './ids.ts';
 import { SESSION_TTL_MS } from './sessions.ts';
-import type { SnapshotStore } from './store.ts';
+import type { AbandonMarks, SnapshotStore } from './store.ts';
 
 // Входы операций — уже разобранные схемой тела (z.output): defaults подставлены.
 export type NewGameInput = z.output<typeof NewGameRequest>;
@@ -66,6 +66,9 @@ export const SCORE_BUDGET_MS = 20_000;
 export const ANALYZE_BUDGET_MS = 10_000;
 // Не больше стольких незавершённых партий на сервере (D-0012): лишний create — too_many_games.
 export const MAX_ACTIVE_GAMES = 20;
+// Не больше стольких незавершённых партий на клиента (D-0012): ключ — тот же, что у лимита частоты
+// (IPv4, IPv6 /64); у партии сессии — ключ владельца сессии. Лишний create — too_many_games со scope client.
+export const MAX_GAMES_PER_CLIENT = 3;
 // Незавершённая партия без активности дольше срока сессии брошена (D-0012): в лимите не считается,
 // init не ставит ей фоновую задачу. Порог в сервере — SESSION_TTL_MS из env, здесь его умолчание.
 export const STALE_GAME_MS = SESSION_TTL_MS;
@@ -82,6 +85,8 @@ export const ENGINE_UNAVAILABLE_MESSAGE = 'engine is unavailable';
 
 export type GameServiceDeps = {
   store: SnapshotStore;
+  // Отметки брошенных сменой партий на диске (D-0012); без них отметка живёт только в памяти.
+  marks?: AbandonMarks;
   engine: Engine;
   bus: EventBus;
   now?: () => Date;
@@ -90,6 +95,7 @@ export type GameServiceDeps = {
   scoreBudgetMs?: number;
   analyzeBudgetMs?: number;
   maxActiveGames?: number;
+  maxGamesPerClient?: number;
   finishedRetentionMs?: number;
   staleGameMs?: number;
   newId?: () => string;
@@ -131,6 +137,9 @@ export class GameService {
   private readonly currentGameBySession = new Map<string, string>();
   // Партии, чей create ещё пишет снапшот: занимают id и место в лимите незавершённых партий.
   private readonly pendingCreates = new Set<string>();
+  // Клиент, в чей счёт идёт партия (ключ из app.ts). Только память: после рестарта партии, созданные до него,
+  // в счёт клиента не идут, в общем лимите — идут. Записи завершённых партий вычищает checkClientLimit.
+  private readonly clientByGame = new Map<string, string>();
   // Отмена фоновых задач партии (ход движка и счёт делят один сигнал): смена партии в сессии и close.
   private readonly taskAborts = new Map<string, AbortController>();
   private readonly engineTasks = new Map<string, Promise<void>>();
@@ -142,6 +151,10 @@ export class GameService {
   // Партии, чья серия исчерпана, задача отменена сменой партии или устарела к init: kick их не трогает
   // до действия человека или открытия потока (resume).
   private readonly gaveUp = new Set<string>();
+  // Партии, брошенные сменой партии в сессии (D-0012): не в лимитах и без задачи init, как устаревшие.
+  // Возврат человека (resume, humanAction) снимает отметку. Записи на диск идут цепочкой, close её ждёт.
+  private readonly abandoned = new Set<string>();
+  private marksWrite: Promise<void> = Promise.resolve();
   private closed = false;
 
   constructor(deps: GameServiceDeps) {
@@ -164,8 +177,13 @@ export class GameService {
       }
       this.games.set(state.id, state);
     }
-    // Устаревшей партии задача не ставится (D-0012): после рестарта движок не доигрывает брошенные партии.
-    // Она отмечена, как отменённая, и её снова запустит действие человека или открытие потока (resume).
+    // Отметка идущей партии действует; отметка завершённой или удалённой партии — остаток, её снимаем.
+    for (const id of (await this.deps.marks?.loadAbandoned()) ?? []) {
+      if (this.games.get(id)?.status === 'playing') this.abandoned.add(id);
+      else this.persistMark(id, false);
+    }
+    // Устаревшей или брошенной сменой партии задача не ставится (D-0012): после рестарта движок не доигрывает
+    // брошенные партии. Она отмечена, как отменённая, и её снова запустит действие человека или открытие потока (resume).
     for (const state of this.games.values()) {
       if (this.isStale(state, now)) {
         if (needsTask(state)) this.gaveUp.add(state.id);
@@ -184,6 +202,7 @@ export class GameService {
     // Идущие вызовы движка отменяются: остановка не ждёт раздумья, результат после close не применяется.
     for (const controller of this.taskAborts.values()) controller.abort();
     await Promise.allSettled([...this.engineTasks.values(), ...this.scoringTasks.values()]);
+    await this.marksWrite;
   }
 
   // Сессия удалена или истекла: привязки её партий снимаются, события в её канал больше не идут.
@@ -202,6 +221,7 @@ export class GameService {
   // Действие человека на партии (мутирующий запрос, открытие потока событий): исчерпанная серия
   // повторов начинается заново. Во время идущей серии и для незнакомой партии ничего не делает.
   resume(id: string): void {
+    this.reactivate(id);
     if (!this.gaveUp.delete(id)) return;
     const state = this.games.get(id);
     if (state) this.kick(state);
@@ -212,6 +232,7 @@ export class GameService {
   // движок не зовётся. Отклонённая операция (not_your_turn, nothing_to_undo, отказ записи) задачу
   // ставит здесь, и серия идёт заново. resume (открытие потока) ставит задачу сразу: операции нет.
   private async humanAction<T>(id: string, human: boolean, op: () => Promise<T>): Promise<T> {
+    if (human) this.reactivate(id);
     const resumed = human && this.gaveUp.delete(id);
     try {
       return await op();
@@ -240,7 +261,7 @@ export class GameService {
     return state;
   }
 
-  async create(req: NewGameInput, opts: { sessionId?: string } = {}): Promise<NewGameResponse> {
+  async create(req: NewGameInput, opts: { sessionId?: string; clientKey?: string } = {}): Promise<NewGameResponse> {
     for (const seat of [req.black, req.white]) {
       if (seat.controller === 'external') throw new ApiError('unsupported_controller', 'the external seat arrives at stage 2');
     }
@@ -250,7 +271,9 @@ export class GameService {
       throw new ApiError('unsupported_controller', 'two engine seats are not supported', { black: 'engine', white: 'engine' });
     }
     const withRank = (seat: NewGameInput['black']) => (seat.controller === 'engine' && !seat.rank ? { ...seat, rank: DEFAULT_RANK } : seat);
-    this.checkActiveLimit();
+    const replaced = opts.sessionId === undefined ? undefined : this.currentGameBySession.get(opts.sessionId);
+    this.checkActiveLimit(replaced);
+    if (opts.clientKey !== undefined) this.checkClientLimit(opts.clientKey, replaced);
     const id = this.freeId();
     const state = newGame({
       id,
@@ -259,6 +282,7 @@ export class GameService {
       seats: { B: withRank(req.black), W: withRank(req.white) },
     });
     this.pendingCreates.add(id);
+    if (opts.clientKey !== undefined) this.clientByGame.set(id, opts.clientKey);
     // session.game шлёт commit: после записи снапшота, раньше событий партии (раздел 5 спеки).
     if (opts.sessionId) this.sessionsByGame.set(id, opts.sessionId);
     const waiter = state.pendingEngineMove && req.waitForReply ? this.registerWaiter(id, state.revision) : null;
@@ -268,6 +292,7 @@ export class GameService {
       // Партии нет и не будет: id больше не встретится, поэтому привязка к сессии и ожидающий
       // первого хода снимаются здесь, а не висят до close.
       this.sessionsByGame.delete(id);
+      this.clientByGame.delete(id);
       this.releaseWaiters(id);
       throw e;
     } finally {
@@ -464,18 +489,65 @@ export class GameService {
   }
 
   // Лимит незавершённых партий (D-0012). Партия, чей create ещё пишет снапшот, уже занимает место;
-  // устаревшая (без активности дольше порога на момент create) — нет.
-  private checkActiveLimit(): void {
+  // устаревшая (без активности дольше порога на момент create) и брошенная сменой — нет. replaced — текущая
+  // партия сессии, в которой идёт create: новая партия её заменит, поэтому своей замене она не мешает.
+  private checkActiveLimit(replaced?: string): void {
     const max = this.deps.maxActiveGames ?? MAX_ACTIVE_GAMES;
     const now = (this.deps.now?.() ?? new Date()).getTime();
     let active = 0;
-    for (const state of this.games.values()) if (state.status !== 'finished' && !this.isStale(state, now)) active++;
+    for (const state of this.games.values()) if (state.id !== replaced && state.status !== 'finished' && !this.isStale(state, now)) active++;
     for (const id of this.pendingCreates) if (!this.games.has(id)) active++;
     if (active >= max) throw new ApiError('too_many_games', `limit of ${max} unfinished games reached`, { max });
   }
 
+  // Лимит незавершённых партий на клиента (D-0012), счёт как у общего: создаваемая уже в счёте, завершённая,
+  // устаревшая и брошенная сменой — нет, заменяемая текущая партия сессии — тоже нет. Брошенная не вычищается:
+  // возврат к ней вернёт её в счёт.
+  private checkClientLimit(clientKey: string, replaced?: string): void {
+    const max = this.deps.maxGamesPerClient ?? MAX_GAMES_PER_CLIENT;
+    const now = (this.deps.now?.() ?? new Date()).getTime();
+    let active = 0;
+    for (const [id, key] of this.clientByGame) {
+      const state = this.games.get(id);
+      if (state?.status === 'finished') {
+        this.clientByGame.delete(id);
+        continue;
+      }
+      if (key !== clientKey || id === replaced) continue;
+      if (state ? !this.isStale(state, now) : this.pendingCreates.has(id)) active++;
+    }
+    if (active >= max) throw new ApiError('too_many_games', `limit of ${max} unfinished games per client reached`, { max, scope: 'client' });
+  }
+
+  // Не в счёте лимитов и без задачи init: без активности дольше порога или брошена сменой партии (D-0012).
   private isStale(state: GameState, now: number): boolean {
-    return lastActivity(state) < now - (this.deps.staleGameMs ?? STALE_GAME_MS);
+    return this.abandoned.has(state.id) || lastActivity(state) < now - (this.deps.staleGameMs ?? STALE_GAME_MS);
+  }
+
+  // Прежняя идущая партия сессии брошена: отметка в памяти сразу, на диск — в очередь записей.
+  private abandon(id: string): void {
+    if (this.games.get(id)?.status !== 'playing' || this.abandoned.has(id)) return;
+    this.abandoned.add(id);
+    this.persistMark(id, true);
+  }
+
+  // Человек вернулся к брошенной партии: она снова в счёте. Лимит не проверяется — партия не создаётся.
+  private reactivate(id: string): void {
+    if (this.abandoned.delete(id)) this.persistMark(id, false);
+  }
+
+  // Отказ записи — строка [!], память уже верна. После рестарта незаписанная отметка значит, что партия
+  // в счёте и получит задачу, как свежая; неснятая — что партия вне счёта до следующего возврата.
+  private persistMark(id: string, abandoned: boolean): void {
+    const marks = this.deps.marks;
+    if (!marks) return;
+    this.marksWrite = this.marksWrite.then(async () => {
+      try {
+        await (abandoned ? marks.markAbandoned(id) : marks.clearAbandoned(id));
+      } catch (e) {
+        this.log(`[!] could not ${abandoned ? 'mark' : 'unmark'} game ${id} as abandoned: ${errorDetail(e)}`);
+      }
+    });
   }
 
   // Id партии не должен совпасть ни с существующей, ни с создаваемой (D-0009): совпавший
@@ -596,6 +668,7 @@ export class GameService {
     if (previous !== undefined && previous !== id) {
       if (this.sessionsByGame.get(previous) === sessionId) this.sessionsByGame.delete(previous);
       this.cancelBackground(previous);
+      this.abandon(previous);
     }
     this.deps.bus.emit(`session:${sessionId}`, { type: 'session.game', gameId: id });
   }

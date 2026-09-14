@@ -24,8 +24,14 @@ function checkId(id: string): void {
   if (!isSafeId(id)) throw new ApiError('bad_request', `game id must match /^[0-9a-z]+$/, be at most ${MAX_ID_LENGTH} characters and not be a reserved Windows name`, { id });
 }
 
+// Отметка брошенной сменой партии (D-0012): пустой файл рядом со снапшотом. load его не читает (не .json),
+// поэтому формат снапшота не меняется, а отметка переживает рестарт.
+const ABANDONED_SUFFIX = '.abandoned';
+
 // То, чем сервис пользуется от хранилища: подделка в памяти для тестов реализует только это.
 export type SnapshotStore = Pick<GameStore, 'dir' | 'init' | 'load' | 'save' | 'remove'>;
+// Отметки брошенных партий: отдельный необязательный шов сервиса, подделка в памяти — memoryMarks.
+export type AbandonMarks = Pick<GameStore, 'loadAbandoned' | 'markAbandoned' | 'clearAbandoned'>;
 
 export class GameStore {
   readonly dir: string;
@@ -82,6 +88,42 @@ export class GameStore {
     checkId(id);
     try {
       await this.fs.unlink(path.join(this.dir, `${id}.json`));
+    } catch (e) {
+      if ((e as { code?: unknown }).code !== 'ENOENT') throw e;
+      return;
+    }
+    await this.syncDir();
+  }
+
+  // id партий с отметкой <id>.abandoned; имя не по форме id пропускается, как чужой файл.
+  async loadAbandoned(): Promise<string[]> {
+    await this.init();
+    return (await readdir(this.dir))
+      .filter((name) => name.endsWith(ABANDONED_SUFFIX))
+      .map((name) => name.slice(0, -ABANDONED_SUFFIX.length))
+      .filter(isSafeId)
+      .sort();
+  }
+
+  // Пустой файл долговечно, как снапшот: sync файла и каталога. Повтор — не ошибка.
+  async markAbandoned(id: string): Promise<void> {
+    checkId(id);
+    const handle = await this.fs.open(path.join(this.dir, `${id}${ABANDONED_SUFFIX}`), 'w');
+    try {
+      await handle.sync();
+    } catch (e) {
+      await handle.close().catch(() => undefined);
+      throw e;
+    }
+    await handle.close();
+    await this.syncDir();
+  }
+
+  // Снятие отметки: к партии вернулись или она уже не идёт. Отсутствующий файл — не ошибка.
+  async clearAbandoned(id: string): Promise<void> {
+    checkId(id);
+    try {
+      await this.fs.unlink(path.join(this.dir, `${id}${ABANDONED_SUFFIX}`));
     } catch (e) {
       if ((e as { code?: unknown }).code !== 'ENOENT') throw e;
       return;

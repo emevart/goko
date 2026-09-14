@@ -15,6 +15,7 @@ import {
   FINISHED_RETENTION_MS,
   GameService,
   MAX_ACTIVE_GAMES,
+  MAX_GAMES_PER_CLIENT,
   MAX_ID_ATTEMPTS,
   RETRIES_EXHAUSTED_MESSAGE,
   SCORE_BUDGET_MS,
@@ -22,7 +23,7 @@ import {
 } from './service.ts';
 import { SESSION_TTL_MS } from './sessions.ts';
 import { GameStore, type SnapshotStore } from './store.ts';
-import { type GuardedService, type MemoryStore, closeWithin, guardService, memoryStore, track } from './test-helpers.ts';
+import { type GuardedService, type MemoryStore, closeWithin, guardService, memoryMarks, memoryStore, track } from './test-helpers.ts';
 
 let dir = '';
 // Сервисы теста закрываются до удаления каталога: иначе фоновая задача движка
@@ -3226,6 +3227,166 @@ describe('GameService: лимит партий и старые снапшоты 
     await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false });
     await expect(service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false })).rejects.toMatchObject({ code: 'too_many_games' });
     expect(service.list()).toHaveLength(7);
+  });
+
+  it('не больше MAX_GAMES_PER_CLIENT незавершённых партий на клиента: лишняя — too_many_games со scope client; другой клиент и create без клиента не в счёте; сдача освобождает место', async () => {
+    expect(MAX_GAMES_PER_CLIENT).toBe(3);
+    const { service } = await make(createFakeEngine());
+    const mine = { clientKey: '203.0.113.7' };
+    const first = await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, mine);
+    await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, mine);
+    await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, mine);
+    const refused = await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, { ...mine, sessionId: 's1' }).catch((e: unknown) => e);
+    expect(refused).toBeInstanceOf(ApiError);
+    expect(refused).toMatchObject({ code: 'too_many_games', status: 429, message: 'limit of 3 unfinished games per client reached', details: { max: 3, scope: 'client' } });
+    expect(service.list()).toHaveLength(3);
+    // Отказ не привязал партию к сессии и не сделал её текущей: её не было.
+    expect(service.internalSizes()).toMatchObject({ sessionsByGame: 0, currentGames: 0 });
+    await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, { clientKey: '203.0.113.8' });
+    await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false });
+    await service.resign(first.state.id, { color: 'B', via: 'api' });
+    await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, mine);
+    expect(service.list()).toHaveLength(6);
+  });
+
+  it('общий лимит проверяется раньше лимита на клиента: без scope', async () => {
+    const { service } = await make(createFakeEngine(), { maxActiveGames: 1, maxGamesPerClient: 1 });
+    await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, { clientKey: 'c1' });
+    const refused = await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, { clientKey: 'c1' }).catch((e: unknown) => e);
+    expect(refused).toMatchObject({ code: 'too_many_games', details: { max: 1 } });
+    expect((refused as ApiError).details).not.toHaveProperty('scope');
+  });
+
+  it('create клиента, ещё не записавший снапшот, уже в его счёте; отказ записи место освобождает', async () => {
+    const real = memoryStore();
+    let release: (() => void) | undefined;
+    let gated = 1;
+    const store = {
+      load: () => real.load(),
+      save: async (state: GameState) => {
+        if (gated-- > 0) {
+          await new Promise<void>((r) => (release = r));
+          throw new Error('disk full');
+        }
+        return real.save(state);
+      },
+    } as unknown as GameStore;
+    const { service } = await make(createFakeEngine(), { store, maxGamesPerClient: 1 });
+    const first = service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, { clientKey: 'c1' });
+    const firstFails = expect(first).rejects.toThrow('disk full');
+    await untilTick(() => release !== undefined);
+    await expect(service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, { clientKey: 'c1' })).rejects.toMatchObject({ code: 'too_many_games', details: { max: 1, scope: 'client' } });
+    // Другой клиент в это время создаёт: пишущийся create занимает место только своего клиента.
+    await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, { clientKey: 'c2' });
+    release?.();
+    await firstFails;
+    await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, { clientKey: 'c1' });
+    expect(service.list()).toHaveLength(2);
+  });
+
+  it('брошенная партия клиента в его счёте не идёт; ход в ней возвращает её в счёт', async () => {
+    let clock = NOW.getTime();
+    const { service } = await make(createFakeEngine(), { now: () => new Date(clock), maxGamesPerClient: 2 });
+    const old = await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, { clientKey: 'c1' });
+    await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, { clientKey: 'c1' });
+    await expect(service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, { clientKey: 'c1' })).rejects.toMatchObject({ code: 'too_many_games' });
+    clock += STALE_GAME_MS + 1;
+    await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, { clientKey: 'c1' });
+    await service.play(old.state.id, { coord: 'D4', waitForReply: true, via: 'api' });
+    await expect(service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, { clientKey: 'c1' })).rejects.toMatchObject({ code: 'too_many_games', details: { scope: 'client' } });
+    expect(service.list()).toHaveLength(3);
+  });
+
+  it('новая партия в сессии бросает прежнюю незавершённую: в общем лимите её нет, а текущая партия сессии не мешает своей замене', async () => {
+    const { service } = await make(createFakeEngine(), { maxActiveGames: 2 });
+    for (let i = 0; i < 4; i++) await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, { sessionId: 's1' });
+    await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false });
+    // В счёте текущая партия s1 и партия без сессии: лимит полон, в новой сессии партия не создаётся.
+    await expect(service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, { sessionId: 's2' })).rejects.toMatchObject({ code: 'too_many_games', details: { max: 2 } });
+    // Новая партия s1 заменит текущую, и та станет брошенной: create проходит и при полном лимите.
+    await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, { sessionId: 's1' });
+    expect(service.list()).toHaveLength(6);
+  });
+
+  it('брошенная сменой партия не в счёте клиента; текущие партии других сессий того же клиента — в счёте', async () => {
+    const { service } = await make(createFakeEngine(), { maxGamesPerClient: 2 });
+    for (let i = 0; i < 3; i++) await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, { sessionId: 's1', clientKey: 'c1' });
+    await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, { sessionId: 's2', clientKey: 'c1' });
+    await expect(service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, { sessionId: 's3', clientKey: 'c1' })).rejects.toMatchObject({ code: 'too_many_games', details: { max: 2, scope: 'client' } });
+    await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, { sessionId: 's2', clientKey: 'c1' });
+    expect(service.list()).toHaveLength(5);
+  });
+
+  it('возврат к брошенной сменой партии — ход в ней или открытие её потока (resume) — возвращает её в счёт без проверки лимита', async () => {
+    const { service } = await make(createFakeEngine(), { maxActiveGames: 2 });
+    const create = () => service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false });
+    const a = (await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, { sessionId: 's1' })).state.id;
+    const b = (await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, { sessionId: 's1' })).state.id;
+    await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, { sessionId: 's1' });
+    // a и b брошены, в счёте одна текущая. Ход в a возвращает её: с текущей лимит 2 полон.
+    await service.play(a, { coord: 'D4', waitForReply: false, via: 'api' });
+    await expect(create()).rejects.toMatchObject({ code: 'too_many_games', details: { max: 2 } });
+    // Поток b возвращает и её, лимит при этом не проверяется: в счёте три при лимите 2.
+    service.resume(b);
+    await service.resign(a, { color: 'B', via: 'api' });
+    await expect(create()).rejects.toMatchObject({ code: 'too_many_games' });
+    await service.resign(b, { color: 'B', via: 'api' });
+    await create();
+    expect(service.list()).toHaveLength(4);
+  });
+
+  it('отметка брошенной сменой партии переживает рестарт: после init партия не в лимите и без задачи; возврат снимает отметку, ставит задачу и возвращает партию в счёт', async () => {
+    const store = memoryStore();
+    const marks = memoryMarks();
+    // Первый запуск: движок не отвечает, пока задачу не отменят.
+    const silent: Engine = {
+      ...createFakeEngine(),
+      genmove: (_req, signal) => new Promise<never>((_, reject) => signal?.addEventListener('abort', () => reject(new Error('aborted')), { once: true })),
+    };
+    const first = await make(silent, { store, marks });
+    const a = (await first.service.create({ ...HUMAN_BLACK, ...S9, waitForReply: false }, { sessionId: 's1' })).state.id;
+    await first.service.play(a, { coord: 'D4', waitForReply: false, via: 'voice' });
+    // Сданная партия при смене не отмечается: она завершена, а не брошена.
+    const done = (await first.service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, { sessionId: 's2' })).state.id;
+    await first.service.resign(done, { color: 'B', via: 'api' });
+    await first.service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, { sessionId: 's2' });
+    // Новая партия s1: раздумье в a отменено, a брошена.
+    await first.service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, { sessionId: 's1' });
+    await first.service.close();
+    expect([...marks.ids]).toEqual([a]);
+
+    const engine = createFakeEngine({ script: ['E5'] });
+    const second = await make(engine, { store, marks, maxActiveGames: 3 });
+    const create = () => second.service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false });
+    await tick(20);
+    expect(engine.calls).toMatchObject({ genmove: 0 });
+    expect(second.service.get(a)).toMatchObject({ status: 'playing', pendingEngineMove: true });
+    // В счёте две текущие партии сессий; будь a в счёте, лимит 3 был бы уже полон.
+    const extra = await create();
+    second.service.resume(a);
+    await untilTick(() => second.service.get(a).moves.length === 2);
+    await untilTick(() => marks.ids.size === 0);
+    await second.service.resign(extra.state.id, { color: 'B', via: 'api' });
+    // a снова в счёте: с двумя текущими партиями сессий лимит 3 полон.
+    await expect(create()).rejects.toMatchObject({ code: 'too_many_games', details: { max: 3 } });
+  });
+
+  it('отказ записи отметки — строка [!] в лог; в памяти партия всё равно брошена', async () => {
+    const logs: string[] = [];
+    const marks = {
+      ...memoryMarks(),
+      markAbandoned: async () => {
+        throw new Error('disk full');
+      },
+    };
+    const { service } = await make(createFakeEngine(), { marks, maxActiveGames: 2, log: (line: string) => logs.push(line) });
+    const a = (await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, { sessionId: 's1' })).state.id;
+    await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, { sessionId: 's1' });
+    await untilTick(() => logs.length > 0);
+    expect(logs).toEqual([`[!] could not mark game ${a} as abandoned: disk full`]);
+    // a не в счёте: в новой сессии место есть.
+    await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, { sessionId: 's2' });
+    expect(service.list()).toHaveLength(3);
   });
 
   it('init не ставит фоновую задачу устаревшей партии, свежей — ставит; порог берётся из staleGameMs', async () => {

@@ -1,6 +1,6 @@
 // Ошибка синхронного вызова как значение: проверяем code и details через toMatchObject.
 import type { ApiError, GameState } from '@goko/protocol';
-import type { SnapshotStore } from './store.ts';
+import type { AbandonMarks, SnapshotStore } from './store.ts';
 
 // Снапшоты в памяти вместо диска. Настоящая запись идёт в пуле потоков и под нагрузкой длится
 // дольше любого разумного числа оборотов очереди, поэтому тесты, которые ждут фоновый коммит по
@@ -27,6 +27,24 @@ export function memoryStore(seed: GameState[] = []): MemoryStore {
     remove: async (id: string) => {
       removed.push(id);
       latest.delete(id);
+    },
+  };
+}
+
+// Отметки брошенных партий в памяти вместо файлов <id>.abandoned: ids — отмеченные сейчас, их увидит init
+// следующего сервиса на тех же отметках (рестарт).
+export type MemoryMarks = AbandonMarks & { ids: Set<string> };
+
+export function memoryMarks(): MemoryMarks {
+  const ids = new Set<string>();
+  return {
+    ids,
+    loadAbandoned: async () => [...ids].sort(),
+    markAbandoned: async (id: string) => {
+      ids.add(id);
+    },
+    clearAbandoned: async (id: string) => {
+      ids.delete(id);
     },
   };
 }
