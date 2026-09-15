@@ -107,7 +107,7 @@ export function App() {
             <button type="button" className="btn voice-button" onClick={() => { keepAwake(); void s.startVoice(); }} disabled={mic === 'connecting' || s.conversation === 'voice'}>
               {mic === 'connecting' ? 'Подключаю…' : mic === 'failed' ? 'Повторить голос' : s.conversation === 'voice' ? 'Голос включён' : 'Начать голосом'}
             </button>
-            <ChatInput ready={agent} hint={agentHint} onSend={onSend} />
+            <ChatInput ready={agent} active={s.conversation !== 'idle'} hint={agentHint} onSend={onSend} />
           </div>
           {s.conversation !== 'idle' && <button type="button" className="btn conversation-end" onClick={() => void s.endConversation()}>Завершить разговор</button>}
           <DiagnosticRecording snapshot={s.recording} supported={typeof MediaRecorder !== 'undefined'} onStart={s.startRecording} onStop={() => void s.stopRecording()} onDelete={s.deleteRecording} />

@@ -14,6 +14,7 @@ import {
   type ErrorCode,
   type GameEvent,
   NewGameRequest,
+  RestartConversationRequest,
   PassRequest,
   PlayRequest,
   ResignRequest,
@@ -23,7 +24,7 @@ import {
 } from '@goko/protocol';
 import { errorDetail } from './error-detail.ts';
 import type { EventBus } from './events.ts';
-import { type RoomCreator, createSessionRoom, mintToken } from './livekit.ts';
+import { type AgentDispatcher, type RoomCreator, createSessionRoom, mintToken, replaceSessionAgent } from './livekit.ts';
 import { API_RATE, CREATE_RATE, type RateRule, RateLimiter, addressKey } from './rate-limit.ts';
 import type { GameService } from './service.ts';
 import type { SessionManager } from './sessions.ts';
@@ -35,7 +36,7 @@ export type AppDeps = {
   appKey: string;
   // tokenTtlSeconds = floor(SESSION_TTL_MS / 1000): токен телефона не переживает сессию (D-0001).
   livekit: { url: string; apiKey: string; apiSecret: string; agentName: string; tokenTtlSeconds: number };
-  rooms: RoomCreator;
+  rooms: RoomCreator & AgentDispatcher;
   heartbeatMs?: number;
   // Остановка сервера: открытые потоки SSE закрываются, новые закрываются сразу.
   closing?: AbortSignal;
@@ -290,6 +291,8 @@ export function createApp(deps: AppDeps): Hono {
   // Владелец сессии — ключ адреса, создавшего её (D-0012): партии сессии идут в его счёт, даже когда их
   // создаёт voice-agent со своего адреса. Запись живёт, пока жив наблюдатель сессии.
   const sessionOwners = new Map<string, string>();
+  const conversationRestarts = new Map<string, { requestId: string; response: Promise<import('@goko/protocol').CreateSessionResponse> }>();
+  const conversationQueues = new Map<string, Promise<void>>();
   const isAlive = (sid: string) => sessions.list().some((s) => s.id === sid);
   const unwatch = (sid: string) => {
     watchers.get(sid)?.();
@@ -351,6 +354,42 @@ export function createApp(deps: AppDeps): Hono {
     // Защитный путь: владелец пишется при POST /api/sessions, а сессии рестарт не переживают, поэтому в prod
     // сессии без владельца нет. Сессия, появившаяся другим путём (тесты, будущие маршруты), — счёт по адресу запроса.
     return c.json(await service.create(req, { sessionId: sid, clientKey: sessionOwners.get(sid) ?? clientKey(c, trustProxy) }));
+  });
+
+  app.post('/api/sessions/:sid/conversation', async (c) => {
+    const sid = c.req.param('sid');
+    const session = sessions.get(sid);
+    sessions.touch(sid);
+    watch(sid);
+    const req = await parseBody(c, RestartConversationRequest);
+    const previous = conversationRestarts.get(sid);
+    if (previous?.requestId === req.requestId) return c.json(await previous.response);
+    const before = conversationQueues.get(sid) ?? Promise.resolve();
+    const response = before.catch(() => {}).then(async () => {
+      const token = await mintToken({
+        apiKey: deps.livekit.apiKey,
+        apiSecret: deps.livekit.apiSecret,
+        room: session.room,
+        identity: `phone-${session.id}`,
+        ttlSeconds: deps.livekit.tokenTtlSeconds,
+      });
+      await replaceSessionAgent(deps.rooms, { room: session.room, agentName: deps.livekit.agentName, sessionId: session.id, requestId: req.requestId });
+      return { session: sessions.get(sid), livekit: { url: deps.livekit.url, token } };
+    });
+    const queued = response.then(() => {}, () => {});
+    conversationQueues.set(sid, queued);
+    void queued.finally(() => {
+      if (conversationQueues.get(sid) === queued) conversationQueues.delete(sid);
+    });
+    conversationRestarts.set(sid, { requestId: req.requestId, response });
+    try {
+      const result = await response;
+      if (conversationRestarts.get(sid)?.response === response) conversationRestarts.delete(sid);
+      return c.json(result);
+    } catch (e) {
+      if (conversationRestarts.get(sid)?.response === response) conversationRestarts.delete(sid);
+      throw e;
+    }
   });
 
   app.get('/api/sessions/:sid/events', (c) => {

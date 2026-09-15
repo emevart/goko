@@ -10,7 +10,7 @@ import { InFlight, createApp } from './app.ts';
 import { createEngineClient } from './engine-client.ts';
 import { EventBus } from './events.ts';
 import { createFakeEngine } from './fake-engine.ts';
-import { type RoomCreator, createRoomService } from './livekit.ts';
+import { type AgentDispatcher, type RoomCreator, createRoomService } from './livekit.ts';
 import { GameService, type GameServiceDeps } from './service.ts';
 import { SESSION_TTL_MS, SessionManager } from './sessions.ts';
 import { GameStore } from './store.ts';
@@ -44,7 +44,7 @@ export type StartDeps = {
   on?: (signal: 'SIGINT' | 'SIGTERM', handler: () => void) => void;
   exit?: (code: number) => void;
   log?: (line: string) => void;
-  createRooms?: (opts: { url: string; apiKey: string; apiSecret: string }) => RoomCreator;
+  createRooms?: (opts: { url: string; apiKey: string; apiSecret: string }) => RoomCreator & AgentDispatcher;
   createService?: (deps: GameServiceDeps) => GameService;
 };
 

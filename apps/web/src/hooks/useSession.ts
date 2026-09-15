@@ -11,9 +11,10 @@ import { type Line, acceptLine, isTrustedTranscriptSender, lineId, upsertLine, w
 import { connectionFailureAction } from '../session-connection.ts';
 import { acceptConversationEvent, bindAgent, isBoundAgent, participantRefOf, type AgentBinding } from '../conversation.ts';
 import { DiagnosticRecorder, watchTrackEnd, type RecorderTrack, type RecordingSnapshot, type RecordingStopReason } from '../recording.ts';
-import { preflightVoice, SessionGate, waitForAgentReady } from '../session-lifecycle.ts';
+import { ConversationEndBarrier, ConversationRestart, preflightVoice, publishGestureTrack, SessionGate, waitForAgentReady } from '../session-lifecycle.ts';
 
 const STORAGE_KEY = 'goko.session';
+const ENDED_CONVERSATION_KEY = 'goko.endedConversation';
 
 export type MicState = 'off' | 'connecting' | 'on' | 'failed';
 export type LinkState = 'idle' | 'connecting' | 'connected' | 'failed';
@@ -41,6 +42,17 @@ function saveStored(res: CreateSessionResponse | null) {
   } catch {
     // приватный режим без storage — просто не запоминаем
   }
+}
+
+function loadEndedConversation(): string | null {
+  try { return sessionStorage.getItem(ENDED_CONVERSATION_KEY); } catch { return null; }
+}
+
+function saveEndedConversation(sessionId: string | null) {
+  try {
+    if (sessionId) sessionStorage.setItem(ENDED_CONVERSATION_KEY, sessionId);
+    else sessionStorage.removeItem(ENDED_CONVERSATION_KEY);
+  } catch { /* без storage marker живёт в ref */ }
 }
 
 // Вход отклонён сервером LiveKit: токен истёк или неверен (401/403 при проверке соединения) либо комнаты сессии
@@ -77,6 +89,9 @@ export function useSession() {
   const readyListeners = useRef(new Set<() => void>());
   const voiceAttempt = useRef(0);
   const gestureAudio = useRef<AudioContext | null>(null);
+  const conversationRestart = useRef<ConversationRestart | null>(null);
+  const conversationAbort = useRef(new AbortController());
+  const endBarrier = useRef(new ConversationEndBarrier());
 
   if (!sessionGate.current) {
     sessionGate.current = new SessionGate(async () => {
@@ -87,6 +102,11 @@ export function useSession() {
       return res;
     });
     if (info) sessionGate.current.seed(info);
+  }
+  if (!conversationRestart.current) {
+    conversationRestart.current = new ConversationRestart(() => crypto.randomUUID());
+    const ended = loadEndedConversation();
+    if (ended) conversationRestart.current.ended(ended);
   }
 
   useEffect(() => recorderRef.current.subscribe(setRecording), []);
@@ -99,6 +119,7 @@ export function useSession() {
   useEffect(
     () => () => {
       generation.current++;
+      conversationAbort.current.abort();
       const room = roomRef.current;
       roomRef.current = null;
       joining.current = null;
@@ -122,8 +143,10 @@ export function useSession() {
   // Сессия истекла на сервере (SSE ответил not_found): комната тоже мертва — отключаемся и создаём новую.
   const reset = useCallback(() => {
     saveStored(null);
+    saveEndedConversation(null);
     sessionGate.current?.seed(null);
     generation.current++;
+    conversationAbort.current.abort();
     const room = roomRef.current;
     roomRef.current = null;
     joining.current = null;
@@ -157,8 +180,25 @@ export function useSession() {
 
   // Вход в комнату, идемпотентный: повторные касания получают тот же промис.
   const connect = useCallback(async (): Promise<Room | null> => {
-    const sessionInfo = info ?? await ensureSession();
-    if (!sessionInfo || conversationRef.current === 'idle') return null;
+    const requestedGeneration = generation.current;
+    const requestedConversation = conversationAbort.current.signal;
+    let sessionInfo = info ?? await ensureSession();
+    if (joining.current) return joining.current;
+    if (!sessionInfo || conversationRef.current === 'idle' || requestedConversation.aborted || generation.current !== requestedGeneration) return null;
+    await endBarrier.current.wait();
+    if (joining.current) return joining.current;
+    if (requestedConversation.aborted || generation.current !== requestedGeneration) return null;
+    try {
+      sessionInfo = await conversationRestart.current!.prepare(sessionInfo, (sid, request) => client.restartConversation(sid, request));
+      if (joining.current) return joining.current;
+      if (requestedConversation.aborted || generation.current !== requestedGeneration) return null;
+      saveEndedConversation(null);
+      saveStored(sessionInfo);
+      setInfo(sessionInfo);
+    } catch (e) {
+      setError(describeError(e));
+      return null;
+    }
     if (joining.current) return joining.current;
     const gen = ++generation.current;
     const current = () => generation.current === gen;
@@ -371,6 +411,42 @@ export function useSession() {
     return joined;
   }, [info, ensureSession, sendMode, reset]);
 
+  const monitorMic = useCallback((room: Room, currentMic: RecorderTrack) => {
+    micTrack.current = currentMic;
+    stopMeter.current?.();
+    const stopTrackEnd = watchTrackEnd(currentMic, () => void recorderRef.current.stop('track-change'));
+    stopMeter.current = stopTrackEnd;
+    if (typeof AudioContext === 'undefined') return;
+    try {
+      const context = new AudioContext();
+      const analyser = context.createAnalyser();
+      analyser.fftSize = 256;
+      const source = context.createMediaStreamSource(new MediaStream([currentMic as MediaStreamTrack]));
+      source.connect(analyser);
+      void context.resume();
+      const samples = new Uint8Array(analyser.fftSize);
+      let frame = 0;
+      const tick = () => {
+        analyser.getByteTimeDomainData(samples);
+        let energy = 0;
+        for (const sample of samples) energy += ((sample - 128) / 128) ** 2;
+        const participantLevel = agentBinding.current ? room.remoteParticipants.get(agentBinding.current.identity)?.audioLevel ?? 0 : 0;
+        setAmplitude(Math.min(1, Math.max(Math.sqrt(energy / samples.length) * 3, participantLevel)));
+        frame = requestAnimationFrame(tick);
+      };
+      frame = requestAnimationFrame(tick);
+      stopMeter.current = () => {
+        cancelAnimationFrame(frame);
+        stopTrackEnd();
+        source.disconnect();
+        analyser.disconnect();
+        void context.close();
+      };
+    } catch {
+      // LiveKit state remains available when Web Audio is unsupported or blocked.
+    }
+  }, []);
+
   const enableMic = useCallback(async () => {
     const room = await connect();
     if (!room || modeRef.current !== 'voice') return;
@@ -384,44 +460,8 @@ export function useSession() {
         return;
       }
       setMic('on');
-      micTrack.current = room.localParticipant.getTrackPublications().find((p) => p.kind === Track.Kind.Audio)?.track?.mediaStreamTrack ?? null;
-      stopMeter.current?.();
-      const currentMic = micTrack.current;
-      if (currentMic) {
-        const stopTrackEnd = watchTrackEnd(currentMic, () => void recorderRef.current.stop('track-change'));
-        stopMeter.current = stopTrackEnd;
-      }
-      if (currentMic && typeof AudioContext !== 'undefined') {
-        try {
-          const context = new AudioContext();
-          const analyser = context.createAnalyser();
-          analyser.fftSize = 256;
-          const source = context.createMediaStreamSource(new MediaStream([currentMic as MediaStreamTrack]));
-          source.connect(analyser);
-          void context.resume();
-          const samples = new Uint8Array(analyser.fftSize);
-          let frame = 0;
-          const tick = () => {
-            analyser.getByteTimeDomainData(samples);
-            let energy = 0;
-            for (const sample of samples) energy += ((sample - 128) / 128) ** 2;
-            const participantLevel = agentBinding.current ? room.remoteParticipants.get(agentBinding.current.identity)?.audioLevel ?? 0 : 0;
-            setAmplitude(Math.min(1, Math.max(Math.sqrt(energy / samples.length) * 3, participantLevel)));
-            frame = requestAnimationFrame(tick);
-          };
-          frame = requestAnimationFrame(tick);
-          const stopTrackEnd = stopMeter.current;
-          stopMeter.current = () => {
-            cancelAnimationFrame(frame);
-            stopTrackEnd?.();
-            source.disconnect();
-            analyser.disconnect();
-            void context.close();
-          };
-        } catch {
-          // LiveKit state remains available when Web Audio is unsupported or blocked.
-        }
-      }
+      const currentMic = room.localParticipant.getTrackPublications().find((p) => p.kind === Track.Kind.Audio)?.track?.mediaStreamTrack ?? null;
+      if (currentMic) monitorMic(room, currentMic);
     } catch {
       // Отказ пришёл уже в «Чате» (например, диалог разрешения закрыли после переключения): микрофон там не нужен,
       // ни «failed», ни фразы про разрешение.
@@ -432,7 +472,7 @@ export function useSession() {
       setMic('failed');
       setError('не удалось включить микрофон: разреши его в браузере или переключись на «Чат»');
     }
-  }, [connect]);
+  }, [connect, monitorMic]);
 
   const updatePrefs = useCallback((patch: Partial<Prefs>) => setPrefs((p) => ({ ...p, ...patch })), []);
 
@@ -441,6 +481,7 @@ export function useSession() {
     async (draft: string): Promise<string> => {
       if (!draft.trim()) return draft;
       if (conversationRef.current === 'idle') {
+        conversationAbort.current = new AbortController();
         modeRef.current = 'chat';
         conversationRef.current = 'chat';
         setConversation('chat');
@@ -462,6 +503,7 @@ export function useSession() {
         },
         () => generation.current === gen && roomRef.current === room && conversationRef.current !== 'idle',
         AGENT_READY_TIMEOUT_MS,
+        conversationAbort.current.signal,
       );
       if (!ready) {
         setError('Гоко не успел подключиться; сообщение сохранено, попробуй ещё раз');
@@ -492,6 +534,7 @@ export function useSession() {
     }
   }, [connect]);
   const startVoice = useCallback(async () => {
+    if (conversationRef.current === 'idle') conversationAbort.current = new AbortController();
     const attempt = ++voiceAttempt.current;
     conversationRef.current = 'voice';
     setConversation('voice');
@@ -506,6 +549,7 @@ export function useSession() {
           await gestureAudio.current.resume();
         },
         () => navigator.mediaDevices.getUserMedia({ audio: true }),
+        (stream) => { for (const track of stream.getTracks()) track.stop(); },
       );
     } catch {
       if (voiceAttempt.current === attempt) {
@@ -516,13 +560,41 @@ export function useSession() {
       }
       return;
     }
-    for (const track of permission.getTracks()) track.stop();
-    if (voiceAttempt.current !== attempt || conversationRef.current !== 'voice') return;
+    const acquiredTrack = permission.getAudioTracks()[0];
+    for (const track of permission.getTracks()) if (track !== acquiredTrack) track.stop();
+    if (!acquiredTrack) return;
+    if (voiceAttempt.current !== attempt || conversationRef.current !== 'voice') {
+      acquiredTrack.stop();
+      return;
+    }
     const room = await connect();
-    if (!room || voiceAttempt.current !== attempt) return;
+    if (!room || voiceAttempt.current !== attempt) {
+      acquiredTrack.stop();
+      return;
+    }
     void sendMode(room, 'voice');
-    await enableMic();
-  }, [connect, enableMic, sendMode]);
+    setMic('connecting');
+    try {
+      const publication = await publishGestureTrack(
+        acquiredTrack,
+        (track) => room.localParticipant.publishTrack(track, { source: Track.Source.Microphone }),
+        async (track) => { await room.localParticipant.unpublishTrack(track); },
+        () => voiceAttempt.current === attempt && conversationRef.current === 'voice' && roomRef.current === room,
+      );
+      if (!publication) {
+        setMic('off');
+        return;
+      }
+      monitorMic(room, publication.track?.mediaStreamTrack ?? acquiredTrack);
+      setMic('on');
+    } catch {
+      acquiredTrack.stop();
+      if (voiceAttempt.current === attempt) {
+        setMic('failed');
+        setError('не удалось опубликовать микрофон; повтори запуск голоса');
+      }
+    }
+  }, [connect, monitorMic, sendMode]);
 
   const toggleMute = useCallback(async () => {
     if (conversation !== 'voice') return;
@@ -538,23 +610,33 @@ export function useSession() {
   }, [conversation, mic, enableMic, startVoice]);
 
   const endConversation = useCallback(async () => {
-    voiceAttempt.current++;
+    const endedAttempt = ++voiceAttempt.current;
+    const endedGeneration = ++generation.current;
+    conversationAbort.current.abort();
     conversationRef.current = 'idle';
     setConversation('idle');
-    await recorderRef.current.stop('mode-off');
     const room = roomRef.current;
-    const endedGeneration = ++generation.current;
     roomRef.current = null;
     joining.current = null;
-    if (room) {
-      await Promise.race([
-        room.localParticipant.setAttributes({ 'goko.conversation': 'ended' }).catch(() => {}),
-        new Promise<void>((resolve) => setTimeout(resolve, 750)),
-      ]);
-      try { await room.localParticipant.setMicrophoneEnabled(false); } catch { /* уже отключён */ }
-      await room.disconnect();
+    for (const notify of readyListeners.current) notify();
+    const endedSessionId = info?.session.id ?? null;
+    if (endedSessionId) {
+      conversationRestart.current?.ended(endedSessionId);
+      saveEndedConversation(endedSessionId);
     }
-    if (generation.current !== endedGeneration) return;
+    const cleanup = endBarrier.current.begin(async () => {
+      await recorderRef.current.stop('mode-off');
+      if (room) {
+        await Promise.race([
+          room.localParticipant.setAttributes({ 'goko.conversation': 'ended' }).catch(() => {}),
+          new Promise<void>((resolve) => setTimeout(resolve, 750)),
+        ]);
+        try { await room.localParticipant.setMicrophoneEnabled(false); } catch { /* уже отключён */ }
+        await room.disconnect();
+      }
+    });
+    await cleanup;
+    if (generation.current !== endedGeneration || voiceAttempt.current !== endedAttempt) return;
     agentBinding.current = null;
     micTrack.current = null;
     remoteAgentTrack.current = null;
@@ -566,7 +648,7 @@ export function useSession() {
     setAgent(false);
     setAgentPresent(false);
     setAgentState('connecting');
-  }, []);
+  }, [info]);
   const startRecording = useCallback(() => {
     void recorderRef.current.start(micTrack.current, remoteAgentTrack.current)
       .then(() => recorderRef.current.trace('room.snapshot', { generation: generation.current, agentIdentity: agentBinding.current?.identity, agentSid: agentBinding.current?.sid }))

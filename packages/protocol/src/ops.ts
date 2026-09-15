@@ -105,6 +105,9 @@ export const CreateSessionResponse = z.object({
 });
 export type CreateSessionResponse = z.infer<typeof CreateSessionResponse>;
 
+export const RestartConversationRequest = z.object({ requestId: z.string().min(1).max(128) }).strict();
+export type RestartConversationRequest = z.infer<typeof RestartConversationRequest>;
+
 export const ListGamesResponse = z.object({ games: z.array(GameSummary) });
 export type ListGamesResponse = z.infer<typeof ListGamesResponse>;
 

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { RoomAgentDispatch, RoomServiceClient, TokenVerifier } from 'livekit-server-sdk';
-import { ROOM_EMPTY_TIMEOUT_SECONDS, createRoomService, createSessionRoom, livekitHttpUrl, mintToken } from './livekit.ts';
+import { RoomAgentDispatch, TokenVerifier } from 'livekit-server-sdk';
+import { ROOM_EMPTY_TIMEOUT_SECONDS, createRoomService, createSessionRoom, livekitHttpUrl, mintToken, replaceSessionAgent } from './livekit.ts';
 
 const KEY = 'devkey';
 const SECRET = 'secret-of-at-least-32-characters-long';
@@ -118,6 +118,52 @@ describe('createSessionRoom (D-0001): комнату и агента созда�
   });
 });
 
+describe('replaceSessionAgent', () => {
+  it('удаляет все прежние dispatch и создаёт ровно один с requestId в metadata', async () => {
+    const deleted: string[] = [];
+    const created: unknown[] = [];
+    const admin = {
+      createRoom: async () => ({}),
+      listDispatch: async () => [{ id: 'old-a' }, { id: 'old-b' }],
+      deleteDispatch: async (id: string) => { deleted.push(id); },
+      createDispatch: async (...args: unknown[]) => { created.push(args); return { id: 'new' }; },
+    };
+    await replaceSessionAgent(admin, { room: 'goko-s1', agentName: 'goko', sessionId: 's1', requestId: 'r1' });
+    expect(deleted).toEqual(['old-a', 'old-b']);
+    expect(created).toEqual([['goko-s1', 'goko', { metadata: JSON.stringify({ sessionId: 's1', conversationRequestId: 'r1' }) }]]);
+  });
+
+  it('same requestId сохраняет активный dispatch, но заменяет завершённый', async () => {
+    const metadata = JSON.stringify({ sessionId: 's1', conversationRequestId: 'r1' });
+    for (const status of [1, 2]) {
+      const deleted: string[] = [];
+      let created = 0;
+      const admin = {
+        createRoom: async () => ({}),
+        listDispatch: async () => [{ id: 'same', metadata, state: { jobs: [{ state: { status } }] } }],
+        deleteDispatch: async (id: string) => { deleted.push(id); },
+        createDispatch: async () => { created++; return {}; },
+      };
+      await replaceSessionAgent(admin, { room: 'goko-s1', agentName: 'goko', sessionId: 's1', requestId: 'r1' });
+      expect({ deleted, created }).toEqual(status === 1 ? { deleted: [], created: 0 } : { deleted: ['same'], created: 1 });
+    }
+  });
+
+  it('пересоздаёт истёкшую комнату без implicit agent перед новым dispatch', async () => {
+    const rooms: unknown[] = [];
+    let created = 0;
+    const admin = {
+      createRoom: async (request: unknown) => { rooms.push(request); return {}; },
+      listDispatch: async () => { throw Object.assign(new Error('gone'), { status: 404 }); },
+      deleteDispatch: async () => {},
+      createDispatch: async () => { created++; return {}; },
+    };
+    await replaceSessionAgent(admin, { room: 'goko-s1', agentName: 'goko', sessionId: 's1', requestId: 'r2' });
+    expect(rooms).toEqual([{ name: 'goko-s1', emptyTimeout: 300, departureTimeout: 900, agents: [] }]);
+    expect(created).toBe(1);
+  });
+});
+
 describe('RoomServiceClient из LIVEKIT_URL', () => {
   afterEach(() => {
     vi.unstubAllGlobals();
@@ -139,7 +185,8 @@ describe('RoomServiceClient из LIVEKIT_URL', () => {
       return new Response(JSON.stringify({ name: 'goko-s1' }), { status: 200, headers: { 'content-type': 'application/json' } });
     });
     const client = createRoomService({ url: 'wss://lk.test', apiKey: KEY, apiSecret: SECRET });
-    expect(client).toBeInstanceOf(RoomServiceClient);
+    expect(client.createRoom).toBeTypeOf('function');
+    expect(client.createDispatch).toBeTypeOf('function');
     await createSessionRoom(client, { room: 'goko-s1', agentName: 'goko', sessionId: 's1' });
     expect(seen).toHaveLength(1);
     expect(seen[0]?.url).toBe('https://lk.test/twirp/livekit.RoomService/CreateRoom');

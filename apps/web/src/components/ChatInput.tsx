@@ -6,9 +6,9 @@ import type { FormEvent } from 'react';
 import { type AgentHint, chatPlaceholder } from '../agent.ts';
 import { CHAT_MAX_CHARS } from '../chat.ts';
 
-type Props = { ready: boolean; hint?: AgentHint | null; onSend: (draft: string) => Promise<string> };
+type Props = { ready: boolean; active?: boolean; hint?: AgentHint | null; onSend: (draft: string) => Promise<string> };
 
-export function ChatInput({ ready, hint = null, onSend }: Props) {
+export function ChatInput({ ready, active = true, hint = null, onSend }: Props) {
   const [draft, setDraft] = useState('');
   const [busy, setBusy] = useState(false);
   const submit = async (e: FormEvent<HTMLFormElement>) => {
@@ -31,7 +31,7 @@ export function ChatInput({ ready, hint = null, onSend }: Props) {
         enterKeyHint="send"
         aria-label="сообщение Гоко"
         rows={1}
-        placeholder={chatPlaceholder(ready, hint)}
+        placeholder={chatPlaceholder(ready, hint, active)}
         onChange={(e) => setDraft(e.target.value)}
         onKeyDown={(e) => {
           if (e.key === 'Enter' && !e.shiftKey) {

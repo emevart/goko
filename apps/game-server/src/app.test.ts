@@ -8,7 +8,7 @@ import { type AppDeps, InFlight, SSE_QUEUE_LIMIT, createApp } from './app.ts';
 import { type Engine, createEngineClient } from './engine-client.ts';
 import { EventBus } from './events.ts';
 import { createFakeEngine } from './fake-engine.ts';
-import type { RoomCreator } from './livekit.ts';
+import type { AgentDispatcher, RoomCreator } from './livekit.ts';
 import { GameService } from './service.ts';
 import { SessionManager } from './sessions.ts';
 import { type GuardedService, closeWithin, guardService, memoryStore, track } from './test-helpers.ts';
@@ -34,7 +34,7 @@ afterEach(async () => {
 
 type RoomCall = { name: string; emptyTimeout: number; departureTimeout: number; agents: RoomAgentDispatch[] };
 
-function fakeRooms(fail?: Error): RoomCreator & { calls: RoomCall[] } {
+function fakeRooms(fail?: Error): RoomCreator & import('./livekit.ts').AgentDispatcher & { calls: RoomCall[] } {
   const calls: RoomCall[] = [];
   return {
     calls,
@@ -43,6 +43,9 @@ function fakeRooms(fail?: Error): RoomCreator & { calls: RoomCall[] } {
       if (fail) throw fail;
       return {};
     },
+    listDispatch: async () => [],
+    deleteDispatch: async () => {},
+    createDispatch: async () => ({}),
   };
 }
 
@@ -52,7 +55,7 @@ type MakeOptions = {
   ttlMs?: number;
   now?: () => number;
   heartbeatMs?: number | 'default';
-  rooms?: RoomCreator & { calls: RoomCall[] };
+  rooms?: RoomCreator & AgentDispatcher & { calls: RoomCall[] };
   livekit?: Partial<AppDeps['livekit']>;
   closing?: AbortSignal;
   delayMs?: number;
@@ -198,6 +201,56 @@ describe('createApp: маршруты брифа', () => {
     expect(got.map((e) => e.type)).toEqual(['session.game', 'state.updated']);
     expect(got[0]?.gameId).toBe(created.state.id);
     expect(got[1]).toMatchObject({ cause: 'sync', state: { id: created.state.id } });
+  });
+
+  it('restart разговора сохраняет партию, заменяет завершённый dispatch и дедуплицирует requestId', async () => {
+    const rooms = fakeRooms() as ReturnType<typeof fakeRooms> & {
+      dispatches: Array<{ id: string }>;
+      deleted: string[];
+      listDispatch(room: string): Promise<Array<{ id: string }>>;
+      deleteDispatch(id: string, room: string): Promise<void>;
+      createDispatch(room: string, agentName: string, options: { metadata?: string }): Promise<{ id: string }>;
+    };
+    rooms.dispatches = [{ id: 'old' }];
+    rooms.deleted = [];
+    rooms.listDispatch = async () => [...rooms.dispatches];
+    rooms.deleteDispatch = async (id) => { rooms.deleted.push(id); rooms.dispatches = rooms.dispatches.filter((d) => d.id !== id); };
+    rooms.createDispatch = async (_room, _agent, options = {}) => {
+      const dispatch = { id: `new-${rooms.dispatches.length}`, metadata: options.metadata };
+      rooms.dispatches.push(dispatch);
+      return dispatch;
+    };
+    const { client } = await make({ rooms });
+    const created = await client.createSession();
+    const game = await client.newGame(created.session.id, HUMAN_BLACK);
+    const first = await client.restartConversation(created.session.id, { requestId: 'restart-a' });
+    const duplicate = await client.restartConversation(created.session.id, { requestId: 'restart-a' });
+    expect(first.session.currentGameId).toBe(game.state.id);
+    expect(duplicate).toEqual(first);
+    expect(rooms.deleted).toEqual(['old']);
+    expect(rooms.dispatches).toHaveLength(1);
+  });
+
+  it('сериализует разные restart requestId и после гонки оставляет один dispatch', async () => {
+    const rooms = fakeRooms();
+    let dispatches: Array<{ id: string; metadata?: string }> = [];
+    let sequence = 0;
+    rooms.listDispatch = async () => [...dispatches];
+    rooms.deleteDispatch = async (id) => { dispatches = dispatches.filter((item) => item.id !== id); };
+    rooms.createDispatch = async (_room, _agent, options) => {
+      await Promise.resolve();
+      const item = { id: `d${++sequence}`, metadata: options?.metadata };
+      dispatches.push(item);
+      return item;
+    };
+    const { client } = await make({ rooms });
+    const { session } = await client.createSession();
+    await Promise.all([
+      client.restartConversation(session.id, { requestId: 'a' }),
+      client.restartConversation(session.id, { requestId: 'b' }),
+    ]);
+    expect(dispatches).toHaveLength(1);
+    expect(JSON.parse(dispatches[0]?.metadata ?? '{}').conversationRequestId).toBe('b');
   });
 
   it('play по HTTP возвращает ход и ответ; ошибки протокола со статусами', async () => {

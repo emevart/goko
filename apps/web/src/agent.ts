@@ -9,8 +9,8 @@ export const AGENT_ABSENT_MS = 30_000;
 export type AgentHint = 'gone' | 'absent';
 
 export const AGENT_HINT_TEXT: Record<AgentHint, string> = {
-  gone: 'Гоко вышел из комнаты: доска работает тапами. Чтобы снова говорить с Гоко, открой страницу в новой вкладке.',
-  absent: 'Гоко не пришёл: доска работает тапами. Чтобы говорить с Гоко, открой страницу в новой вкладке.',
+  gone: 'Гоко вышел из комнаты: доска работает тапами. Повтори запуск разговора.',
+  absent: 'Гоко не пришёл: доска работает тапами. Повтори запуск разговора.',
 };
 
 // Какую подсказку ждать и сколько: null — никакой (комната не подключена или агент в ней).
@@ -21,7 +21,8 @@ export function agentHintTimer(connected: boolean, agent: boolean, seen: boolean
 }
 
 // Надпись поля «Чата». Готовность агента важнее подсказки: пришёл позже — поле сразу снова приглашает писать.
-export function chatPlaceholder(ready: boolean, hint: AgentHint | null): string {
+export function chatPlaceholder(ready: boolean, hint: AgentHint | null, active = true): string {
+  if (!active) return 'Написать Гоко…';
   if (ready) return 'Напиши Гоко';
   if (hint === 'gone') return 'Гоко вышел из комнаты';
   if (hint === 'absent') return 'Гоко не пришёл';

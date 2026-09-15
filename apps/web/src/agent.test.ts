@@ -20,11 +20,12 @@ describe('подсказки об агенте', () => {
   });
 
   it('тексты подсказок в ленте', () => {
-    expect(AGENT_HINT_TEXT.absent).toBe('Гоко не пришёл: доска работает тапами. Чтобы говорить с Гоко, открой страницу в новой вкладке.');
-    expect(AGENT_HINT_TEXT.gone).toBe('Гоко вышел из комнаты: доска работает тапами. Чтобы снова говорить с Гоко, открой страницу в новой вкладке.');
+    expect(AGENT_HINT_TEXT.absent).toBe('Гоко не пришёл: доска работает тапами. Повтори запуск разговора.');
+    expect(AGENT_HINT_TEXT.gone).toBe('Гоко вышел из комнаты: доска работает тапами. Повтори запуск разговора.');
   });
 
   it('надпись поля «Чата»: готовность агента важнее подсказки', () => {
+    expect(chatPlaceholder(false, null, false)).toBe('Написать Гоко…');
     expect(chatPlaceholder(false, null)).toBe('Гоко подключается…');
     expect(chatPlaceholder(false, 'absent')).toBe('Гоко не пришёл');
     expect(chatPlaceholder(false, 'gone')).toBe('Гоко вышел из комнаты');

@@ -8,6 +8,7 @@ import {
   type AnalyzeRequest,
   type CorrectRequest,
   CreateSessionResponse,
+  type RestartConversationRequest,
   ListGamesResponse,
   type NewGameRequest,
   NewGameResponse,
@@ -30,6 +31,7 @@ import { parseSseStream } from './sse.ts';
 // create_session — 15 с при 10 с ожидания createRoom на сервере.
 export const CLIENT_TIMEOUTS = {
   create_session: 15_000,
+  restart_conversation: 15_000,
   session_new_game: 15_000,
   create_game: 15_000,
   get_game: 5_000,
@@ -235,6 +237,8 @@ export function createClient(opts: ClientOptions) {
 
   return {
     createSession: (o?: CallOptions) => call('create_session', 'POST', '/api/sessions', CreateSessionResponse, {}, o),
+    restartConversation: (sessionId: string, req: RestartConversationRequest, o?: CallOptions) =>
+      call('restart_conversation', 'POST', `/api/sessions/${enc(sessionId)}/conversation`, CreateSessionResponse, req, o),
     newGame: (sessionId: string, req: NewGameRequest, o?: CallOptions) =>
       call('session_new_game', 'POST', `/api/sessions/${enc(sessionId)}/games`, NewGameResponse, req, o),
     createGame: (req: NewGameRequest, o?: CallOptions) => call('create_game', 'POST', '/api/games', NewGameResponse, req, o),

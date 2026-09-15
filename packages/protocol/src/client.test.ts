@@ -104,6 +104,7 @@ type Route = {
 
 const routes: Route[] = [
   { name: 'createSession', run: (c) => c.createSession(), method: 'POST', path: '/api/sessions', body: {}, response: () => Response.json(sessionResponse) },
+  { name: 'restartConversation', run: (c) => c.restartConversation('s 1', { requestId: 'restart-1' }), method: 'POST', path: '/api/sessions/s%201/conversation', body: { requestId: 'restart-1' }, response: () => Response.json(sessionResponse) },
   { name: 'newGame', run: (c) => c.newGame('s/1', seats), method: 'POST', path: '/api/sessions/s%2F1/games', body: seats, response: () => Response.json({ state }) },
   { name: 'createGame', run: (c) => c.createGame(seats), method: 'POST', path: '/api/games', body: seats, response: () => Response.json({ state }) },
   { name: 'getGame', run: (c) => c.getGame('g/1'), method: 'GET', path: '/api/games/g%2F1', body: undefined, response: () => Response.json(state) },
@@ -312,6 +313,7 @@ type TimedRoute = {
 
 const timedRoutes: TimedRoute[] = [
   { name: 'createSession', op: 'create_session', run: (c, signal) => c.createSession({ signal }) },
+  { name: 'restartConversation', op: 'restart_conversation', run: (c, signal) => c.restartConversation('s1', { requestId: 'r1' }, { signal }) },
   { name: 'newGame', op: 'session_new_game', run: (c, signal) => c.newGame('s1', seats, { signal }) },
   { name: 'createGame', op: 'create_game', run: (c, signal) => c.createGame(seats, { signal }) },
   { name: 'getGame', op: 'get_game', run: (c, signal) => c.getGame('g1', { signal }) },
@@ -338,6 +340,7 @@ describe('таймауты клиента', () => {
     expect(CLIENT_TIMEOUTS).toEqual({
       // Выше 10 с ожидания createRoom на сервере: клиент видит код сервера, а не свой таймаут.
       create_session: 15_000,
+      restart_conversation: 15_000,
       session_new_game: 15_000,
       create_game: 15_000,
       get_game: 5_000,

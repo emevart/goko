@@ -127,12 +127,15 @@ function harness(opts: HarnessOptions = {}): { deps: StartDeps; rec: Recorder } 
     log: (line) => rec.logs.push(line),
     createRooms: (options) => {
       rec.roomOptions.push(options);
-      const rooms: RoomCreator = {
+      const rooms: RoomCreator & import('./livekit.ts').AgentDispatcher = {
         createRoom: async (o) => {
           rec.rooms.push(o as never);
           if (opts.roomsFail) throw new Error('twirp: room service unavailable');
           return {};
         },
+        listDispatch: async () => [],
+        deleteDispatch: async () => {},
+        createDispatch: async () => ({}),
       };
       return rooms;
     },
