@@ -672,7 +672,7 @@ export function createTools(deps: ToolDeps) {
   const ledger = deps.intent ?? new IntentLedger();
   const guarded = <T extends { user_utterance: string }, R>(intent: MutationIntent, run: (args: Omit<T, 'user_utterance'>) => Promise<R>) => async (args: T) => {
     const { user_utterance: _utterance, ...rest } = args;
-    const permit = await ledger.consume(intent, args.user_utterance, rest, 1_500, deps.signal);
+    const permit = await ledger.consume(intent, args.user_utterance, rest, 1_500, deps.signal, { rank: deps.state.rank, komi: deps.state.komi });
     if (!permit.ok) return permit;
     return run(rest as Omit<T, 'user_utterance'>);
   };
@@ -687,7 +687,7 @@ export function createTools(deps: ToolDeps) {
         komi: z.number().optional(),
         user_utterance: utterance,
       }),
-      execute: guarded('start_game', (args) => fns.startGame(args)),
+      execute: guarded('start_game', (args) => fns.startGame({ ...args, rank: args.rank?.trim() || undefined })),
     }),
     play_move: llm.tool({
       description: 'Применить ход человека. coord — латиницей: буква столбца A–N без I и число 1–13, например D4. Ответный ход Гоко приходит в myMove.',

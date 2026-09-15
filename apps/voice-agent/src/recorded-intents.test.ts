@@ -21,6 +21,7 @@ const commands: [MutationIntent, string, Record<string, string>][] = [
  ['correct_last_move','нет, я имел в виду дэ пять',{coord:'D5'}],
  ['correct_last_move','не, слушай, я поставил не туда, я поставил на дэ семь',{coord:'D7'}],
  ['start_game','окей, погнали',{}],
+ ['start_game','давай новую партию',{}],
  ['start_game','я чёрными',{my_color:'black'}],
  ['set_rank','поставь пятый кю',{rank:'5k'}],
  ['set_rank','поставь десятый кю',{rank:'10k'}],
@@ -28,6 +29,12 @@ const commands: [MutationIntent, string, Record<string, string>][] = [
  ['resign','всё, сдаюсь',{}],
 ];
 it.each(commands)('%s: %s', (intent,text,args)=>expect(intentMatches(intent,text,args)).toBe(true));
+it('новая партия сохраняет доверенный текущий ранг, но не принимает выдуманный',async()=>{
+ const ledger=new IntentLedger();ledger.add('Давай новую партию');
+ await expect(ledger.consume('start_game','Давай новую партию',{rank:'5 кю'},0,undefined,{rank:'5k',komi:7.5})).resolves.toMatchObject({ok:true});
+ const wrong=new IntentLedger();wrong.add('Давай новую партию');
+ await expect(wrong.consume('start_game','Давай новую партию',{rank:'2 дан'},0,undefined,{rank:'5k',komi:7.5})).resolves.toMatchObject({ok:false});
+});
 it.each([
  'а если я поставлю дэ четыре, то что будет',
  'я вот думал про ка десять, но что-то передумал',

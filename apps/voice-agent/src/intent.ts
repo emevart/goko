@@ -46,8 +46,9 @@ const isConversationalCoordinate = (text: string): boolean => isBareCoordinate(c
 const spokenRank = (text: string) => parseRank(text.replace(/(?:пятый|пятого)/gu, '5').replace(/(?:десятый|десятого)/gu, '10'));
 
 type IntentArgs = { coord?: string; my_color?: 'black' | 'white'; rank?: string; komi?: number };
+type IntentDefaults = { rank: string; komi: number };
 
-export function intentMatches(intent: MutationIntent, utterance: string, args: IntentArgs = {}): boolean {
+export function intentMatches(intent: MutationIntent, utterance: string, args: IntentArgs = {}, defaults: IntentDefaults = { rank: '10k', komi: 7.5 }): boolean {
   const text = normalize(utterance);
   // «Поставил не туда» — исправление, а не запрет поставить камень.
   const correctionReport = intent === 'correct_last_move' && /поставил не туда.*поставил на/u.test(text);
@@ -64,14 +65,14 @@ export function intentMatches(intent: MutationIntent, utterance: string, args: I
       return explicit && coordinatesIn(text).length === 1 && (!args.coord || coordinatesIn(text).includes(args.coord.toUpperCase()));
     }
     case 'start_game': {
-      if (!/(новая\s+партия|давай\s+(?:сыграем|партию)|начн[её]м|начать\s+партию)/u.test(text) && !/^(?:погнали|я (?:ч[её]рными|белыми))$/u.test(conversational(text))) return false;
+      if (!/(нов(?:ая|ую)\s+парти(?:я|ю)|давай\s+(?:сыграем|партию)|начн[её]м|начинаем|начать\s+партию)/u.test(text) && !/^(?:погнали|я (?:ч[её]рными|белыми))$/u.test(conversational(text))) return false;
       const saysBlack = /(ч[её]рн|black)/u.test(text);
       const saysWhite = /(бел|white)/u.test(text);
       if (args.my_color === 'black' && saysWhite || args.my_color === 'white' && !saysWhite || saysBlack && args.my_color === 'white') return false;
-      if (args.rank && spokenRank(text) !== parseRank(args.rank)) return false;
+      if (args.rank && (spokenRank(text) ?? parseRank(defaults.rank)) !== parseRank(args.rank)) return false;
       if (args.komi !== undefined) {
         const said = /(?:^|\s)коми\s+(\d{1,2}(?:[.,]\d+)?)(?:\s|[.!?,]|$)/u.exec(text)?.[1];
-        if (said ? Number(said.replace(',', '.')) !== args.komi : args.komi !== 7.5) return false;
+        if (said ? Number(said.replace(',', '.')) !== args.komi : args.komi !== defaults.komi) return false;
       }
       return true;
     }
@@ -102,7 +103,7 @@ export class IntentLedger {
     return turn.turnId;
   }
 
-  async consume(intent: MutationIntent, utterance: string, args: IntentArgs = {}, timeoutMs = 1_500, signal?: AbortSignal): Promise<IntentResult> {
+  async consume(intent: MutationIntent, utterance: string, args: IntentArgs = {}, timeoutMs = 1_500, signal?: AbortSignal, defaults?: IntentDefaults): Promise<IntentResult> {
     if (signal?.aborted) return { ok: false, reason: 'разговор уже завершён' };
     const expected = canonical(utterance);
     const find = (): Turn[] | undefined => {
@@ -129,7 +130,7 @@ export class IntentLedger {
     if (!turn) return { ok: false, reason: 'не удалось подтвердить последнюю команду человека: попроси повторить её' };
     for (const part of turn) part.used = true;
     // Проверяем trusted текст, сохраняя вопросительные знаки, которые backend мог убрать.
-    if (!intentMatches(intent, turn.map(t => t.text).join(' '), args)) return { ok: false, reason: 'эта реплика не является явной игровой командой с указанными параметрами' };
+    if (!intentMatches(intent, turn.map(t => t.text).join(' '), args, defaults)) return { ok: false, reason: 'эта реплика не является явной игровой командой с указанными параметрами' };
     return { ok: true, turnId: turn.at(-1)!.turnId };
   }
 }
