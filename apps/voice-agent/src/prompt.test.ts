@@ -57,6 +57,6 @@ describe('промпт Гоко', () => {
   });
   it('voice передаёт закрытый фактический ответ backend без собственных фактов и подсчётов', () => {
     expect(VOICE_INSTRUCTIONS).toContain('передай полностью без новых фактов, подсчётов, причин, планов и координат');
-    expect(VOICE_INSTRUCTIONS).toContain('закрытый вопрос о факте — одной фразой');
+    expect(VOICE_INSTRUCTIONS).toContain('Закрытый вопрос о факте — одной фразой');
   });
 });
