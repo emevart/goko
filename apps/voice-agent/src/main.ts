@@ -132,7 +132,7 @@ async function runSession(ctx: JobContext, sessionId: string): Promise<void> {
       if (item.transcriptConfidence === undefined && item.textContent) intent.add(item.textContent, `item:${item.id}`);
     }
     if (item.role === 'assistant' && item.textContent) {
-      liveResponses?.noteAssistant();
+      liveResponses?.noteAssistant(item.textContent);
       log(`[goko] ${item.textContent}`);
     }
   });

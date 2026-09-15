@@ -12,9 +12,11 @@ export type LiveEventSource = {
 
 type ResponseState = { hasCalls: boolean };
 type Reply = {
+  kind: 'backend' | 'voice';
   startAssistant: number;
   startListening: number;
   delegation?: string;
+  backendContent: boolean;
   providerDone: boolean;
   resolve: () => void;
   reject: (error: unknown) => void;
@@ -65,7 +67,8 @@ export class LiveResponseCoordinator {
     this.notifyIdle();
   }
 
-  noteAssistant(): void {
+  noteAssistant(text?: string): void {
+    if (text !== undefined && !text.replace(/\[(?:sigh|laugh|inhale|cough|exhale)\]/giu, '').trim()) return;
     this.assistantVersion += 1;
     if (this.nativeTurnPending && !this.userActive && this.nativePostStopOutput) {
       this.nativeSawAssistant = true;
@@ -120,8 +123,10 @@ export class LiveResponseCoordinator {
         if (error) reject(error); else resolve();
       };
       this.reply = {
+        kind,
         startAssistant: this.assistantVersion,
         startListening: this.listeningVersion,
+        backendContent: kind === 'voice',
         providerDone: kind === 'voice',
         resolve: () => finish(),
         reject: (error) => finish(error),
@@ -155,7 +160,7 @@ export class LiveResponseCoordinator {
 
   private maybeFinishReply(): void {
     const reply = this.reply;
-    if (!reply || !reply.providerDone) return;
+    if (!reply || !reply.providerDone || !reply.backendContent) return;
     if (this.assistantVersion <= reply.startAssistant || this.listeningVersion <= reply.startListening) return;
     reply.resolve();
   }
@@ -177,6 +182,16 @@ export class LiveResponseCoordinator {
       const response = this.responses.get(key) ?? { hasCalls: false };
       response.hasCalls = true;
       this.responses.set(key, response);
+      return;
+    }
+    if ((event.type === 'response.output_text.delta' || event.type === 'response.output_text.done') && this.reply?.delegation === key) {
+      if (!this.reply.backendContent) {
+        // Live может произнести filler до результата backend. Он не завершает typed turn:
+        // baseline переносим на первый подтверждённый текст Responses.
+        this.reply.backendContent = true;
+        this.reply.startAssistant = this.assistantVersion;
+        this.reply.startListening = this.listeningVersion;
+      }
       return;
     }
     if (event.type === 'response.failed' || event.type === 'response.incomplete') {
