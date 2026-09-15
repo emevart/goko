@@ -1,7 +1,7 @@
 // Сессия Гоко на телефоне: сессия через game-server (sessionStorage), комната LiveKit по её токену, режим
 // «Голос / Чат» атрибутом goko.mode, микрофон, чат и лента диалога. Комнат страница не создаёт (D-0001).
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ParticipantKind, Room, RoomEvent, Track } from 'livekit-client';
+import { LocalAudioTrack, ParticipantKind, Room, RoomEvent, Track } from 'livekit-client';
 import { CONVERSATION_TOPIC, CreateSessionResponse } from '@goko/protocol';
 import { client } from '../api.ts';
 import { agentReady, sendChat } from '../chat.ts';
@@ -173,7 +173,10 @@ export function useSession() {
 
   const sendMode = useCallback(async (room: Room, mode: Mode) => {
     try {
-      await room.localParticipant.setAttributes({ ...modeAttributes(mode), 'goko.conversation': 'active', ...(mode === 'chat' ? { 'goko.mic': 'muted' } : {}) });
+      const publication = room.localParticipant.getTrackPublication(Track.Source.Microphone);
+      const track = publication?.track?.mediaStreamTrack;
+      const active = mode === 'voice' && !publication?.isMuted && track?.readyState === 'live' && track.enabled;
+      await room.localParticipant.setAttributes({ ...modeAttributes(mode), 'goko.conversation': 'active', 'goko.mic': active ? 'on' : 'muted' });
     } catch (e) {
       // Нет права canUpdateOwnMetadata или сервер не ответил: агент останется в прежнем режиме.
       console.warn('[!] web: не удалось выставить goko.mode', e);
@@ -282,9 +285,15 @@ export function useSession() {
     // Полное переподключение LiveKit: режим, выставленный во время разрыва, мог не дойти до агента — отправляем снова.
     room.on(RoomEvent.Reconnected, () => {
       recorderRef.current.trace('room.reconnected');
-      if (roomRef.current === room) void sendMode(room, modeRef.current);
+      if (roomRef.current === room) {
+        setLink('connected');
+        void sendMode(room, modeRef.current);
+      }
     });
-    room.on(RoomEvent.Reconnecting, () => recorderRef.current.trace('room.reconnecting'));
+    room.on(RoomEvent.Reconnecting, () => {
+      recorderRef.current.trace('room.reconnecting');
+      if (roomRef.current === room) setLink('connecting');
+    });
     room.on(RoomEvent.Disconnected, () => {
       // Недочитанные потоки прерываются всегда; незаконченные строки Гоко закрывает finally обработчика.
       streams.abort();
@@ -610,7 +619,9 @@ export function useSession() {
     try {
       const publication = await publishGestureTrack(
         acquiredTrack,
-        (track) => room.localParticipant.publishTrack(track, { source: Track.Source.Microphone }),
+        // Захват начат жестом, но дальнейшее освобождение/повторный захват принадлежит SDK.
+        // Сырой MediaStreamTrack помечается userProvided и не восстанавливается после stop.
+        (track) => room.localParticipant.publishTrack(new LocalAudioTrack(track, track.getConstraints(), false), { source: Track.Source.Microphone }),
         async (track) => { await room.localParticipant.unpublishTrack(track); },
         () => voiceAttempt.current === attempt && conversationRef.current === 'voice' && roomRef.current === room,
       );
