@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { ConversationEndBarrier, ConversationRestart, SessionGate, preflightVoice, publishGestureTrack, waitForAgentReady } from './session-lifecycle.ts';
+import { ConversationEndBarrier, ConversationRestart, SessionGate, preflightVoice, publishGestureTrack, voiceFailureMode, waitForAgentReady } from './session-lifecycle.ts';
 
 describe('явный запуск разговора', () => {
   it('объединяет параллельный первый текст и запуск доски в одну создаваемую сессию', async () => {
@@ -68,6 +68,12 @@ describe('явный запуск разговора', () => {
     await expect(preflightVoice(() => { throw new Error('audio'); }, async () => stream, (value) => value.stop())).rejects.toThrow('audio');
     expect(stream.stop).toHaveBeenCalledOnce();
     await expect(preflightVoice(async () => {}, async () => { throw new Error('mic'); }, vi.fn())).rejects.toThrow('mic');
+  });
+
+  it('mic failure сохраняет явно начатый параллельный чат, а без него возвращает idle', () => {
+    expect(voiceFailureMode(false, true)).toBe('chat');
+    expect(voiceFailureMode(true, false)).toBe('chat');
+    expect(voiceFailureMode(false, false)).toBe('idle');
   });
 
   it('передаёт LiveKit исходный gesture track, а stale и publish failure останавливают его ровно раз', async () => {

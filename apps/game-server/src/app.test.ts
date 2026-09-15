@@ -253,6 +253,25 @@ describe('createApp: маршруты брифа', () => {
     expect(JSON.parse(dispatches[0]?.metadata ?? '{}').conversationRequestId).toBe('b');
   });
 
+  it('late retry старого requestId не удаляет агента нового поколения', async () => {
+    const rooms = fakeRooms();
+    let dispatches: Array<{ id: string; metadata?: string }> = [];
+    rooms.listDispatch = async () => [...dispatches];
+    rooms.deleteDispatch = async (id) => { dispatches = dispatches.filter((item) => item.id !== id); };
+    rooms.createDispatch = async (_room, _agent, options) => {
+      const item = { id: `d-${Date.now()}-${Math.random()}`, metadata: options?.metadata };
+      dispatches.push(item);
+      return item;
+    };
+    const { client } = await make({ rooms });
+    const { session } = await client.createSession();
+    await client.restartConversation(session.id, { requestId: 'a' });
+    await client.restartConversation(session.id, { requestId: 'b' });
+    await expect(client.restartConversation(session.id, { requestId: 'a' })).rejects.toMatchObject({ code: 'revision_conflict', status: 409 });
+    expect(dispatches).toHaveLength(1);
+    expect(JSON.parse(dispatches[0]?.metadata ?? '{}').conversationRequestId).toBe('b');
+  });
+
   it('play по HTTP возвращает ход и ответ; ошибки протокола со статусами', async () => {
     const { client } = await make({ script: ['E5'] });
     const { state } = await client.createGame(HUMAN_BLACK);

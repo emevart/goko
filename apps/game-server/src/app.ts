@@ -92,7 +92,7 @@ const digest = (value: string): Buffer => createHash('sha256').update(value, 'ut
 
 // Адрес IPv6 — до 45 символов; длиннее ключ лимитера не бывает, чем бы ни был заголовок.
 const MAX_CLIENT_KEY_LENGTH = 64;
-const CREATE_PATH = /^\/api\/(sessions|games|sessions\/[^/]+\/games)$/;
+const CREATE_PATH = /^\/api\/(sessions|games|sessions\/[^/]+\/(games|conversation))$/;
 
 // Ключ лимитера: адрес сокета от @hono/node-server (c.env.incoming). За прокси все соединения
 // приходят с его адреса, поэтому при trustProxy берётся последний адрес X-Forwarded-For: его дописал
@@ -293,11 +293,15 @@ export function createApp(deps: AppDeps): Hono {
   const sessionOwners = new Map<string, string>();
   const conversationRestarts = new Map<string, { requestId: string; response: Promise<import('@goko/protocol').CreateSessionResponse> }>();
   const conversationQueues = new Map<string, Promise<void>>();
+  const conversationHistory = new Map<string, { current: string; seen: string[] }>();
   const isAlive = (sid: string) => sessions.list().some((s) => s.id === sid);
   const unwatch = (sid: string) => {
     watchers.get(sid)?.();
     watchers.delete(sid);
     sessionOwners.delete(sid);
+    conversationRestarts.delete(sid);
+    conversationQueues.delete(sid);
+    conversationHistory.delete(sid);
   };
   const pruneWatchers = () => {
     for (const sid of [...watchers.keys()]) if (!isAlive(sid)) unwatch(sid);
@@ -362,6 +366,14 @@ export function createApp(deps: AppDeps): Hono {
     sessions.touch(sid);
     watch(sid);
     const req = await parseBody(c, RestartConversationRequest);
+    const history = conversationHistory.get(sid);
+    if (history?.seen.includes(req.requestId) && history.current !== req.requestId) {
+      throw new ApiError('revision_conflict', 'conversation restart request is stale', { currentRequestId: history.current });
+    }
+    if (!history?.seen.includes(req.requestId)) {
+      const seen = [...(history?.seen ?? []), req.requestId].slice(-16);
+      conversationHistory.set(sid, { current: req.requestId, seen });
+    }
     const previous = conversationRestarts.get(sid);
     if (previous?.requestId === req.requestId) return c.json(await previous.response);
     const before = conversationQueues.get(sid) ?? Promise.resolve();

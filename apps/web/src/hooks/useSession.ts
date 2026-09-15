@@ -11,7 +11,7 @@ import { type Line, acceptLine, isTrustedTranscriptSender, lineId, upsertLine, w
 import { connectionFailureAction } from '../session-connection.ts';
 import { acceptConversationEvent, bindAgent, isBoundAgent, participantRefOf, type AgentBinding } from '../conversation.ts';
 import { DiagnosticRecorder, watchTrackEnd, type RecorderTrack, type RecordingSnapshot, type RecordingStopReason } from '../recording.ts';
-import { ConversationEndBarrier, ConversationRestart, preflightVoice, publishGestureTrack, SessionGate, waitForAgentReady } from '../session-lifecycle.ts';
+import { ConversationEndBarrier, ConversationRestart, preflightVoice, publishGestureTrack, SessionGate, voiceFailureMode, waitForAgentReady } from '../session-lifecycle.ts';
 
 const STORAGE_KEY = 'goko.session';
 const ENDED_CONVERSATION_KEY = 'goko.endedConversation';
@@ -92,6 +92,7 @@ export function useSession() {
   const conversationRestart = useRef<ConversationRestart | null>(null);
   const conversationAbort = useRef(new AbortController());
   const endBarrier = useRef(new ConversationEndBarrier());
+  const chatInFlight = useRef(0);
 
   if (!sessionGate.current) {
     sessionGate.current = new SessionGate(async () => {
@@ -171,7 +172,7 @@ export function useSession() {
 
   const sendMode = useCallback(async (room: Room, mode: Mode) => {
     try {
-      await room.localParticipant.setAttributes(modeAttributes(mode));
+      await room.localParticipant.setAttributes({ ...modeAttributes(mode), 'goko.conversation': 'active' });
     } catch (e) {
       // Нет права canUpdateOwnMetadata или сервер не ответил: агент останется в прежнем режиме.
       console.warn('[!] web: не удалось выставить goko.mode', e);
@@ -480,6 +481,7 @@ export function useSession() {
   const sendText = useCallback(
     async (draft: string): Promise<string> => {
       if (!draft.trim()) return draft;
+      chatInFlight.current++;
       if (conversationRef.current === 'idle') {
         conversationAbort.current = new AbortController();
         modeRef.current = 'chat';
@@ -488,7 +490,10 @@ export function useSession() {
         setPrefs((p) => ({ ...p, mode: 'chat' }));
       }
       const room = await connect();
-      if (!room) return draft;
+      if (!room) {
+        chatInFlight.current--;
+        return draft;
+      }
       const gen = generation.current;
       void sendMode(room, modeRef.current);
       const ready = await waitForAgentReady(
@@ -506,6 +511,7 @@ export function useSession() {
         conversationAbort.current.signal,
       );
       if (!ready) {
+        chatInFlight.current--;
         setError('Гоко не успел подключиться; сообщение сохранено, попробуй ещё раз');
         return draft;
       }
@@ -516,6 +522,7 @@ export function useSession() {
       const line = res.line;
       if (line) setLines((ls) => upsertLine(ls, line));
       if (res.error) setError(res.error);
+      chatInFlight.current--;
       return res.draft;
     },
     [connect, sendMode],
@@ -534,6 +541,7 @@ export function useSession() {
     }
   }, [connect]);
   const startVoice = useCallback(async () => {
+    const chatWasActive = conversationRef.current === 'chat';
     if (conversationRef.current === 'idle') conversationAbort.current = new AbortController();
     const attempt = ++voiceAttempt.current;
     conversationRef.current = 'voice';
@@ -553,8 +561,20 @@ export function useSession() {
       );
     } catch {
       if (voiceAttempt.current === attempt) {
-        conversationRef.current = 'idle';
-        setConversation('idle');
+        const fallback = voiceFailureMode(chatWasActive, chatInFlight.current > 0);
+        conversationRef.current = fallback;
+        setConversation(fallback);
+        if (fallback === 'chat') {
+          modeRef.current = 'chat';
+          setPrefs((p) => ({ ...p, mode: 'chat' }));
+        } else {
+          generation.current++;
+          conversationAbort.current.abort();
+          const room = roomRef.current;
+          roomRef.current = null;
+          joining.current = null;
+          void room?.disconnect();
+        }
         setMic('failed');
         setError('не удалось включить микрофон: разреши его в браузере; чат остаётся доступен');
       }
