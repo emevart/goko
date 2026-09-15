@@ -35,15 +35,18 @@ export function devPlan(parentEnv, exists, makeKey = () => randomBytes(24).toStr
     if (!env.ENGINE_KEY) notes.push('[!] ENGINE_KEY не задан: game-server и go-engine получат разовый ключ на этот запуск');
     const enginePort = env.ENGINE_PORT ?? '8788';
     procs.push({ name: 'go-engine', cmd: node, args: ['apps/go-engine/src/main.ts'], env: { ...env, ENGINE_KEY: /** @type {string} */ (engineKey), ENGINE_PORT: enginePort } });
-    const serverEnv = { ...env, ENGINE_KEY: /** @type {string} */ (engineKey), ENGINE_URL: `http://127.0.0.1:${enginePort}`, AGENT_NAME: DEV_AGENT_NAME };
+    // dev и smoke разрешают партии без сессии (curl, отладка); в prod compose флага нет (D-0012).
+    const serverEnv = { ...env, ENGINE_KEY: /** @type {string} */ (engineKey), ENGINE_URL: `http://127.0.0.1:${enginePort}`, AGENT_NAME: DEV_AGENT_NAME, ALLOW_SESSIONLESS_GAMES: '1' };
     delete serverEnv.FAKE_ENGINE;
     procs.push({ name: 'game-server', cmd: node, args: ['apps/game-server/src/main.ts'], env: serverEnv });
   } else {
     notes.push('[!] KATAGO_BIN не задан: game-server с FAKE_ENGINE=1, ходы случайные');
-    procs.push({ name: 'game-server', cmd: node, args: ['apps/game-server/src/main.ts'], env: { ...env, FAKE_ENGINE: '1', AGENT_NAME: DEV_AGENT_NAME } });
+    procs.push({ name: 'game-server', cmd: node, args: ['apps/game-server/src/main.ts'], env: { ...env, FAKE_ENGINE: '1', AGENT_NAME: DEV_AGENT_NAME, ALLOW_SESSIONLESS_GAMES: '1' } });
   }
 
-  if (exists('apps/web/package.json')) procs.push({ name: 'web', cmd: 'npm', args: ['run', 'dev', '--workspace', 'apps/web'], env, shell: isWindows });
+  // web — vite через node без оболочки: npm на Windows — это npm.cmd, cmd.exe на Ctrl+C спрашивает
+  // «Завершить выполнение пакетного файла?», и web не останавливается. vite.config.ts берётся из apps/web.
+  if (exists('apps/web/package.json')) procs.push({ name: 'web', cmd: node, args: ['node_modules/vite/bin/vite.js', 'apps/web', '--host', '127.0.0.1', '--port', '5173', '--strictPort'], env });
   else notes.push('[!] apps/web ещё нет: веб не запускаем');
   if (exists('apps/voice-agent/package.json')) procs.push({ name: 'voice-agent', cmd: node, args: ['apps/voice-agent/src/main.ts', 'dev'], env: { ...env, AGENT_NAME: DEV_AGENT_NAME } });
   else notes.push('[!] apps/voice-agent ещё нет: агента не запускаем');
@@ -54,7 +57,7 @@ export function devPlan(parentEnv, exists, makeKey = () => randomBytes(24).toStr
 
 /**
  * Опции запуска одного процесса dev.
- * POSIX: процесс — лидер своей группы, SIGTERM от dev уходит всему дереву (npm -> vite).
+ * POSIX: процесс — лидер своей группы, SIGTERM от dev уходит всему дереву (go-engine -> KataGo).
  * Windows: windowsHide: false — ребёнок остаётся в консоли терминала и сам получает Ctrl+C. Со скрытием
  * libuv ставит CREATE_NO_WINDOW (stdio без наследования), у ребёнка своя консоль, и мягкой остановки нет.
  * Окно при этом не появляется, если у dev есть консоль (запуск из терминала): ребёнок наследует её.

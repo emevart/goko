@@ -5,6 +5,8 @@
 
 ## С чего начать
 
+Текущий итог: [что готово, ограничения и следующие этапы](research/2026-09-15-stage1-wrapup.md).
+
 1. [Спека](superpowers/specs/2026-09-07-goko-voice-go-opponent-design.md) —
    что строим, протокол, архитектура, стадии. Читать первой.
 2. [NOW.md](NOW.md) — где мы сейчас, открытые вопросы founder'у, следующий шаг.
@@ -17,12 +19,19 @@
 | --- | --- | --- |
 | `superpowers/specs/` | дизайн-спеки (brainstorming → спека) | спека v1 |
 | `superpowers/plans/` | планы реализации (writing-plans) | стадия 0, стадия 1 ядро, стадия 1 голос и веб |
-| `research/` | результаты замеров и спайков, из которых следуют решения | [стадия 0](research/stage0-results.md) |
-| `journal/` | журналы исполнения по стадиям: задача, проверка, коммиты | стадия 0, стадия 1 ядро |
-| `decisions/` | журнал решений после спеки, `D-NNNN` | [реестр](decisions/README.md), D-0001…D-0012 |
+| `research/` | результаты замеров, спайков и приёмки | [стадия 0](research/stage0-results.md), [приёмка стадии 1](research/2026-09-14-stage1-acceptance.md), [отзыв с телефона](research/2026-09-14-voice-feedback.md) |
+| `journal/` | журналы исполнения по стадиям: задача, проверка, коммиты | стадия 0, [стадия 1 ядро](journal/2026-09-08-stage1-core.md), [голос и веб](journal/2026-09-14-stage1-voice-web.md) |
+| `decisions/` | журнал решений после спеки, `D-NNNN` | [реестр](decisions/README.md), D-0001…D-0014 |
 | `process/` | как работают агенты и founder | [agent-development](process/agent-development.md) |
-| `runbooks/` | эксплуатация: VPS, LiveKit, KataGo, откат | `[TODO]` стадия 1 |
+| `runbooks/` | эксплуатация: [vps](runbooks/vps.md) — деплой, логи, режимы API, откат, ресурсы | стадия 1 |
 | `reference/` | грабли и находки, на которые больно наступать дважды | `[TODO]` по мере появления |
+
+Итерация 15.09: [спека общего разговора](superpowers/specs/2026-09-15-goko-conversation-design.md),
+[журнал](journal/2026-09-15-conversation.md),
+[проверка с записью](research/2026-09-15-conversation-acceptance.md).
+Повторная итерация: [спека GPT-Live](superpowers/specs/2026-09-15-goko-live-polish.md),
+[план](superpowers/plans/2026-09-15-goko-live-polish.md),
+[результаты проверок](research/2026-09-15-live-polish-acceptance.md).
 
 ## Правила базы знаний
 

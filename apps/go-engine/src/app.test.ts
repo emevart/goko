@@ -52,6 +52,8 @@ type GenmoveShape = {
   winrateB: number;
   scoreLeadB: number;
   humanPolicyTop: { coord: string; prob: number }[];
+  rankCandidates: { coord: string; prob: number }[];
+  candidateAnalysis: Array<{ coord: string; pv: string[] }>;
   humanFallback?: boolean;
   ms: number;
 };
@@ -275,6 +277,72 @@ describe('createEngineApp', () => {
     });
   });
 
+  it('genmove сохраняет sampled rank move и bounded исследует до трёх rank-кандидатов с PV до четырёх полуходов', async () => {
+    const policy = new Array<number>(170).fill(0);
+    policy[0] = 0.6;
+    policy[1] = 0.3;
+    policy[2] = 0.1;
+    const katago = fakeKatago((query) => {
+      if (!query.allowMoves) return {
+        rootInfo: { winrate: 0.5, scoreLead: 0, visits: 10 },
+        moveInfos: [{ move: 'K10', order: 0, winrate: 0.8, scoreLead: 8, visits: 10 }],
+        humanPolicy: policy,
+      };
+      const coord = (query.allowMoves as Array<{ moves: string[] }>)[0]?.moves[0] ?? 'pass';
+      return { rootInfo: { winrate: 0.55, scoreLead: 1, visits: 30 }, moveInfos: [{ move: coord, order: 0, winrate: 0.55, scoreLead: 1, visits: 30, pv: [coord, 'D4', 'E5', 'F6', 'G7'] }] };
+    });
+    const app = createEngineApp({ katago, engineKey: KEY, models: { main: 'm', human: 'h' }, random: () => 0 });
+    const body = await jsonAs<GenmoveShape>(await post(app, '/v1/genmove', { ...base, moves: [], rank: '10k' }));
+    expect(body.move).toBe('A13');
+    expect(body.rankCandidates.map((item) => item.coord)).toEqual(['A13', 'B13', 'C13']);
+    expect(body.candidateAnalysis).toHaveLength(3);
+    expect(body.candidateAnalysis[0]).toEqual({ coord: 'A13', winrateB: 0.55, scoreLeadB: 1, visits: 30, pv: ['A13', 'D4', 'E5', 'F6'] });
+    expect(katago.calls.slice(1)).toEqual(body.rankCandidates.map((item) => expect.objectContaining({ maxVisits: 30, analysisPVLen: 4, allowMoves: [{ player: 'B', moves: [item.coord], untilDepth: 1 }] })));
+  });
+
+  it('timeout дополнительного PV fail-open сохраняет уже sampled rank move', async () => {
+    const policy = new Array<number>(170).fill(0);
+    policy[0] = 1;
+    let calls = 0;
+    const katago = fakeKatago(() => ({ rootInfo: { visits: 10 }, moveInfos: [{ move: 'K10', order: 0, winrate: 0.5, scoreLead: 0, visits: 10 }], humanPolicy: policy }));
+    katago.query = async (query, timeout, signal) => {
+      katago.calls.push(query); katago.timeouts.push(timeout); katago.signals.push(signal);
+      if (++calls > 1) throw new KataGoError('timeout', 'candidate timed out');
+      return { id: 'q', rootInfo: { visits: 10 }, moveInfos: [{ move: 'K10', order: 0, winrate: 0.5, scoreLead: 0, visits: 10 }], humanPolicy: policy };
+    };
+    const logs: string[] = [];
+    const app = createEngineApp({ katago, engineKey: KEY, models: { main: 'm', human: 'h' }, random: () => 0, log: (line) => logs.push(line) });
+    const body = await jsonAs<GenmoveShape>(await post(app, '/v1/genmove', { ...base, moves: [], rank: '10k' }));
+    expect(body.move).toBe('A13');
+    expect(body.candidateAnalysis).toEqual([]);
+    expect(logs.join('\n')).toContain('дополнительный анализ A13 пропущен');
+  });
+
+  it('PV обрывается на первой некорректной или нелегальной координате, не склеивая продолжение', async () => {
+    const policy = new Array<number>(170).fill(0);
+    policy[0] = 0.7;
+    policy[1] = 0.3;
+    let candidate = 0;
+    const katago = fakeKatago((query) => {
+      if (!query.allowMoves) return {
+        rootInfo: { visits: 10 },
+        moveInfos: [{ move: 'K10', order: 0, winrate: 0.5, scoreLead: 0, visits: 10 }],
+        humanPolicy: policy,
+      };
+      candidate += 1;
+      return {
+        rootInfo: { visits: 30 },
+        moveInfos: [{
+          move: 'A13', order: 0, winrate: 0.5, scoreLead: 0, visits: 30,
+          pv: candidate === 1 ? ['A13', 'не-ход', 'B13'] : ['A13', 'A13', 'B13'],
+        }],
+      };
+    });
+    const app = createEngineApp({ katago, engineKey: KEY, models: { main: 'm', human: 'h' }, random: () => 0 });
+    const body = await jsonAs<GenmoveShape>(await post(app, '/v1/genmove', { ...base, moves: [], rank: '10k' }));
+    expect(body.candidateAnalysis.map((item) => item.pv)).toEqual([['A13'], ['A13']]);
+  });
+
   it('genmove без humanPolicy — лучший ход поиска и предупреждение в лог', async () => {
     const lines: string[] = [];
     const app = createEngineApp({
@@ -354,7 +422,7 @@ describe('createEngineApp', () => {
     expect(body.ownership?.[coordToIndex('A1', 13)]).toBe(0);
     expect(body.moveInfos.map((m) => m.coord)).toEqual(['D4', 'C3']);
     expect(body).toMatchObject({ visits: 50, winrateB: 0.4, scoreLeadB: -2 });
-    expect(body.moveInfos[0]).toEqual({ coord: 'D4', winrateB: 0.41, scoreLeadB: -1.5, visits: 30, order: 0 });
+    expect(body.moveInfos[0]).toEqual({ coord: 'D4', winrateB: 0.41, scoreLeadB: -1.5, visits: 30, order: 0, pv: [] });
     expect(katago.calls[0]).toMatchObject({ maxVisits: 50, includeOwnership: true });
   });
 

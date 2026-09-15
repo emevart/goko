@@ -21,6 +21,8 @@ import {
   PlayRequest,
   type PlayResponse,
   ResignRequest,
+  RedoRequest,
+  type RedoResponse,
   type Result,
   SetRankRequest,
   type StateCause,
@@ -32,17 +34,18 @@ import {
 import type { Engine } from './engine-client.ts';
 import { errorDetail } from './error-detail.ts';
 import type { EventBus } from './events.ts';
-import { applyMove, finishByScore, newGame, positionOf, resign as resignGame, setRank as setRankGame, undo as undoGame } from './game.ts';
+import { applyMove, finishByScore, newGame, positionOf, rebuild, resign as resignGame, setRank as setRankGame, undo as undoGame } from './game.ts';
 import { newId } from './ids.ts';
 import { SESSION_TTL_MS } from './sessions.ts';
-import type { SnapshotStore } from './store.ts';
+import type { AbandonMarks, RedoPortion, SnapshotStore } from './store.ts';
 
 // Входы операций — уже разобранные схемой тела (z.output): defaults подставлены.
-export type NewGameInput = z.output<typeof NewGameRequest>;
+export type NewGameInput = Omit<z.output<typeof NewGameRequest>, 'via'> & { via?: Via };
 export type PlayInput = z.output<typeof PlayRequest>;
 export type PassInput = z.output<typeof PassRequest>;
 export type ResignInput = z.output<typeof ResignRequest>;
 export type UndoInput = z.output<typeof UndoRequest>;
+export type RedoInput = z.output<typeof RedoRequest>;
 export type CorrectInput = z.output<typeof CorrectRequest>;
 export type SetRankInput = z.output<typeof SetRankRequest>;
 export type AnalyzeInput = z.output<typeof AnalyzeRequest>;
@@ -66,6 +69,9 @@ export const SCORE_BUDGET_MS = 20_000;
 export const ANALYZE_BUDGET_MS = 10_000;
 // Не больше стольких незавершённых партий на сервере (D-0012): лишний create — too_many_games.
 export const MAX_ACTIVE_GAMES = 20;
+// Не больше стольких незавершённых партий на клиента (D-0012): ключ — тот же, что у лимита частоты
+// (IPv4, IPv6 /64); у партии сессии — ключ владельца сессии. Лишний create — too_many_games со scope client.
+export const MAX_GAMES_PER_CLIENT = 3;
 // Незавершённая партия без активности дольше срока сессии брошена (D-0012): в лимите не считается,
 // init не ставит ей фоновую задачу. Порог в сервере — SESSION_TTL_MS из env, здесь его умолчание.
 export const STALE_GAME_MS = SESSION_TTL_MS;
@@ -81,7 +87,10 @@ export const INTERNAL_MESSAGE = 'internal server error';
 export const ENGINE_UNAVAILABLE_MESSAGE = 'engine is unavailable';
 
 export type GameServiceDeps = {
+  chooseMove?: import('./persona-player.ts').PersonaSelector;
   store: SnapshotStore;
+  // Отметки брошенных сменой партий на диске (D-0012); без них отметка живёт только в памяти.
+  marks?: AbandonMarks;
   engine: Engine;
   bus: EventBus;
   now?: () => Date;
@@ -89,7 +98,9 @@ export type GameServiceDeps = {
   retryDelaysMs?: readonly number[];
   scoreBudgetMs?: number;
   analyzeBudgetMs?: number;
+  engineMoveDelayMs?: number;
   maxActiveGames?: number;
+  maxGamesPerClient?: number;
   finishedRetentionMs?: number;
   staleGameMs?: number;
   newId?: () => string;
@@ -115,6 +126,15 @@ function lastActivity(state: GameState): number {
   return Date.parse(state.moves.at(-1)?.at ?? state.createdAt);
 }
 
+// Откат (undo, correct) снимает итог партии: всякий, кроме сдачи (то же условие, что в undo из game.ts).
+function reopensOnUndo(state: GameState): boolean {
+  return state.status === 'finished' && state.result?.reason !== 'resign';
+}
+
+// Итог возврата к партии вне счёта (D-0012): отказ сверх лимита, либо снятие удержания у отката, который
+// держит открываемую партию в счёте до конца операции; у обычного возврата ни того, ни другого.
+type Reactivation = { refused?: ApiError; release?: () => void };
+
 // Партии нужна фоновая задача: автосчёт после двух пасов или ход движка (то же условие, что в kick).
 function needsTask(state: GameState): boolean {
   return state.status === 'playing' && (state.consecutivePasses >= 2 || state.pendingEngineMove);
@@ -123,6 +143,7 @@ function needsTask(state: GameState): boolean {
 export class GameService {
   private readonly deps: GameServiceDeps;
   private readonly games = new Map<string, GameState>();
+  private readonly redoHistory = new Map<string, RedoPortion[]>();
   private readonly locks = new Map<string, Promise<void>>();
   private readonly waiters = new Map<string, Waiter[]>();
   private readonly sessionsByGame = new Map<string, string>();
@@ -131,6 +152,9 @@ export class GameService {
   private readonly currentGameBySession = new Map<string, string>();
   // Партии, чей create ещё пишет снапшот: занимают id и место в лимите незавершённых партий.
   private readonly pendingCreates = new Set<string>();
+  // Клиент, в чей счёт идёт партия (ключ из app.ts). Только память: после рестарта партии, созданные до него,
+  // в счёт клиента не идут, в общем лимите — идут. Записи завершённых партий вычищает checkClientLimit.
+  private readonly clientByGame = new Map<string, string>();
   // Отмена фоновых задач партии (ход движка и счёт делят один сигнал): смена партии в сессии и close.
   private readonly taskAborts = new Map<string, AbortController>();
   private readonly engineTasks = new Map<string, Promise<void>>();
@@ -142,6 +166,17 @@ export class GameService {
   // Партии, чья серия исчерпана, задача отменена сменой партии или устарела к init: kick их не трогает
   // до действия человека или открытия потока (resume).
   private readonly gaveUp = new Set<string>();
+  // Партии, брошенные сменой партии в сессии (D-0012): не в лимитах и без задачи init, как устаревшие.
+  // Возврат человека (resume, humanAction) в пределах лимита снимает отметку. Записи на диск идут цепочкой, close её ждёт.
+  private readonly abandoned = new Set<string>();
+  // Время последнего возврата к партии вне счёта, прошедшего лимиты: для порога устаревания это активность.
+  // Только память; записей не больше, чем партий в памяти.
+  private readonly returnedAt = new Map<string, number>();
+  // Завершённые партии, которые откат (undo, correct) прошёл лимиты и сейчас снимает с итога: в счёте до конца
+  // операции. Число удержаний, а не множество: снимает только сама операция, поставившая удержание, поэтому
+  // другая операция на той же партии (rank, неудачный undo), кончившаяся раньше, чужое удержание не трогает.
+  private readonly reopening = new Map<string, number>();
+  private marksWrite: Promise<void> = Promise.resolve();
   private closed = false;
 
   constructor(deps: GameServiceDeps) {
@@ -153,7 +188,9 @@ export class GameService {
     // Отказ удаления — строка [!] в лог, партия всё равно не загружается: следующий init попробует снова.
     const now = (this.deps.now?.() ?? new Date()).getTime();
     const cutoff = now - (this.deps.finishedRetentionMs ?? FINISHED_RETENTION_MS);
-    for (const state of await this.deps.store.load()) {
+    for (const snapshot of await this.deps.store.load()) {
+      const { redoHistory = [], ...loaded } = snapshot;
+      const state: GameState = { ...loaded, canRedo: redoHistory.length > 0 };
       if (state.status === 'finished' && lastActivity(state) < cutoff) {
         try {
           await this.deps.store.remove(state.id);
@@ -163,9 +200,15 @@ export class GameService {
         continue;
       }
       this.games.set(state.id, state);
+      if (redoHistory.length > 0) this.redoHistory.set(state.id, redoHistory);
     }
-    // Устаревшей партии задача не ставится (D-0012): после рестарта движок не доигрывает брошенные партии.
-    // Она отмечена, как отменённая, и её снова запустит действие человека или открытие потока (resume).
+    // Отметка идущей партии действует; отметка завершённой или удалённой партии — остаток, её снимаем.
+    for (const id of (await this.deps.marks?.loadAbandoned()) ?? []) {
+      if (this.games.get(id)?.status === 'playing') this.abandoned.add(id);
+      else this.persistMark(id, false);
+    }
+    // Устаревшей или брошенной сменой партии задача не ставится (D-0012): после рестарта движок не доигрывает
+    // брошенные партии. Она отмечена, как отменённая, и её снова запустит действие человека или открытие потока (resume).
     for (const state of this.games.values()) {
       if (this.isStale(state, now)) {
         if (needsTask(state)) this.gaveUp.add(state.id);
@@ -184,6 +227,11 @@ export class GameService {
     // Идущие вызовы движка отменяются: остановка не ждёт раздумья, результат после close не применяется.
     for (const controller of this.taskAborts.values()) controller.abort();
     await Promise.allSettled([...this.engineTasks.values(), ...this.scoringTasks.values()]);
+    // Обработчик запроса может поставить запись отметки, пока close ждёт: цепочка читается заново, пока растёт.
+    for (let last: Promise<void> | undefined; last !== this.marksWrite; ) {
+      last = this.marksWrite;
+      await last;
+    }
   }
 
   // Сессия удалена или истекла: привязки её партий снимаются, события в её канал больше не идут.
@@ -201,36 +249,58 @@ export class GameService {
 
   // Действие человека на партии (мутирующий запрос, открытие потока событий): исчерпанная серия
   // повторов начинается заново. Во время идущей серии и для незнакомой партии ничего не делает.
+  // Партия вне счёта (брошенная сменой или устаревшая) сверх лимита (D-0012) остаётся вне счёта: поток открыт,
+  // но задача не ставится.
   resume(id: string): void {
+    if (this.reactivate(id).refused) return;
     if (!this.gaveUp.delete(id)) return;
     const state = this.games.get(id);
     if (state) this.kick(state);
   }
 
-  // Мутирующее действие человека: отметка исчерпанной серии снимается до операции, а задача
-  // ставится после неё. Удачный коммит поставит задачу сам и уже по новому состоянию: после сдачи
+  // Мутирующее действие человека под мьютексом партии: отметка исчерпанной серии снимается до операции, а
+  // задача ставится после неё. Удачный коммит поставит задачу сам и уже по новому состоянию: после сдачи
   // движок не зовётся. Отклонённая операция (not_your_turn, nothing_to_undo, отказ записи) задачу
   // ставит здесь, и серия идёт заново. resume (открытие потока) ставит задачу сразу: операции нет.
-  private async humanAction<T>(id: string, human: boolean, op: () => Promise<T>): Promise<T> {
+  // reopen передаёт откат (undo, correct): партия, с которой он снимет итог, проверяется как возврат (D-0012).
+  private async humanAction<T>(id: string, human: boolean, op: () => Promise<T>, reopen?: { clientKey?: string }): Promise<T> {
+    // Возврат к партии вне счёта сверх лимита — отказ до операции: партия не меняется и остаётся вне счёта.
+    const { refused, release }: Reactivation = human ? this.reactivate(id, reopen) : {};
+    if (refused) throw refused;
     const resumed = human && this.gaveUp.delete(id);
+    // Удержание открываемой откатом партии в счёте: снимает только эта операция, когда её запись кончилась.
+    let held = release;
     try {
-      return await op();
+      return await this.locked(id, () => {
+        // Партия завершилась счётом, пока откат ждал очереди (автосчёт писал итог): при запросе проверять было
+        // нечего. Откат проходит лимиты здесь, по состоянию под мьютексом, и держит партию в счёте до записи.
+        const state = this.games.get(id);
+        if (human && reopen !== undefined && held === undefined && state !== undefined && reopensOnUndo(state)) {
+          const late = this.reactivate(id, reopen);
+          if (late.refused) throw late.refused;
+          held = late.release;
+        }
+        return op();
+      });
     } finally {
+      held?.();
       const state = resumed ? this.games.get(id) : undefined;
       if (state) this.kick(state);
     }
   }
 
   // Шов для тестов на утечки: размеры внутренних таблиц, которые публичным API не видны.
-  internalSizes(): { sessionsByGame: number; currentGames: number; waiters: number; gaveUp: number; taskAborts: number } {
+  internalSizes(): { sessionsByGame: number; currentGames: number; clientGames: number; waiters: number; gaveUp: number; taskAborts: number; reopening: number } {
     let waiters = 0;
     for (const list of this.waiters.values()) waiters += list.length;
     return {
       sessionsByGame: this.sessionsByGame.size,
       currentGames: this.currentGameBySession.size,
+      clientGames: this.clientByGame.size,
       waiters,
       gaveUp: this.gaveUp.size,
       taskAborts: this.taskAborts.size,
+      reopening: this.reopening.size,
     };
   }
 
@@ -240,7 +310,7 @@ export class GameService {
     return state;
   }
 
-  async create(req: NewGameInput, opts: { sessionId?: string } = {}): Promise<NewGameResponse> {
+  async create(req: NewGameInput, opts: { sessionId?: string; clientKey?: string } = {}): Promise<NewGameResponse> {
     for (const seat of [req.black, req.white]) {
       if (seat.controller === 'external') throw new ApiError('unsupported_controller', 'the external seat arrives at stage 2');
     }
@@ -250,7 +320,9 @@ export class GameService {
       throw new ApiError('unsupported_controller', 'two engine seats are not supported', { black: 'engine', white: 'engine' });
     }
     const withRank = (seat: NewGameInput['black']) => (seat.controller === 'engine' && !seat.rank ? { ...seat, rank: DEFAULT_RANK } : seat);
-    this.checkActiveLimit();
+    const replaced = opts.sessionId === undefined ? undefined : this.currentGameBySession.get(opts.sessionId);
+    const refused = this.activeLimitError(replaced) ?? (opts.clientKey === undefined ? undefined : this.clientLimitError(opts.clientKey, replaced));
+    if (refused) throw refused;
     const id = this.freeId();
     const state = newGame({
       id,
@@ -259,15 +331,17 @@ export class GameService {
       seats: { B: withRank(req.black), W: withRank(req.white) },
     });
     this.pendingCreates.add(id);
+    if (opts.clientKey !== undefined) this.clientByGame.set(id, opts.clientKey);
     // session.game шлёт commit: после записи снапшота, раньше событий партии (раздел 5 спеки).
     if (opts.sessionId) this.sessionsByGame.set(id, opts.sessionId);
     const waiter = state.pendingEngineMove && req.waitForReply ? this.registerWaiter(id, state.revision) : null;
     try {
-      await this.commit(state, 'new', 'system');
+      await this.commit(state, 'new', 'system', req.via ?? 'api', undefined, []);
     } catch (e) {
       // Партии нет и не будет: id больше не встретится, поэтому привязка к сессии и ожидающий
       // первого хода снимаются здесь, а не висят до close.
       this.sessionsByGame.delete(id);
+      this.clientByGame.delete(id);
       this.releaseWaiters(id);
       throw e;
     } finally {
@@ -282,16 +356,16 @@ export class GameService {
 
   async play(id: string, req: PlayInput, by: By = 'human'): Promise<PlayResponse> {
     // На ходе движка ход человека отклоняется (not_your_turn), но серию всё равно перезапускает.
-    const { state, move, waiter } = await this.humanAction(id, by === 'human', () => this.locked(id, async () => {
+    const { state, move, waiter } = await this.humanAction(id, by === 'human', async () => {
       const prev = this.get(id);
       this.checkRevision(prev, req.expectedRevision);
       const color = req.color ?? prev.toPlay;
       this.checkSeat(prev, color, by);
       const next = applyMove(prev, color, req.coord, this.now());
       const waiter = req.waitForReply && next.state.pendingEngineMove ? this.registerWaiter(id, next.state.revision) : null;
-      await this.commitOrReleaseWaiter(next.state, next.move.coord === 'pass' ? 'pass' : 'play', by, req.via);
-      return { ...next, waiter };
-    }));
+      await this.commitOrReleaseWaiter(next.state, next.move.coord === 'pass' ? 'pass' : 'play', by, req.via, [], true);
+      return { ...next, state: this.get(id), waiter };
+    });
     return this.withReply(id, state, move, waiter);
   }
 
@@ -300,7 +374,7 @@ export class GameService {
   }
 
   async resign(id: string, req: ResignInput, by: By = 'human'): Promise<StateResponse> {
-    return this.humanAction(id, by === 'human', () => this.locked(id, async () => {
+    return this.humanAction(id, by === 'human', async () => {
       const prev = this.get(id);
       // Сдаться за место движка может только сам движок (раздел 5 спеки). Отказ связан с местом, а не
       // с очередью хода: bad_request с причиной not_your_seat, а не not_your_turn.
@@ -309,49 +383,74 @@ export class GameService {
       }
       this.checkSeat(prev, req.color, by);
       const next = resignGame(prev, req.color);
-      await this.commit(next, 'resign', by, req.via);
-      return { state: next };
-    }));
+      await this.commit(next, 'resign', by, req.via, undefined, [], true);
+      return { state: this.get(id) };
+    });
   }
 
-  async undo(id: string, req: UndoInput, by: By = 'human'): Promise<UndoResponse> {
-    return this.humanAction(id, by === 'human', () => this.locked(id, async () => {
+  // clientKey — адрес запроса: в его счёт идёт партия без владельца, которую откат снимает с итога (D-0012).
+  async undo(id: string, req: UndoInput, by: By = 'human', opts: { clientKey?: string } = {}): Promise<UndoResponse> {
+    return this.humanAction(id, by === 'human', async () => {
       const prev = this.get(id);
       this.checkRevision(prev, req.expectedRevision);
       const rolled = undoGame(prev);
-      await this.commit(rolled.state, 'undo', by, req.via);
+      const portion: RedoPortion = {
+        moves: [...rolled.removed].reverse(),
+        ...(prev.result ? { result: structuredClone(prev.result) } : {}),
+      };
+      await this.commit(rolled.state, 'undo', by, req.via, undefined, [...(this.redoHistory.get(id) ?? []), portion], true);
       return { state: this.get(id), removed: rolled.removed };
-    }));
+    }, opts);
+  }
+
+  async redo(id: string, req: RedoInput, by: By = 'human', opts: { clientKey?: string } = {}): Promise<RedoResponse> {
+    return this.humanAction(id, by === 'human', async () => {
+      const prev = this.get(id);
+      this.checkRevision(prev, req.expectedRevision);
+      const history = this.redoHistory.get(id) ?? [];
+      const portion = history.at(-1);
+      if (!portion) throw new ApiError('nothing_to_redo', 'there are no moves to restore');
+      const replayed = rebuild(prev, [...prev.moves, ...portion.moves]);
+      const next: GameState = portion.result
+        ? { ...replayed, status: 'finished', pendingEngineMove: false, result: structuredClone(portion.result) }
+        : replayed;
+      await this.commit(next, 'redo', by, req.via, undefined, history.slice(0, -1), true);
+      return { state: this.get(id), restored: portion.moves.map((move) => ({ ...move })) };
+    }, opts);
   }
 
   // Атомарно: откат пары, новый ход человека, новый ответ движка. Одно событие state.updated cause 'correct'.
-  async correct(id: string, req: CorrectInput, by: By = 'human'): Promise<PlayResponse> {
-    const { state, move, waiter } = await this.humanAction(id, by === 'human', () => this.locked(id, async () => {
+  async correct(id: string, req: CorrectInput, by: By = 'human', opts: { clientKey?: string } = {}): Promise<PlayResponse> {
+    const { state, move, waiter } = await this.humanAction(id, by === 'human', async () => {
       const rolled = undoGame(this.get(id));
       const color = rolled.state.toPlay;
       this.checkSeat(rolled.state, color, by);
       const next = applyMove(rolled.state, color, req.coord, this.now());
       const waiter = req.waitForReply && next.state.pendingEngineMove ? this.registerWaiter(id, next.state.revision) : null;
-      await this.commitOrReleaseWaiter(next.state, 'correct', by, req.via);
-      return { ...next, waiter };
-    }));
+      await this.commitOrReleaseWaiter(next.state, 'correct', by, req.via, [], true);
+      return { ...next, state: this.get(id), waiter };
+    }, opts);
     return this.withReply(id, state, move, waiter);
   }
 
   async setRank(id: string, req: SetRankInput): Promise<StateResponse> {
-    return this.humanAction(id, true, () => this.locked(id, async () => {
+    return this.humanAction(id, true, async () => {
       const next = setRankGame(this.get(id), req.color, req.rank);
-      await this.commit(next, 'rank', 'human');
+      await this.commit(next, 'rank', 'human', undefined, undefined, undefined, true);
       return { state: next };
-    }));
+    });
   }
 
-  async analyze(id: string, req: AnalyzeInput): Promise<Analysis> {
+  async analyze(id: string, req: AnalyzeInput, outer?: AbortSignal): Promise<Analysis> {
     const state = this.get(id);
-    const call = this.budgeted((signal) => this.deps.engine.analyze({ ...this.engineRequest(state), maxVisits: req.maxVisits, includeOwnership: true }, signal), this.deps.analyzeBudgetMs ?? ANALYZE_BUDGET_MS);
+    this.checkRevision(state, req.expectedRevision);
+    const call = this.budgeted((signal) => this.deps.engine.analyze({ ...this.engineRequest(state), maxVisits: req.maxVisits, includeOwnership: true }, signal), this.deps.analyzeBudgetMs ?? ANALYZE_BUDGET_MS, outer);
     const r = await call.result;
+    this.checkRevision(this.get(id), state.revision);
     const ownership = r.ownership ?? new Array<number>(state.board.length).fill(0);
     return {
+      gameId: state.id,
+      revision: state.revision,
       visits: r.visits,
       winrateB: r.winrateB,
       scoreLeadB: r.scoreLeadB,
@@ -464,18 +563,104 @@ export class GameService {
   }
 
   // Лимит незавершённых партий (D-0012). Партия, чей create ещё пишет снапшот, уже занимает место;
-  // устаревшая (без активности дольше порога на момент create) — нет.
-  private checkActiveLimit(): void {
+  // устаревшая (без активности дольше порога на момент create) и брошенная сменой — нет. replaced — текущая
+  // партия сессии, в которой идёт create: новая партия её заменит, поэтому своей замене она не мешает.
+  // Отказ возвращается, а не бросается: create его бросает, resume молча оставляет партию вне счёта.
+  private activeLimitError(replaced?: string): ApiError | undefined {
     const max = this.deps.maxActiveGames ?? MAX_ACTIVE_GAMES;
     const now = (this.deps.now?.() ?? new Date()).getTime();
     let active = 0;
-    for (const state of this.games.values()) if (state.status !== 'finished' && !this.isStale(state, now)) active++;
+    for (const state of this.games.values()) if (state.id !== replaced && this.counted(state, now)) active++;
     for (const id of this.pendingCreates) if (!this.games.has(id)) active++;
-    if (active >= max) throw new ApiError('too_many_games', `limit of ${max} unfinished games reached`, { max });
+    return active >= max ? new ApiError('too_many_games', `limit of ${max} unfinished games reached`, { max }) : undefined;
   }
 
+  // Лимит незавершённых партий на клиента (D-0012), счёт как у общего: создаваемая уже в счёте, завершённая,
+  // устаревшая и брошенная сменой — нет, заменяемая текущая партия сессии — тоже нет. Брошенная и завершённая
+  // счётом не вычищаются: возврат или откат пройдёт этот же лимит владельца. Вычищается только сданная партия.
+  private clientLimitError(clientKey: string, replaced?: string): ApiError | undefined {
+    const max = this.deps.maxGamesPerClient ?? MAX_GAMES_PER_CLIENT;
+    const now = (this.deps.now?.() ?? new Date()).getTime();
+    let active = 0;
+    for (const [id, key] of this.clientByGame) {
+      const state = this.games.get(id);
+      if (state?.status === 'finished' && !reopensOnUndo(state)) {
+        this.clientByGame.delete(id);
+        continue;
+      }
+      if (key !== clientKey || id === replaced) continue;
+      if (state ? this.counted(state, now) : this.pendingCreates.has(id)) active++;
+    }
+    return active >= max ? new ApiError('too_many_games', `limit of ${max} unfinished games per client reached`, { max, scope: 'client' }) : undefined;
+  }
+
+  // В счёте лимитов: незавершённая и не устаревшая или завершённая, которую сейчас снимает с итога откат.
+  private counted(state: GameState, now: number): boolean {
+    return this.reopening.has(state.id) || (state.status !== 'finished' && !this.isStale(state, now));
+  }
+
+  // Не в счёте лимитов и без задачи init: без активности дольше порога или брошена сменой партии (D-0012).
+  // Возврат к партии вне счёта в пределах лимита — тоже активность.
   private isStale(state: GameState, now: number): boolean {
-    return lastActivity(state) < now - (this.deps.staleGameMs ?? STALE_GAME_MS);
+    const active = Math.max(lastActivity(state), this.returnedAt.get(state.id) ?? 0);
+    return this.abandoned.has(state.id) || active < now - (this.deps.staleGameMs ?? STALE_GAME_MS);
+  }
+
+  // Прежняя идущая партия сессии брошена: отметка в памяти сразу, на диск — в очередь записей.
+  private abandon(id: string): void {
+    if (this.games.get(id)?.status !== 'playing' || this.abandoned.has(id)) return;
+    this.abandoned.add(id);
+    this.persistMark(id, true);
+  }
+
+  // Человек вернулся к партии вне счёта — брошенной сменой или устаревшей: она снова в счёте, если проходит те же
+  // лимиты, что create (D-0012), — сначала общий, затем клиента, в чей счёт шла партия. Иначе один адрес набрал бы
+  // весь общий лимит по кругу: «новая партия в сессии → поток брошенной» или по 3 партии за порог устаревания,
+  // затем возврат ко всем. Сверх лимита партия остаётся вне счёта, и отказ возвращается вызывающему. Партия без
+  // записи клиента (создана до рестарта) проходит только общий лимит. Партия в счёте проверку не проходит.
+  // Откат (reopen: undo, correct) партии, завершённой не сдачей, — тоже возврат: он снимает итог. Партия без
+  // владельца идёт в счёт адреса запроса, и адрес записывается владельцем.
+  private reactivate(id: string, reopen?: { clientKey?: string }): Reactivation {
+    const state = this.games.get(id);
+    const now = (this.deps.now?.() ?? new Date()).getTime();
+    if (state === undefined) return {};
+    const reopening = reopen !== undefined && reopensOnUndo(state);
+    if (!reopening && (state.status === 'finished' || !this.isStale(state, now))) return {};
+    const clientKey = this.clientByGame.get(id) ?? reopen?.clientKey;
+    // Сама партия себе не мешает: второй одновременный откат той же партии уже видит её в счёте.
+    const refused = this.activeLimitError(id) ?? (clientKey === undefined ? undefined : this.clientLimitError(clientKey, id));
+    if (refused) return { refused };
+    if (clientKey !== undefined) this.clientByGame.set(id, clientKey);
+    this.returnedAt.set(id, now);
+    if (this.abandoned.delete(id)) this.persistMark(id, false);
+    // В счёте сразу, до хода: одновременные возвраты видят друг друга. Открываемая откатом до коммита ещё
+    // завершена, поэтому до конца операции её держит удержание, и снимает его сама операция.
+    return reopening ? { release: this.holdReopening(id) } : {};
+  }
+
+  // Удержание завершённой партии в счёте на время отката; возвращает снятие, humanAction зовёт его ровно раз.
+  // Удержания считаются: два отката одной партии, или откат и его неудачный близнец, держат её по отдельности.
+  private holdReopening(id: string): () => void {
+    this.reopening.set(id, (this.reopening.get(id) ?? 0) + 1);
+    return () => {
+      const left = (this.reopening.get(id) ?? 1) - 1;
+      if (left > 0) this.reopening.set(id, left);
+      else this.reopening.delete(id);
+    };
+  }
+
+  // Отказ записи — строка [!], память уже верна. После рестарта незаписанная отметка значит, что партия
+  // в счёте и получит задачу, как свежая; неснятая — что партия вне счёта до следующего возврата.
+  private persistMark(id: string, abandoned: boolean): void {
+    const marks = this.deps.marks;
+    if (!marks) return;
+    this.marksWrite = this.marksWrite.then(async () => {
+      try {
+        await (abandoned ? marks.markAbandoned(id) : marks.clearAbandoned(id));
+      } catch (e) {
+        this.log(`[!] could not ${abandoned ? 'mark' : 'unmark'} game ${id} as abandoned: ${errorDetail(e)}`);
+      }
+    });
   }
 
   // Id партии не должен совпасть ни с существующей, ни с создаваемой (D-0009): совпавший
@@ -541,12 +726,16 @@ export class GameService {
 
   // Фиксирует новое состояние: снапшот, событие, пробуждение ожидающих, запуск движка или счёта.
   // humanFallback передаёт только ход движка: признак относится к одному ходу, а не к партии.
-  private async commit(next: GameState, cause: StateCause, by: By, via?: Via, humanFallback?: boolean): Promise<void> {
+  private async commit(next: GameState, cause: StateCause, by: By, via?: Via, humanFallback?: boolean, history = this.redoHistory.get(next.id) ?? [], abortObsolete = false, engineDecision?: import('@goko/protocol').EngineDecision): Promise<void> {
     const prev = this.games.get(next.id);
+    next = { ...next, canRedo: history.length > 0 };
     // Снапшот пишется до публикации состояния: читатель, увидевший новое состояние
     // (или дождавшийся его опросом), уже не может опередить запись на диск.
-    await this.deps.store.save(next);
+    await this.deps.store.save(next, history);
     this.games.set(next.id, next);
+    if (history.length > 0) this.redoHistory.set(next.id, history);
+    else this.redoHistory.delete(next.id);
+    if (abortObsolete) this.taskAborts.get(next.id)?.abort();
     // Удачный коммит обнуляет счёт серии повторов: новая позиция — новая серия. Коммит человека —
     // после correct во время раздумья пауза снова первая, как после undo и play. Коммит движка или
     // счёта — удачный конец фоновой задачи; обнулять здесь, а не по выходу задачи: коммит паса движка
@@ -558,7 +747,7 @@ export class GameService {
     // (currentGameId, поток сессии) сразу читает её состояние. При отказе записи события нет.
     const sessionId = this.sessionsByGame.get(next.id);
     if (cause === 'new' && sessionId) this.switchSessionGame(sessionId, next.id);
-    this.emitGame(next.id, { type: 'state.updated', state: next, cause, by, ...(via ? { via } : {}), ...(humanFallback === undefined ? {} : { humanFallback }) });
+    this.emitGame(next.id, { type: 'state.updated', state: next, cause, by, ...(via ? { via } : {}), ...(humanFallback === undefined ? {} : { humanFallback }), ...(engineDecision ? { engineDecision } : {}) });
     if (next.status === 'finished' && prev?.status !== 'finished' && next.result) this.emitGame(next.id, { type: 'game.finished', result: next.result });
     this.settleWaiters(next, cause, prev);
     this.kick(next);
@@ -566,9 +755,9 @@ export class GameService {
 
   // Коммит хода с ожидающим ответа на его ревизию: при отказе записи ревизии не будет, и ожидающий
   // снимается сразу. Ожидающие прежних ревизий (ответ движка на прошлый ход) остаются.
-  private async commitOrReleaseWaiter(next: GameState, cause: StateCause, by: By, via?: Via): Promise<void> {
+  private async commitOrReleaseWaiter(next: GameState, cause: StateCause, by: By, via?: Via, history?: RedoPortion[], abortObsolete = false): Promise<void> {
     try {
-      await this.commit(next, cause, by, via);
+      await this.commit(next, cause, by, via, undefined, history, abortObsolete);
     } catch (e) {
       this.releaseWaitersFrom(next.id, next.revision);
       throw e;
@@ -596,6 +785,7 @@ export class GameService {
     if (previous !== undefined && previous !== id) {
       if (this.sessionsByGame.get(previous) === sessionId) this.sessionsByGame.delete(previous);
       this.cancelBackground(previous);
+      this.abandon(previous);
     }
     this.deps.bus.emit(`session:${sessionId}`, { type: 'session.game', gameId: id });
   }
@@ -749,6 +939,7 @@ export class GameService {
       if (!state || state.status !== 'playing' || !state.pendingEngineMove) return;
       const color = state.toPlay;
       const rank = state.seats[color].rank ?? DEFAULT_RANK;
+      const startedAt = performance.now();
       this.emitGame(id, { type: 'engine.thinking', gameId: id, color });
       let reply: Awaited<ReturnType<Engine['genmove']>>;
       try {
@@ -762,6 +953,18 @@ export class GameService {
         if (await this.onEngineFailure(id, e, signal)) continue;
         return;
       }
+      let playerChoice: import('./persona-player.ts').PersonaChoice | null = null;
+      if (this.deps.chooseMove && !this.outdated(id,state) && !signal.aborted) {
+        try { playerChoice = await this.deps.chooseMove(state,reply,signal); } catch { /* остаётся исходный ход */ }
+        if (playerChoice) {
+          try { applyMove(state,color,playerChoice.coord,this.now()); reply = {...reply,move:playerChoice.coord}; }
+          catch { playerChoice = null; }
+        }
+        this.log(`[OK] player: ${playerChoice ? 'persona' : 'engine fallback'} game=${id} revision=${state.revision}`);
+      }
+      const delayLeft = (this.deps.engineMoveDelayMs ?? 0) - (performance.now() - startedAt);
+      if (delayLeft > 0) await this.sleep(delayLeft, signal);
+      if (this.closed || signal.aborted) return;
       const applied = await this.locked(id, async () => {
         const current = this.games.get(id);
         // Партия изменилась, пока движок думал, или задача отменена: ответ не применяется.
@@ -770,7 +973,7 @@ export class GameService {
         const engineLead = color === 'B' ? reply.scoreLeadB : -reply.scoreLeadB;
         // Спека говорит «после 60-го хода», поэтому строгое `>`, а не `>=`.
         if (current.moves.length > ENGINE_RESIGN_AFTER_MOVE && engineWinrate < ENGINE_RESIGN_WINRATE && engineLead < ENGINE_RESIGN_LEAD) {
-          await this.commit(resignGame(current, color), 'resign', 'engine');
+          await this.commit(resignGame(current, color), 'resign', 'engine', undefined, undefined, []);
           return true;
         }
         let next: ReturnType<typeof applyMove>;
@@ -780,7 +983,13 @@ export class GameService {
           this.log(`[!] the engine suggested an illegal move ${reply.move}: ${e instanceof Error ? e.message : String(e)}; passing instead`);
           next = applyMove(current, color, 'pass', this.now());
         }
-        await this.commit(next.state, 'engine', 'engine', undefined, reply.humanFallback);
+        await this.commit(next.state, 'engine', 'engine', undefined, reply.humanFallback, [], false, {
+          moveN: next.move.n,
+          basedOnRevision: state.revision,
+          rankCandidates: reply.rankCandidates,
+          candidateAnalysis: reply.candidateAnalysis,
+          ...(playerChoice ? {playerChoice} : {}),
+        });
         return true;
       });
       if (applied) return;
@@ -843,7 +1052,7 @@ export class GameService {
         const current = this.games.get(id);
         if (this.closed || signal.aborted || !current || current.revision !== state.revision) return false;
         // причина `pass`: спека не вводит отдельной причины для автосчёта
-        await this.commit(finishByScore(current, result), 'pass', 'system');
+        await this.commit(finishByScore(current, result), 'pass', 'system', undefined, undefined, []);
         return true;
       });
       if (applied) return;

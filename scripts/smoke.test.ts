@@ -49,7 +49,9 @@ describe('smoke: окружение game-server (D-0001)', () => {
 
   it('свои ключ, порт, каталог и фейковый движок; чужие пределы сессий не протекают', () => {
     const env = gameServerEnv(parent, { port: 18787, dataDir: '/tmp/x' });
-    expect(env).toMatchObject({ APP_KEY: SMOKE_APP_KEY, PORT: '18787', HOST: '127.0.0.1', DATA_DIR: '/tmp/x', FAKE_ENGINE: '1' });
+    expect(env).toMatchObject({ APP_KEY: SMOKE_APP_KEY, PORT: '18787', HOST: '127.0.0.1', DATA_DIR: '/tmp/x', FAKE_ENGINE: '1', ALLOW_SESSIONLESS_GAMES: '1', ENGINE_MOVE_DELAY_MS: '0' });
+    // smoke создаёт партии через POST /api/games: флаг свой, значение родителя не протекает.
+    expect(gameServerEnv({ ALLOW_SESSIONLESS_GAMES: '0' }, { port: 1, dataDir: '/tmp/x', real: true }).ALLOW_SESSIONLESS_GAMES).toBe('1');
     expect(env).not.toHaveProperty('ENGINE_KEY');
     expect(env).not.toHaveProperty('MAX_SESSIONS');
     expect(env).not.toHaveProperty('SESSION_TTL_MS');

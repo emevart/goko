@@ -14,15 +14,17 @@ import {
   type ErrorCode,
   type GameEvent,
   NewGameRequest,
+  RestartConversationRequest,
   PassRequest,
   PlayRequest,
   ResignRequest,
+  RedoRequest,
   SetRankRequest,
   UndoRequest,
 } from '@goko/protocol';
 import { errorDetail } from './error-detail.ts';
 import type { EventBus } from './events.ts';
-import { type RoomCreator, createSessionRoom, mintToken } from './livekit.ts';
+import { type AgentDispatcher, type RoomCreator, createSessionRoom, mintToken, replaceSessionAgent } from './livekit.ts';
 import { API_RATE, CREATE_RATE, type RateRule, RateLimiter, addressKey } from './rate-limit.ts';
 import type { GameService } from './service.ts';
 import type { SessionManager } from './sessions.ts';
@@ -34,7 +36,7 @@ export type AppDeps = {
   appKey: string;
   // tokenTtlSeconds = floor(SESSION_TTL_MS / 1000): токен телефона не переживает сессию (D-0001).
   livekit: { url: string; apiKey: string; apiSecret: string; agentName: string; tokenTtlSeconds: number };
-  rooms: RoomCreator;
+  rooms: RoomCreator & AgentDispatcher;
   heartbeatMs?: number;
   // Остановка сервера: открытые потоки SSE закрываются, новые закрываются сразу.
   closing?: AbortSignal;
@@ -46,6 +48,9 @@ export type AppDeps = {
   rateLimits?: { api: RateRule; create: RateRule };
   // TRUST_PROXY=1: адрес клиента — последний в X-Forwarded-For (его дописывает Caddy), иначе адрес сокета.
   trustProxy?: boolean;
+  // ALLOW_SESSIONLESS_GAMES=1: POST /api/games создаёт партию без сессии (dev, smoke). Без флага партии создаются
+  // только внутри сессии (D-0012): публичный APP_KEY иначе давал бы партии мимо MAX_SESSIONS.
+  sessionlessGames?: boolean;
   log?: (line: string) => void;
 };
 
@@ -87,7 +92,7 @@ const digest = (value: string): Buffer => createHash('sha256').update(value, 'ut
 
 // Адрес IPv6 — до 45 символов; длиннее ключ лимитера не бывает, чем бы ни был заголовок.
 const MAX_CLIENT_KEY_LENGTH = 64;
-const CREATE_PATH = /^\/api\/(sessions|games|sessions\/[^/]+\/games)$/;
+const CREATE_PATH = /^\/api\/(sessions|games|sessions\/[^/]+\/(games|conversation))$/;
 
 // Ключ лимитера: адрес сокета от @hono/node-server (c.env.incoming). За прокси все соединения
 // приходят с его адреса, поэтому при trustProxy берётся последний адрес X-Forwarded-For: его дописал
@@ -283,10 +288,20 @@ export function createApp(deps: AppDeps): Hono {
   // currentGameId переключается здесь же, по session.game: порядок совпадает с порядком событий
   // в потоке, а не с порядком ответов (ответ с ходом движка приходит позже).
   const watchers = new Map<string, () => void>();
+  // Владелец сессии — ключ адреса, создавшего её (D-0012): партии сессии идут в его счёт, даже когда их
+  // создаёт voice-agent со своего адреса. Запись живёт, пока жив наблюдатель сессии.
+  const sessionOwners = new Map<string, string>();
+  const conversationRestarts = new Map<string, { requestId: string; response: Promise<import('@goko/protocol').CreateSessionResponse> }>();
+  const conversationQueues = new Map<string, Promise<void>>();
+  const conversationHistory = new Map<string, { current: string; seen: string[] }>();
   const isAlive = (sid: string) => sessions.list().some((s) => s.id === sid);
   const unwatch = (sid: string) => {
     watchers.get(sid)?.();
     watchers.delete(sid);
+    sessionOwners.delete(sid);
+    conversationRestarts.delete(sid);
+    conversationQueues.delete(sid);
+    conversationHistory.delete(sid);
   };
   const pruneWatchers = () => {
     for (const sid of [...watchers.keys()]) if (!isAlive(sid)) unwatch(sid);
@@ -327,6 +342,7 @@ export function createApp(deps: AppDeps): Hono {
       deps.log?.(`[X] game-server: сессия ${session.id} не создана: ${redact(e instanceof Error ? e.message : String(e))}`);
       throw new ApiError('internal', 'could not prepare the LiveKit room for the session');
     }
+    sessionOwners.set(session.id, clientKey(c, trustProxy));
     watch(session.id);
     return c.json({ session, livekit: { url: deps.livekit.url, token } });
   });
@@ -339,7 +355,53 @@ export function createApp(deps: AppDeps): Hono {
     const req = await parseBody(c, NewGameRequest);
     // currentGameId ставит наблюдатель по session.game; сессия, истёкшая пока движок думал, не превращает
     // уже созданную партию в 404.
-    return c.json(await service.create(req, { sessionId: sid }));
+    // Защитный путь: владелец пишется при POST /api/sessions, а сессии рестарт не переживают, поэтому в prod
+    // сессии без владельца нет. Сессия, появившаяся другим путём (тесты, будущие маршруты), — счёт по адресу запроса.
+    return c.json(await service.create(req, { sessionId: sid, clientKey: sessionOwners.get(sid) ?? clientKey(c, trustProxy) }));
+  });
+
+  app.post('/api/sessions/:sid/conversation', async (c) => {
+    const sid = c.req.param('sid');
+    const session = sessions.get(sid);
+    sessions.touch(sid);
+    watch(sid);
+    const req = await parseBody(c, RestartConversationRequest);
+    const history = conversationHistory.get(sid);
+    if (history?.seen.includes(req.requestId) && history.current !== req.requestId) {
+      throw new ApiError('revision_conflict', 'conversation restart request is stale', { currentRequestId: history.current });
+    }
+    if (!history?.seen.includes(req.requestId)) {
+      const seen = [...(history?.seen ?? []), req.requestId].slice(-16);
+      conversationHistory.set(sid, { current: req.requestId, seen });
+    }
+    const previous = conversationRestarts.get(sid);
+    if (previous?.requestId === req.requestId) return c.json(await previous.response);
+    const before = conversationQueues.get(sid) ?? Promise.resolve();
+    const response = before.catch(() => {}).then(async () => {
+      const token = await mintToken({
+        apiKey: deps.livekit.apiKey,
+        apiSecret: deps.livekit.apiSecret,
+        room: session.room,
+        identity: `phone-${session.id}`,
+        ttlSeconds: deps.livekit.tokenTtlSeconds,
+      });
+      await replaceSessionAgent(deps.rooms, { room: session.room, agentName: deps.livekit.agentName, sessionId: session.id, requestId: req.requestId });
+      return { session: sessions.get(sid), livekit: { url: deps.livekit.url, token } };
+    });
+    const queued = response.then(() => {}, () => {});
+    conversationQueues.set(sid, queued);
+    void queued.finally(() => {
+      if (conversationQueues.get(sid) === queued) conversationQueues.delete(sid);
+    });
+    conversationRestarts.set(sid, { requestId: req.requestId, response });
+    try {
+      const result = await response;
+      if (conversationRestarts.get(sid)?.response === response) conversationRestarts.delete(sid);
+      return c.json(result);
+    } catch (e) {
+      if (conversationRestarts.get(sid)?.response === response) conversationRestarts.delete(sid);
+      throw e;
+    }
   });
 
   app.get('/api/sessions/:sid/events', (c) => {
@@ -355,16 +417,26 @@ export function createApp(deps: AppDeps): Hono {
   });
 
   // ---- партии ----
-  app.post('/api/games', async (c) => c.json(await service.create(await parseBody(c, NewGameRequest))));
-  app.get('/api/games', (c) => c.json({ games: service.list() }));
+  app.post('/api/games', async (c) => {
+    if (deps.sessionlessGames !== true) throw new ApiError('bad_request', 'games are created only inside a session', { reason: 'sessionless_disabled' });
+    return c.json(await service.create(await parseBody(c, NewGameRequest), { clientKey: clientKey(c, trustProxy) }));
+  });
+  // Список отдаёт id всех партий: с ним один адрес вернул бы в счёт чужие партии. Нужен только dev и smoke,
+  // поэтому доступен под тем же флагом, что партии без сессии (D-0012).
+  app.get('/api/games', (c) => {
+    if (deps.sessionlessGames !== true) throw new ApiError('bad_request', 'the game list is available only with sessionless games enabled', { reason: 'list_disabled' });
+    return c.json({ games: service.list() });
+  });
   app.get('/api/games/:id', (c) => c.json(service.get(c.req.param('id'))));
   app.post('/api/games/:id/play', async (c) => c.json(await service.play(c.req.param('id'), await parseBody(c, PlayRequest))));
   app.post('/api/games/:id/pass', async (c) => c.json(await service.pass(c.req.param('id'), await parseBody(c, PassRequest))));
   app.post('/api/games/:id/resign', async (c) => c.json(await service.resign(c.req.param('id'), await parseBody(c, ResignRequest))));
-  app.post('/api/games/:id/undo', async (c) => c.json(await service.undo(c.req.param('id'), await parseBody(c, UndoRequest))));
-  app.post('/api/games/:id/correct', async (c) => c.json(await service.correct(c.req.param('id'), await parseBody(c, CorrectRequest))));
+  // Откат партии, завершённой счётом, возвращает её в счёт: без владельца в памяти — в счёт адреса запроса (D-0012).
+  app.post('/api/games/:id/undo', async (c) => c.json(await service.undo(c.req.param('id'), await parseBody(c, UndoRequest), 'human', { clientKey: clientKey(c, trustProxy) })));
+  app.post('/api/games/:id/redo', async (c) => c.json(await service.redo(c.req.param('id'), await parseBody(c, RedoRequest), 'human', { clientKey: clientKey(c, trustProxy) })));
+  app.post('/api/games/:id/correct', async (c) => c.json(await service.correct(c.req.param('id'), await parseBody(c, CorrectRequest), 'human', { clientKey: clientKey(c, trustProxy) })));
   app.post('/api/games/:id/rank', async (c) => c.json(await service.setRank(c.req.param('id'), await parseBody(c, SetRankRequest))));
-  app.post('/api/games/:id/analyze', async (c) => c.json(await service.analyze(c.req.param('id'), await parseBody(c, AnalyzeRequest))));
+  app.post('/api/games/:id/analyze', async (c) => c.json(await service.analyze(c.req.param('id'), await parseBody(c, AnalyzeRequest), c.req.raw.signal)));
   app.post('/api/games/:id/score', async (c) => c.json(await service.score(c.req.param('id'))));
   app.get('/api/games/:id/ascii', (c) => c.text(service.ascii(c.req.param('id'))));
   app.get('/api/games/:id/sgf', (c) => new Response(service.sgf(c.req.param('id')), { status: 200, headers: { 'content-type': 'application/x-go-sgf; charset=utf-8' } }));

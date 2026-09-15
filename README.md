@@ -12,7 +12,7 @@
 рангом, например 10 кю). Разговор — OpenAI Realtime через LiveKit Agents.
 Телефон общается только с нашим сервером, VPN на телефоне не нужен.
 
-Статус: `[WIP]` стадия 1 — ядро (правила, протокол, движок, game-server) готово, партия играется по HTTP; голос и веб в работе. Стадии и критерии — в спеке.
+Статус: `[WIP]` стадия 1 — код партии голосом и с экрана телефона против Гоко готов; идут проверка и правки перед деплоем, затем приёмка у доски. Стадии и критерии — в спеке.
 
 ## Как это устроено
 
@@ -55,12 +55,12 @@ npm install
 npm run doctor               # Node, KataGo, сети, переменные окружения без печати значений
 npm run check                # типы и unit-тесты
 npm run smoke                # сценарная партия по HTTP с фейковым движком; -- --real: с KataGo
-npm run dev                  # game-server :8787 и go-engine :8788 (без KATAGO_BIN — фейковый движок)
+npm run dev                  # game-server :8787 и go-engine :8788 (без KATAGO_BIN — фейковый движок), web :5173, воркер goko-dev
+npm run chat                 # текстовый диалог с Гоко (в другом терминале; нужны LIVEKIT_* и OPENAI_API_KEY)
+npm run build:web            # статика для VPS; деплой — infra/scripts/deploy.sh --build-web (docs/runbooks/vps.md)
 ```
 
-Для голоса нужен VPS с LiveKit (`infra/README.md`), ключ OpenAI и
-voice-agent, он появится по плану голоса и веба. KataGo и сети —
-`apps/go-engine/models/README.md`.
+Для голоса нужны VPS с LiveKit (`infra/README.md`, `docs/runbooks/vps.md`) и ключ OpenAI в `.env`. KataGo и сети — `apps/go-engine/models/README.md`.
 
 ## Лицензия
 

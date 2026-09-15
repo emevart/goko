@@ -1,6 +1,6 @@
 import { getEventListeners } from 'node:events';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { ApiError, ClientTimeoutError, HttpError, createClient } from './index.ts';
+import { ApiError, ClientTimeoutError, HttpError, STREAM_IDLE_MS, StreamIdleError, createClient } from './index.ts';
 import { CLIENT_TIMEOUTS } from './client.ts';
 import { fakeFetch } from './test-helpers.ts';
 
@@ -18,6 +18,7 @@ const state = {
   ko: null,
   consecutivePasses: 0,
   pendingEngineMove: true,
+  canRedo: false,
 };
 
 describe('createClient', () => {
@@ -84,7 +85,7 @@ describe('createClient', () => {
 // Таблица маршрутов: у каждого метода клиента проверены HTTP-метод, путь и тело.
 // Идентификатор партии взят со слэшем — путь обязан его кодировать.
 const move = { n: 1, color: 'B', coord: 'D4', captured: 0, at: '2026-09-07T10:00:01.000Z' };
-const analysis = { visits: 1, winrateB: 0.5, scoreLeadB: 0, topMoves: [], ownership: [], groups: [] };
+const analysis = { gameId: 'g1', revision: 0, visits: 1, winrateB: 0.5, scoreLeadB: 0, topMoves: [], ownership: [], groups: [] };
 const result = { winner: 'W', margin: 7.5, reason: 'score' };
 const sessionResponse = {
   session: { id: 's1', room: 'goko-s1', currentGameId: null, createdAt: state.createdAt },
@@ -103,6 +104,7 @@ type Route = {
 
 const routes: Route[] = [
   { name: 'createSession', run: (c) => c.createSession(), method: 'POST', path: '/api/sessions', body: {}, response: () => Response.json(sessionResponse) },
+  { name: 'restartConversation', run: (c) => c.restartConversation('s 1', { requestId: 'restart-1' }), method: 'POST', path: '/api/sessions/s%201/conversation', body: { requestId: 'restart-1' }, response: () => Response.json(sessionResponse) },
   { name: 'newGame', run: (c) => c.newGame('s/1', seats), method: 'POST', path: '/api/sessions/s%2F1/games', body: seats, response: () => Response.json({ state }) },
   { name: 'createGame', run: (c) => c.createGame(seats), method: 'POST', path: '/api/games', body: seats, response: () => Response.json({ state }) },
   { name: 'getGame', run: (c) => c.getGame('g/1'), method: 'GET', path: '/api/games/g%2F1', body: undefined, response: () => Response.json(state) },
@@ -152,7 +154,7 @@ describe('маршруты клиента', () => {
   });
 });
 
-function sseResponse(body: string): Response {
+function sseResponse(body: string | ReadableStream<Uint8Array>): Response {
   return new Response(body, { headers: { 'content-type': 'text/event-stream' } });
 }
 
@@ -171,7 +173,8 @@ describe('events', () => {
     const headers = call?.init.headers as Record<string, string> | undefined;
     expect(headers?.['x-app-key']).toBe('k');
     expect(headers?.['accept']).toBe('text/event-stream');
-    expect(call?.init.signal).toBe(ac.signal);
+    // Сигнал запроса — свой: его отменяют и внешний signal, и сторож простоя (проверки ниже).
+    expect(call?.init.signal).toBeInstanceOf(AbortSignal);
   });
 
   it('битый JSON и события не по схеме пропускаются', async () => {
@@ -310,6 +313,7 @@ type TimedRoute = {
 
 const timedRoutes: TimedRoute[] = [
   { name: 'createSession', op: 'create_session', run: (c, signal) => c.createSession({ signal }) },
+  { name: 'restartConversation', op: 'restart_conversation', run: (c, signal) => c.restartConversation('s1', { requestId: 'r1' }, { signal }) },
   { name: 'newGame', op: 'session_new_game', run: (c, signal) => c.newGame('s1', seats, { signal }) },
   { name: 'createGame', op: 'create_game', run: (c, signal) => c.createGame(seats, { signal }) },
   { name: 'getGame', op: 'get_game', run: (c, signal) => c.getGame('g1', { signal }) },
@@ -318,6 +322,7 @@ const timedRoutes: TimedRoute[] = [
   { name: 'pass', op: 'pass', run: (c, signal) => c.pass('g1', {}, { signal }) },
   { name: 'resign', op: 'resign', run: (c, signal) => c.resign('g1', { color: 'B' }, { signal }) },
   { name: 'undo', op: 'undo', run: (c, signal) => c.undo('g1', {}, { signal }) },
+  { name: 'redo', op: 'redo', run: (c, signal) => c.redo('g1', {}, { signal }) },
   { name: 'correct', op: 'correct_last_move', run: (c, signal) => c.correct('g1', { coord: 'D4' }, { signal }) },
   { name: 'setRank', op: 'set_rank', run: (c, signal) => c.setRank('g1', { color: 'W', rank: '10k' }, { signal }) },
   { name: 'analyze', op: 'analyze', run: (c, signal) => c.analyze('g1', {}, { signal }) },
@@ -335,6 +340,7 @@ describe('таймауты клиента', () => {
     expect(CLIENT_TIMEOUTS).toEqual({
       // Выше 10 с ожидания createRoom на сервере: клиент видит код сервера, а не свой таймаут.
       create_session: 15_000,
+      restart_conversation: 15_000,
       session_new_game: 15_000,
       create_game: 15_000,
       get_game: 5_000,
@@ -343,6 +349,7 @@ describe('таймауты клиента', () => {
       pass: 15_000,
       resign: 5_000,
       undo: 5_000,
+      redo: 5_000,
       correct_last_move: 15_000,
       set_rank: 5_000,
       analyze: 15_000,
@@ -519,5 +526,204 @@ describe('таймауты клиента', () => {
     expect(err).toBeInstanceOf(Error);
     expect(err.message).toBe('client timeout: score did not finish in 25000 ms');
     expect(err.code).toBe('client_timeout');
+  });
+});
+
+// Тело SSE, которое пишет тест: push отправляет байты, cancelled — отменил ли клиент чтение.
+function controlledBody() {
+  let ctrl: ReadableStreamDefaultController<Uint8Array> | undefined;
+  const body = {
+    cancelled: false,
+    push: (s: string) => ctrl?.enqueue(new TextEncoder().encode(s)),
+    stream: new ReadableStream<Uint8Array>({
+      start(c) {
+        ctrl = c;
+      },
+      cancel() {
+        body.cancelled = true;
+      },
+    }),
+  };
+  return body;
+}
+
+// Полуоткрытый поток (сон телефона, смена сети, прокси, который не закрыл ответ): пинги сервера раз в 15 с
+// перестают приходить, а соединение не рвётся. Сторож простоя превращает это в обрыв сети.
+describe('сторож простоя потока событий', () => {
+  const event = 'event: engine.thinking\ndata: {"type":"engine.thinking","gameId":"g1","color":"W"}\n\n';
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('STREAM_IDLE_MS — 45 с, три пинга сервера', () => {
+    expect(STREAM_IDLE_MS).toBe(45_000);
+  });
+
+  it('поток с пингами каждые 15 с не рвётся', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const body = controlledBody();
+    const f = fakeFetch(() => sseResponse(body.stream));
+    const client = createClient({ baseUrl: 'http://api.test', appKey: 'k', fetch: f.fetch });
+    const stream = client.events({ sessionId: 's1' });
+    const next = capture(stream.next());
+    for (let i = 0; i < 10; i++) {
+      await vi.advanceTimersByTimeAsync(15_000);
+      body.push(': ping\n\n');
+      await tick();
+    }
+    expect(next.done).toBe(false);
+    expect(body.cancelled).toBe(false);
+    expect(f.calls[0]?.init.signal?.aborted).toBe(false);
+    body.push(event);
+    expect((await settleWithin(next)).value).toMatchObject({ done: false, value: { type: 'engine.thinking' } });
+    await stream.return(undefined);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('поток без байтов рвётся через 45 с после последнего байта ошибкой сети', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const body = controlledBody();
+    const f = fakeFetch(() => sseResponse(body.stream));
+    const client = createClient({ baseUrl: 'http://api.test', appKey: 'k', fetch: f.fetch });
+    const stream = client.events({ sessionId: 's1' });
+    const first = capture(stream.next());
+    body.push(event);
+    expect((await settleWithin(first)).value).toMatchObject({ value: { type: 'engine.thinking' } });
+    const next = capture(stream.next());
+    await vi.advanceTimersByTimeAsync(STREAM_IDLE_MS - 1);
+    expect((await settleWithin(next, 5)).done).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    const out = await settleWithin(next);
+    expect(out.done).toBe(true);
+    // Тот же род, что обрыв сети у fetch (TypeError): переподключение web и voice-agent срабатывает без изменений.
+    expect(out.value).toBeInstanceOf(TypeError);
+    expect(out.value).toBeInstanceOf(StreamIdleError);
+    expect(out.value).toMatchObject({ name: 'StreamIdleError', idleMs: STREAM_IDLE_MS });
+    // Соединение не висит: сигнал запроса отменён, тело отменено, таймеров не осталось.
+    expect(f.calls[0]?.init.signal?.aborted).toBe(true);
+    expect(body.cancelled).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('заголовки не пришли за 45 с — та же ошибка простоя', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const f = hangingFetch();
+    const client = createClient({ baseUrl: 'http://api.test', appKey: 'k', fetch: f.fetch });
+    const next = capture(client.events({ gameId: 'g1' }).next());
+    await vi.advanceTimersByTimeAsync(STREAM_IDLE_MS - 1);
+    expect((await settleWithin(next, 5)).done).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect((await settleWithin(next)).value).toBeInstanceOf(StreamIdleError);
+    expect(f.signals[0]?.aborted).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('пока вызывающий обрабатывает событие, простой не считается', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const body = controlledBody();
+    const f = fakeFetch(() => sseResponse(body.stream));
+    const client = createClient({ baseUrl: 'http://api.test', appKey: 'k', fetch: f.fetch });
+    const stream = client.events({ sessionId: 's1' });
+    const first = capture(stream.next());
+    body.push(event);
+    expect((await settleWithin(first)).value).toMatchObject({ value: { type: 'engine.thinking' } });
+    // Долгая реплика воркера: следующий next() зовут через минуту.
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(vi.getTimerCount()).toBe(0);
+    const next = capture(stream.next());
+    await vi.advanceTimersByTimeAsync(30_000);
+    body.push(event);
+    expect((await settleWithin(next)).value).toMatchObject({ done: false, value: { type: 'engine.thinking' } });
+    expect(body.cancelled).toBe(false);
+    await stream.return(undefined);
+    expect(body.cancelled).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('внешний abort не превращается в ошибку простоя', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const body = controlledBody();
+    const f = fakeFetch(() => sseResponse(body.stream));
+    const client = createClient({ baseUrl: 'http://api.test', appKey: 'k', fetch: f.fetch });
+    const ac = new AbortController();
+    const next = capture(client.events({ sessionId: 's1' }, ac.signal).next());
+    await vi.advanceTimersByTimeAsync(30_000);
+    ac.abort();
+    const out = await settleWithin(next);
+    expect(out.done).toBe(true);
+    expect((out.value as Error).name).toBe('AbortError');
+    expect(out.value).not.toBeInstanceOf(StreamIdleError);
+    expect(f.calls[0]?.init.signal?.aborted).toBe(true);
+    expect(body.cancelled).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+    expect(getEventListeners(ac.signal, 'abort')).toEqual([]);
+    // Уже отменённый signal: запрос не уходит.
+    const again = await client.events({ sessionId: 's1' }, ac.signal).next().catch((e: unknown) => e);
+    expect((again as Error).name).toBe('AbortError');
+    expect(f.calls).toHaveLength(1);
+  });
+
+  it('отмена, пока вызывающий ждёт в теле цикла, затем next(): AbortError без необработанного отказа чтения', async () => {
+    // Тело, как у undici: отмена сигнала запроса переводит поток в ошибку, и следующее чтение отклоняется.
+    const f = fakeFetch((call) => {
+      const signal = call.init.signal ?? undefined;
+      const stream = new ReadableStream<Uint8Array>({
+        start(c) {
+          c.enqueue(new TextEncoder().encode(event));
+          signal?.addEventListener('abort', () => c.error(signal.reason), { once: true });
+        },
+      });
+      return sseResponse(stream);
+    });
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => void unhandled.push(reason);
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      const client = createClient({ baseUrl: 'http://api.test', appKey: 'k', fetch: f.fetch });
+      const ac = new AbortController();
+      const stream = client.events({ sessionId: 's1' }, ac.signal);
+      expect((await stream.next()).value).toMatchObject({ type: 'engine.thinking' });
+      // Вызывающий ждёт что-то своё, отмена приходит во время ожидания, цикл по signal не выходит и зовёт next().
+      ac.abort();
+      await tick();
+      const out = await stream.next().catch((e: unknown) => e);
+      expect((out as Error).name).toBe('AbortError');
+      for (let i = 0; i < 5; i++) await tick();
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+  });
+
+  it('таймер и слушатель внешнего сигнала снимаются: конец потока, ошибка статуса, ранний выход', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const ac = new AbortController();
+    const whole = createClient({ baseUrl: 'http://api.test', appKey: 'k', fetch: fakeFetch(() => sseResponse(event)).fetch });
+    const seen = [];
+    for await (const ev of whole.events({ sessionId: 's1' }, ac.signal)) seen.push(ev.type);
+    expect(seen).toEqual(['engine.thinking']);
+    expect(vi.getTimerCount()).toBe(0);
+    expect(getEventListeners(ac.signal, 'abort')).toEqual([]);
+
+    const missing = createClient({
+      baseUrl: 'http://api.test',
+      appKey: 'k',
+      fetch: fakeFetch(() => Response.json({ error: { code: 'not_found', message: 'no session' } }, { status: 404 })).fetch,
+    });
+    await expect(missing.events({ sessionId: 's1' }, ac.signal).next()).rejects.toBeInstanceOf(ApiError);
+    expect(vi.getTimerCount()).toBe(0);
+    expect(getEventListeners(ac.signal, 'abort')).toEqual([]);
+
+    const body = controlledBody();
+    const early = createClient({ baseUrl: 'http://api.test', appKey: 'k', fetch: fakeFetch(() => sseResponse(body.stream)).fetch });
+    body.push(event);
+    for await (const ev of early.events({ sessionId: 's1' }, ac.signal)) {
+      expect(ev.type).toBe('engine.thinking');
+      break;
+    }
+    expect(body.cancelled).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+    expect(getEventListeners(ac.signal, 'abort')).toEqual([]);
   });
 });

@@ -7,6 +7,7 @@ export const ERROR_CODES = [
   'not_your_turn',
   'game_finished',
   'nothing_to_undo',
+  'nothing_to_redo',
   'revision_conflict',
   'engine_busy',
   'engine_unavailable',
@@ -35,6 +36,7 @@ export const ERROR_STATUS: Record<ErrorCode, number> = {
   not_your_turn: 409,
   game_finished: 409,
   nothing_to_undo: 409,
+  nothing_to_redo: 409,
   revision_conflict: 409,
   limit_reached: 429,
   rate_limited: 429,
@@ -97,6 +99,18 @@ export class ClientTimeoutError extends Error {
     this.name = 'ClientTimeoutError';
     this.operation = operation;
     this.timeoutMs = timeoutMs;
+  }
+}
+
+// Поток событий молчал дольше сторожа простоя (STREAM_IDLE_MS в client.ts): соединение считается оборванным.
+// Наследник TypeError — того же рода, что обрыв сети у fetch: переподключение вызывающих срабатывает как при обрыве.
+export class StreamIdleError extends TypeError {
+  readonly idleMs: number;
+
+  constructor(idleMs: number) {
+    super(`sse stream idle: no bytes in ${idleMs} ms`);
+    this.name = 'StreamIdleError';
+    this.idleMs = idleMs;
   }
 }
 

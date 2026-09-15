@@ -1,6 +1,6 @@
 // Типизированный клиент game-server. Им пользуются voice-agent, web, mcp-server и scripts/.
 import type { z } from 'zod';
-import { ClientTimeoutError, HttpError, apiErrorFromBody } from './errors.ts';
+import { ClientTimeoutError, HttpError, StreamIdleError, apiErrorFromBody } from './errors.ts';
 import { GameEvent } from './events.ts';
 import { GameState, Result } from './game.ts';
 import {
@@ -8,6 +8,7 @@ import {
   type AnalyzeRequest,
   type CorrectRequest,
   CreateSessionResponse,
+  type RestartConversationRequest,
   ListGamesResponse,
   type NewGameRequest,
   NewGameResponse,
@@ -15,6 +16,8 @@ import {
   type PlayRequest,
   PlayResponse,
   type ResignRequest,
+  type RedoRequest,
+  RedoResponse,
   type SetRankRequest,
   StateResponse,
   type UndoRequest,
@@ -28,6 +31,7 @@ import { parseSseStream } from './sse.ts';
 // create_session — 15 с при 10 с ожидания createRoom на сервере.
 export const CLIENT_TIMEOUTS = {
   create_session: 15_000,
+  restart_conversation: 15_000,
   session_new_game: 15_000,
   create_game: 15_000,
   get_game: 5_000,
@@ -36,6 +40,7 @@ export const CLIENT_TIMEOUTS = {
   pass: 15_000,
   resign: 5_000,
   undo: 5_000,
+  redo: 5_000,
   correct_last_move: 15_000,
   set_rank: 5_000,
   analyze: 15_000,
@@ -44,6 +49,11 @@ export const CLIENT_TIMEOUTS = {
   sgf: 5_000,
 } as const satisfies Record<string, number>;
 export type ClientOperation = keyof typeof CLIENT_TIMEOUTS;
+
+// Сторож простоя потока событий (раздел 5 спеки): сервер шлёт `: ping` каждые 15 с, поэтому 45 с без единого байта
+// (три пропущенных пинга) — полуоткрытое соединение (сон телефона, смена сети, прокси не закрыл ответ).
+// events() тогда бросает StreamIdleError, и вызывающий переподключается, как после обрыва сети.
+export const STREAM_IDLE_MS = 45_000;
 
 export type ClientOptions = {
   baseUrl: string; // https://<WEB_HOST> или http://127.0.0.1:8787
@@ -139,8 +149,8 @@ export function createClient(opts: ClientOptions) {
     });
   }
 
-  // Поток событий без потолка: он живёт, пока его не закроет signal или сервер.
-  // onUnknownEvent — необязательный крючок для вызывающего: событие не по схеме иначе
+  // Поток событий без потолка: он живёт, пока его не закроет signal или сервер, но не дольше STREAM_IDLE_MS
+  // без единого байта. onUnknownEvent — необязательный крючок для вызывающего: событие не по схеме иначе
   // отбрасывается молча, и расхождение версий сервера и клиента остаётся невидимым.
   async function* events(
     target: EventsTarget,
@@ -148,24 +158,87 @@ export function createClient(opts: ClientOptions) {
     onUnknownEvent?: (raw: unknown, error: z.ZodError) => void,
   ): AsyncGenerator<GameEvent, void, undefined> {
     const path = 'sessionId' in target ? `/api/sessions/${enc(target.sessionId)}/events` : `/api/games/${enc(target.gameId)}/events`;
-    const res = await fetchFn(`${base}${path}`, { headers: { 'x-app-key': opts.appKey, accept: 'text/event-stream' }, signal });
-    if (!res.ok) throw await toError(res);
-    if (!res.body) throw new HttpError(res.status, 'empty SSE body');
-    for await (const data of parseSseStream(res.body)) {
-      let json: unknown;
-      try {
-        json = JSON.parse(data);
-      } catch {
-        continue;
+    signal?.throwIfAborted();
+    // Свой контроллер запроса, как в bounded: внешний signal переносится слушателем, сторож простоя отменяет
+    // запрос с StreamIdleError. Причина отмены своего сигнала и есть исключение наружу.
+    const controller = new AbortController();
+    const own = controller.signal;
+    const onExternalAbort = (): void => controller.abort(signal?.reason);
+    signal?.addEventListener('abort', onExternalAbort, { once: true });
+
+    // Ожидание байтов под сторожем. Таймер идёт только пока ждём сеть (заголовки или очередной кусок тела),
+    // а не пока вызывающий обрабатывает событие: долгая реплика воркера не выглядит простоем. Промис на каждое
+    // ожидание, а не гонка с одним общим промисом отмены: к вечному промису копились бы обработчики за часы потока.
+    const guarded = <T>(work: Promise<T>): Promise<T> =>
+      new Promise<T>((resolve, reject) => {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const onAbort = (): void => {
+          settle();
+          reject(own.reason);
+        };
+        const settle = (): void => {
+          clearTimeout(timer);
+          own.removeEventListener('abort', onAbort);
+        };
+        // Обработчик на work — до проверки отмены: уже начатое чтение отклоняется позже (тело отменено), и без
+        // обработчика это был бы unhandledRejection, в Node — падение процесса. Колбэки then асинхронны, поэтому
+        // слушатель и таймер ниже успевают встать до settle.
+        work.then(
+          (value) => {
+            settle();
+            resolve(value);
+          },
+          (e: unknown) => {
+            settle();
+            reject(e);
+          },
+        );
+        if (own.aborted) return onAbort();
+        own.addEventListener('abort', onAbort, { once: true });
+        timer = setTimeout(() => controller.abort(new StreamIdleError(STREAM_IDLE_MS)), STREAM_IDLE_MS);
+      });
+
+    let source: ReadableStreamDefaultReader<Uint8Array> | undefined;
+    try {
+      const res = await guarded(fetchFn(`${base}${path}`, { headers: { 'x-app-key': opts.appKey, accept: 'text/event-stream' }, signal: own }));
+      if (!res.ok) throw await guarded(toError(res));
+      if (!res.body) throw new HttpError(res.status, 'empty SSE body');
+      const reader = res.body.getReader();
+      source = reader;
+      // Обёртка тела: highWaterMark 0 — кусок читается из сети только по запросу разбора, каждое чтение под сторожем.
+      const body = new ReadableStream<Uint8Array>(
+        {
+          pull: async (ctrl) => {
+            const { value, done } = await guarded(reader.read());
+            if (done) ctrl.close();
+            else ctrl.enqueue(value);
+          },
+          cancel: (reason) => reader.cancel(reason),
+        },
+        { highWaterMark: 0 },
+      );
+      for await (const data of parseSseStream(body)) {
+        let json: unknown;
+        try {
+          json = JSON.parse(data);
+        } catch {
+          continue;
+        }
+        const parsed = GameEvent.safeParse(json);
+        if (parsed.success) yield parsed.data;
+        else onUnknownEvent?.(json, parsed.error);
       }
-      const parsed = GameEvent.safeParse(json);
-      if (parsed.success) yield parsed.data;
-      else onUnknownEvent?.(json, parsed.error);
+    } finally {
+      signal?.removeEventListener('abort', onExternalAbort);
+      // После простоя или отмены обёртка уже в ошибке и своё cancel не зовёт: тело сети отменяем явно.
+      void source?.cancel().catch(() => {});
     }
   }
 
   return {
     createSession: (o?: CallOptions) => call('create_session', 'POST', '/api/sessions', CreateSessionResponse, {}, o),
+    restartConversation: (sessionId: string, req: RestartConversationRequest, o?: CallOptions) =>
+      call('restart_conversation', 'POST', `/api/sessions/${enc(sessionId)}/conversation`, CreateSessionResponse, req, o),
     newGame: (sessionId: string, req: NewGameRequest, o?: CallOptions) =>
       call('session_new_game', 'POST', `/api/sessions/${enc(sessionId)}/games`, NewGameResponse, req, o),
     createGame: (req: NewGameRequest, o?: CallOptions) => call('create_game', 'POST', '/api/games', NewGameResponse, req, o),
@@ -175,6 +248,7 @@ export function createClient(opts: ClientOptions) {
     pass: (id: string, req: PassRequest = {}, o?: CallOptions) => call('pass', 'POST', `/api/games/${enc(id)}/pass`, PlayResponse, req, o),
     resign: (id: string, req: ResignRequest, o?: CallOptions) => call('resign', 'POST', `/api/games/${enc(id)}/resign`, StateResponse, req, o),
     undo: (id: string, req: UndoRequest = {}, o?: CallOptions) => call('undo', 'POST', `/api/games/${enc(id)}/undo`, UndoResponse, req, o),
+    redo: (id: string, req: RedoRequest = {}, o?: CallOptions) => call('redo', 'POST', `/api/games/${enc(id)}/redo`, RedoResponse, req, o),
     correct: (id: string, req: CorrectRequest, o?: CallOptions) =>
       call('correct_last_move', 'POST', `/api/games/${enc(id)}/correct`, PlayResponse, req, o),
     setRank: (id: string, req: SetRankRequest, o?: CallOptions) => call('set_rank', 'POST', `/api/games/${enc(id)}/rank`, StateResponse, req, o),

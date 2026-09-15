@@ -10,10 +10,11 @@ import { InFlight, createApp } from './app.ts';
 import { createEngineClient } from './engine-client.ts';
 import { EventBus } from './events.ts';
 import { createFakeEngine } from './fake-engine.ts';
-import { type RoomCreator, createRoomService } from './livekit.ts';
+import { type AgentDispatcher, type RoomCreator, createRoomService } from './livekit.ts';
 import { GameService, type GameServiceDeps } from './service.ts';
 import { SESSION_TTL_MS, SessionManager } from './sessions.ts';
 import { GameStore } from './store.ts';
+import { choosePersonaMove } from './persona-player.ts';
 
 export type Listen = (
   app: Hono,
@@ -44,7 +45,7 @@ export type StartDeps = {
   on?: (signal: 'SIGINT' | 'SIGTERM', handler: () => void) => void;
   exit?: (code: number) => void;
   log?: (line: string) => void;
-  createRooms?: (opts: { url: string; apiKey: string; apiSecret: string }) => RoomCreator;
+  createRooms?: (opts: { url: string; apiKey: string; apiSecret: string }) => RoomCreator & AgentDispatcher;
   createService?: (deps: GameServiceDeps) => GameService;
 };
 
@@ -80,9 +81,11 @@ type Config = {
   dataDir: string;
   maxSessions: number;
   sessionTtlMs: number;
+  engineMoveDelayMs: number;
   port: number;
   hostname: string;
   trustProxy: boolean;
+  sessionlessGames: boolean;
 };
 
 // Пустая или из пробелов переменная — то же, что не заданная: так читается infra/.env.example,
@@ -103,7 +106,7 @@ function readConfig(env: Record<string, string | undefined>, root: string): { co
     if (raw === undefined) return fallback;
     const value = Number(raw);
     // Больше MAX_SAFE_INTEGER отсекает max: у всех переменных он не выше этого числа.
-    if (!/^[1-9]\d*$/.test(raw) || value < min || value > max) {
+    if (!/^(?:0|[1-9]\d*)$/.test(raw) || value < min || value > max) {
       errors.push(message);
       return fallback;
     }
@@ -124,6 +127,7 @@ function readConfig(env: Record<string, string | undefined>, root: string): { co
   // Меньше секунды нельзя: TTL токена — целые секунды TTL сессии, и 0 секунд токен не выдать.
   const sessionTtlMs = integer('SESSION_TTL_MS', SESSION_TTL_MS, 1000, Number.MAX_SAFE_INTEGER, 'SESSION_TTL_MS должна быть целым числом от 1000');
   const port = integer('PORT', 8787, 1, 65535, 'PORT должна быть целым числом от 1 до 65535');
+  const engineMoveDelayMs = integer('ENGINE_MOVE_DELAY_MS', 1500, 0, 5000, 'ENGINE_MOVE_DELAY_MS должна быть целым числом от 0 до 5000');
   if (errors.length > 0) return { config: null, errors };
   return {
     config: {
@@ -135,11 +139,14 @@ function readConfig(env: Record<string, string | undefined>, root: string): { co
       dataDir: optional('DATA_DIR') ?? path.join(root, 'data/games'),
       maxSessions,
       sessionTtlMs,
+      engineMoveDelayMs,
       port,
       hostname: optional('HOST') ?? '127.0.0.1',
       // Только за своим прокси (Caddy): иначе X-Forwarded-For подставляет сам клиент (D-0012).
       // Включает ровно 1, пробелы по краям не мешают: «1 » из .env не должен молча выключить доверие.
       trustProxy: optional('TRUST_PROXY')?.trim() === '1',
+      // POST /api/games без сессии — только dev и smoke (D-0012); в prod compose переменной нет.
+      sessionlessGames: optional('ALLOW_SESSIONLESS_GAMES')?.trim() === '1',
     },
     errors: [],
   };
@@ -181,7 +188,10 @@ export async function startServer(deps: StartDeps = {}): Promise<StartedServer |
 
   const bus = new EventBus();
   // Партия без активности дольше срока сессии считается брошенной: не занимает лимит и не получает задачу при init (D-0012).
-  const service = createService({ store: new GameStore(config.dataDir), engine, bus, staleGameMs: config.sessionTtlMs, log });
+  // Одно хранилище и для снапшотов, и для отметок брошенных партий (D-0012): отметки лежат рядом с <id>.json.
+  const store = new GameStore(config.dataDir);
+  const chooseMove = env.GOKO_PLAYER_MODE === 'persona' && env.OPENAI_API_KEY ? (state: import('@goko/protocol').GameState, reply: import('@goko/protocol').EngineGenmoveResponse, signal: AbortSignal) => choosePersonaMove({state,reply,signal,apiKey:env.OPENAI_API_KEY!}) : undefined;
+  const service = createService({ store, marks: store, engine, bus, staleGameMs: config.sessionTtlMs, engineMoveDelayMs: config.engineMoveDelayMs, chooseMove, log });
   try {
     await service.init();
   } catch (e) {
@@ -206,6 +216,7 @@ export async function startServer(deps: StartDeps = {}): Promise<StartedServer |
     inFlight,
     engineKey: config.engineKey,
     trustProxy: config.trustProxy,
+    sessionlessGames: config.sessionlessGames,
     log,
   });
 

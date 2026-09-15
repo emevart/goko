@@ -184,3 +184,25 @@ describe('GameStore.remove через шов fs', () => {
     expect(steps).toEqual([]);
   });
 });
+
+describe('GameStore: отметки брошенных партий через шов fs (D-0012)', () => {
+  it('markAbandoned: пустой файл открыт, sync, закрыт, затем fsync каталога; clearAbandoned: unlink и fsync каталога, отсутствующая — без fsync', async () => {
+    const { fs, steps } = recordingFs();
+    const store = new GameStore(dir, fs);
+    await store.markAbandoned('g1');
+    expect(steps).toEqual(['open g1.abandoned w', 'sync g1.abandoned', 'close g1.abandoned', ...DIR_SYNC_STEPS]);
+    steps.length = 0;
+    await store.clearAbandoned('g1');
+    expect(steps).toEqual(['unlink g1.abandoned', ...DIR_SYNC_STEPS]);
+    steps.length = 0;
+    await store.clearAbandoned('g1');
+    expect(steps).toEqual(['unlink g1.abandoned']);
+    expect(await fsp.readdir(dir)).toEqual([]);
+  });
+
+  it('отказ sync отметки: дескриптор закрыт, отказ уходит вызывающему, fsync каталога не идёт', async () => {
+    const { fs, steps } = recordingFs({ fail: { sync: new Error('EIO') } });
+    await expect(new GameStore(dir, fs).markAbandoned('g1')).rejects.toThrow('EIO');
+    expect(steps).toEqual(['open g1.abandoned w', 'sync g1.abandoned', 'close g1.abandoned']);
+  });
+});

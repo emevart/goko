@@ -1,5 +1,10 @@
+import { existsSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { DEV_AGENT_NAME, devPlan, devStartOptions, startDev } from './dev.mjs';
+
+const repoRoot = fileURLToPath(new URL('..', import.meta.url));
 
 const secretEnv = {
   APP_KEY: 'secret-app',
@@ -16,7 +21,7 @@ describe('dev: план запуска', () => {
     const plan = devPlan(secretEnv, none);
     expect(plan.procs.map((p) => p.name)).toEqual(['game-server']);
     const server = plan.procs[0];
-    expect(server?.env).toMatchObject({ FAKE_ENGINE: '1', AGENT_NAME: DEV_AGENT_NAME, LIVEKIT_URL: 'wss://secret-livekit' });
+    expect(server?.env).toMatchObject({ FAKE_ENGINE: '1', AGENT_NAME: DEV_AGENT_NAME, LIVEKIT_URL: 'wss://secret-livekit', ALLOW_SESSIONLESS_GAMES: '1' });
     expect(server?.env).not.toHaveProperty('KATAGO_MODEL'); // пустое значение не стало бы путём
     expect(plan.notes.join('\n')).toContain('KATAGO_BIN не задан');
   });
@@ -26,7 +31,7 @@ describe('dev: план запуска', () => {
     expect(plan.procs.map((p) => p.name)).toEqual(['go-engine', 'game-server']);
     const [engine, server] = plan.procs;
     expect(engine?.env).toMatchObject({ ENGINE_KEY: 'one-time', ENGINE_PORT: '8788' });
-    expect(server?.env).toMatchObject({ ENGINE_KEY: 'one-time', ENGINE_URL: 'http://127.0.0.1:8788', AGENT_NAME: DEV_AGENT_NAME });
+    expect(server?.env).toMatchObject({ ENGINE_KEY: 'one-time', ENGINE_URL: 'http://127.0.0.1:8788', AGENT_NAME: DEV_AGENT_NAME, ALLOW_SESSIONLESS_GAMES: '1' });
     expect(server?.env).not.toHaveProperty('FAKE_ENGINE');
     expect(plan.notes.join('\n')).toContain('ENGINE_KEY не задан');
   });
@@ -35,6 +40,17 @@ describe('dev: план запуска', () => {
     const plan = devPlan(secretEnv, (rel) => rel === 'apps/web/package.json' || rel === 'apps/voice-agent/package.json');
     expect(plan.procs.map((p) => p.name)).toEqual(['game-server', 'web', 'voice-agent']);
     expect(plan.procs[2]?.env.AGENT_NAME).toBe(DEV_AGENT_NAME);
+  });
+
+  it('web — vite через node без cmd.exe: Ctrl+C не спрашивает про пакетный файл', () => {
+    const plan = devPlan(secretEnv, (rel) => rel === 'apps/web/package.json');
+    const web = plan.procs.find((p) => p.name === 'web');
+    expect(web?.cmd).toBe(process.execPath);
+    expect(web?.args).toEqual(['node_modules/vite/bin/vite.js', 'apps/web', '--host', '127.0.0.1', '--port', '5173', '--strictPort']);
+    expect(web?.shell).toBeUndefined();
+    // Путь жёсткий: vite поднят в корневой node_modules. Если workspaces перестанут его поднимать
+    // (конфликт версий), web упадёт на старте с MODULE_NOT_FOUND — ловим здесь.
+    expect(existsSync(path.join(repoRoot, web?.args[0] ?? 'нет web'))).toBe(true);
   });
 
   it('строки для терминала не содержат значений переменных', () => {

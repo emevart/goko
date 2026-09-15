@@ -1,9 +1,22 @@
 name: goko
+# Ручные команды compose на VPS — только с подгрузкой .env в оболочку, как в deploy.sh:
+#   set -a; . /opt/goko/.env; set +a; docker compose --env-file /opt/goko/.env ...
+# Парсер --env-file читает строку «KEY=   # комментарий» как значение «# комментарий»; переменные оболочки важнее файла.
+
+# Ротация логов Docker для всех сервисов: voice-agent пишет расшифровки реплик, храниться бессрочно они не должны;
+# caddy и livekit пишут строки на каждое соединение, без max-size json-file рос бы до заполнения диска.
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   caddy:
     image: caddy:2
     network_mode: host
     restart: unless-stopped
+    logging: *logging
     environment:
       WEB_HOST: ${WEB_HOST}
       LK_HOST: ${LK_HOST}
@@ -26,6 +39,7 @@ services:
     image: ${LIVEKIT_IMAGE:-livekit/livekit-server:v1.13.6}
     network_mode: host
     restart: unless-stopped
+    logging: *logging
     command: --config /etc/livekit.yaml
     environment:
       LIVEKIT_KEYS: "${LIVEKIT_API_KEY}: ${LIVEKIT_API_SECRET}"
@@ -39,6 +53,113 @@ services:
       retries: 3
       start_period: 20s
 
+  game-server:
+    build:
+      context: ..
+      dockerfile: apps/game-server/Dockerfile
+    restart: unless-stopped
+    logging: *logging
+    # tini PID 1: пересылает SIGTERM node и собирает осиротевших потомков.
+    init: true
+    # Остановка game-server укладывается в SHUTDOWN_MS 25 с (D-0010); docker stop по умолчанию ждёт 10 с и шлёт SIGKILL.
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/health').then((r) => r.json()).then((j) => process.exit(j.ok ? 0 : 1), () => process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    # Только 127.0.0.1: порты Docker обходят ufw. Сюда ходит Caddy (network_mode: host).
+    ports:
+      - "127.0.0.1:8787:8787"
+    # Переменные по одной; OPENAI_API_KEY нужен экспериментальному выбору хода Гоко.
+    # ALLOW_SESSIONLESS_GAMES не задан намеренно: POST /api/games в prod выключен (D-0012).
+    environment:
+      APP_KEY: ${APP_KEY}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      GOKO_PLAYER_MODE: ${GOKO_PLAYER_MODE:-persona}
+      LIVEKIT_URL: ${LIVEKIT_URL}
+      LIVEKIT_API_KEY: ${LIVEKIT_API_KEY}
+      LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET}
+      AGENT_NAME: ${AGENT_NAME:-goko}
+      ENGINE_URL: http://go-engine:8788
+      ENGINE_KEY: ${ENGINE_KEY}
+      ENGINE_MOVE_DELAY_MS: ${ENGINE_MOVE_DELAY_MS:-1500}
+      MAX_SESSIONS: ${MAX_SESSIONS:-3}
+      SESSION_TTL_MS: ${SESSION_TTL_MS:-7200000}
+      # За Caddy: ключ лимитов — последний адрес X-Forwarded-For; voice-agent без заголовка — по адресу сокета.
+      TRUST_PROXY: "1"
+    # Снапшоты партий: /opt/goko/data/games на хосте (DATA_DIR=/data/games в образе), владелец uid 1000.
+    volumes:
+      - /opt/goko/data:/data
+    depends_on:
+      - go-engine
+
+  go-engine:
+    build:
+      context: ..
+      dockerfile: apps/go-engine/Dockerfile
+      # Сумма идёт в паре со сборкой: Dockerfile проверяет zip через sha256sum -c.
+      # Пустые или незаданные переменные — сборка eigenavx2 и её сумма. Значения по умолчанию — копия ARG
+      # из apps/go-engine/Dockerfile: compose передаёт args всегда, ARG там для compose не действует; менять вместе.
+      args:
+        KATAGO_ASSET: ${KATAGO_ASSET:-katago-v1.18.1-eigenavx2-linux-x64.zip}
+        KATAGO_SHA256: ${KATAGO_SHA256:-33e79780dbe3bf6ee859e16f64952cdfc90f7210c8f71ad978ffcba85ad20d79}
+    restart: unless-stopped
+    logging: *logging
+    # KataGo запускается через sh-обёртку: tini собирает потомков, которых Node в роли PID 1 не соберёт.
+    init: true
+    # Остановка KataGo: SIGTERM -> stop() движка; запас над 25 с, как у game-server (D-0010).
+    stop_grace_period: 30s
+    # Портов нет: go-engine доступен только game-server по имени сервиса в сети compose.
+    # Порт открывается только после прогрева KataGo (до 300 с, D-0010): start_period с запасом,
+    # неудачи в нём не считаются, первая удачная проверка сразу делает сервис healthy.
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8788/health').then((r) => r.json()).then((j) => process.exit(j.ok ? 0 : 1), () => process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 320s
+    cpus: ${ENGINE_CPUS:-1.5}
+    # Только ключ движка: пути KataGo заданы в образе, LIVEKIT_* и OPENAI_API_KEY движку не нужны.
+    environment:
+      ENGINE_KEY: ${ENGINE_KEY}
+    # Логи KataGo (logDir = analysis_logs относительно /app): один файл на запуск, в томе, а не в слое контейнера.
+    volumes:
+      - engine_logs:/app/analysis_logs
+
+  voice-agent:
+    build:
+      context: ..
+      dockerfile: apps/voice-agent/Dockerfile
+    restart: unless-stopped
+    logging: *logging
+    init: true
+    # drain 5 с + shutdownProcessTimeout 20 с + закрытие инференса до 5 с ≈ 30 с (задача 4, main.ts); запас вдвое.
+    stop_grace_period: 60s
+    # Health-сервер @livekit/agents в режиме start (порт 8081 внутри контейнера, не публикуется): 200 — воркер
+    # зарегистрирован в LiveKit и процесс инференса жив, иначе 503. Вход заданий в комнату он не проверяет:
+    # это проверка runbook после деплоя (строка «[OK] voice-agent: комната …» в логе).
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8081/').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    environment:
+      LIVEKIT_URL: ${LIVEKIT_URL}
+      LIVEKIT_API_KEY: ${LIVEKIT_API_KEY}
+      LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      APP_KEY: ${APP_KEY}
+      AGENT_NAME: ${AGENT_NAME:-goko}
+      VOICE_MODE: ${VOICE_MODE:-realtime}
+      GOKO_VOICE: ${GOKO_VOICE:-stone}
+      VOICE_SESSION_MAX_MS: ${VOICE_SESSION_MAX_MS:-3600000}
+    depends_on:
+      - game-server
+
 volumes:
   caddy_data:
   caddy_config:
+  engine_logs:

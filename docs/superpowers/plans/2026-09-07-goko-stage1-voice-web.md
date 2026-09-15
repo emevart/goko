@@ -23,9 +23,13 @@
 - Режимы (D-0011): переключатель «Голос / Чат», по умолчанию «Голос», выбор помнится в `localStorage` (чтение и запись в `try/catch`). Веб выставляет атрибут участника `goko.mode` = `voice` | `chat` через `localParticipant.setAttributes`; voice-agent читает его после `waitForParticipant()` и слушает `RoomEvent.ParticipantAttributesChanged`. В «Чате» агент выключает аудиовыход и аудиовход сессии (`session.output.setAudioEnabled(false)`, `session.input.setAudioEnabled(false)`, `@livekit/agents` 1.8), ответы идут только текстом в `lk.transcription`; запасной путь — веб в «Чате» отписывается от аудиотрека агента. Realtime при этом всё равно генерирует аудио (`modalities` задаётся только в конструкторе `RealtimeModel`), это известная цена D-0011. Тапы по доске работают в любом режиме; комментарий Гоко к ходу — в ленте всегда, вслух только в «Голосе». Человек против человека (D-0005) разрешён: агент в такой партии комментирует и выполняет команды за того, чей ход.
 - Веб: одна страница, портретный телефон, SVG-доска, тап = ближайший пункт → `play` с `via: 'tap'` и `waitForReply: false`; не ход человека — сообщение «сейчас ход Гоко» без запроса; перед «Новой партией» — выбор цвета (чёрные / белые / случайно) и ранга Гоко тапом, только существующими полями `NewGameRequest` (`black`, `white`, `settings.boardSize` и `settings.komi` от текущей партии), форы в протоколе нет; цели касания ≥ 44 px; тёмная и светлая тема по `prefers-color-scheme`; без UI-библиотек; без агента в комнате страница играет тапами.
 - Протокол и заголовки как в ядре: `X-App-Key` на `/api/*`; ключ в веб попадает на этапе сборки (`APP_KEY` из `.env` → `import.meta.env.VITE_APP_KEY`), в git не попадает. Значения переменных не печатать в логи и не вставлять в доки.
-- Порты dev: game-server `8787`, go-engine `8788`, web `5173`; воркер портов не слушает. В compose сервисы публикуют порты только на `127.0.0.1`; `go-engine` с лимитом `cpus`.
-- Тесты: `voice-agent` — фейковый клиент протокола и замоканный сеанс для режима (бесплатно, всегда); evals через `AgentSession.run` — только при `RUN_AGENT_EVALS=1` и `OPENAI_API_KEY`, новых evals этот план не добавляет; `web` — чистые модули (`geometry`, `transcript`, `stream`, `text`, `prefs`, `chat`) под vitest в `node`; экран телефона агент не видит — приёмка руками у founder'а.
-- Время жизни и бюджеты (D-0008, D-0010): токен LiveKit живёт TTL сессии от её создания и может истечь раньше продлённой сессии — переподключение к комнате тогда требует новой сессии; id сессий и партий — непрозрачные строки, план их формат не разбирает. Серверные бюджеты: ожидание ответа движка 8 с, `analyze` 10 с, `score` 15 с; план на них опирается только в `FINISH_WAIT_MS` (задача 2).
+- Порты dev: game-server `8787`, go-engine `8788`, web `5173`; воркер портов не слушает. В compose порт публикует только game-server и только на `127.0.0.1` (порты Docker обходят ufw); `go-engine` портов не публикует, лимит `cpus`; game-server за Caddy с `TRUST_PROXY=1` (задача 10).
+- Тесты: `voice-agent` — фейковый клиент протокола и замоканный сеанс для режима (бесплатно, всегда); evals через `AgentSession.run` — только при `RUN_AGENT_EVALS=1` и `OPENAI_API_KEY`, в один существующий файл `agent.eval.test.ts` (задача 4), отдельных eval-файлов план не добавляет; `web` — чистые модули (`geometry`, `transcript`, `stream`, `text`, `prefs`, `chat`) под vitest в `node`; экран телефона агент не видит — приёмка руками у founder'а. Помощники тестов из пакетов — только через `@goko/protocol/testing` и `@goko/go-core/testing`, не глубоким путём в `src/`.
+- `[!]` Платные прогоны (решение founder'а): не больше 5 на весь план. Раскладка: eval задачи 4 — 1 (LLM-судья «без лучшего хода» — внутри этого же прогона); `scripts/chat.mjs` задачи 5 — 1 интерактивный и 1 сценарный; ручная проверка режимов задачи 8 — 1; запас — 1, только на повтор после исправления. Регистрация воркера без комнаты, проверки runbook без разговора, Ctrl+C `npm run dev`, все unit-тесты — бесплатны и в счёт не идут. Исполнитель ведёт счёт в отчёте задачи; шестой прогон — только с разрешения founder'а.
+- Время жизни и бюджеты (D-0008, D-0010): токен LiveKit живёт TTL сессии от её создания и может истечь раньше продлённой сессии — переподключение к комнате тогда требует новой сессии; id сессий и партий — непрозрачные строки, план их формат не разбирает. Серверные бюджеты: ожидание ответа движка 8 с, `analyze` 10 с, автосчёт после двух пасов (`SCORE_BUDGET_MS`) 20 с. Клиентские потолки — `CLIENT_TIMEOUTS` из `@goko/protocol` (операции с ответом движка и `analyze` 15 с, `score` 25 с, чтения и `resign`/`undo`/`set_rank` 5 с); `FINISH_WAIT_MS` = 22 с (задача 2) — выше серверных 20 с и ниже клиентских 25 с.
+- Клиент протокола (раздел 5 спеки): `CallOptions { signal }` последним аргументом каждого метода; агент передаёт долгоживущий сигнал сеанса, веб — сигнал размонтирования. Три класса отказа различаются явно: `ApiError` — ответ сервера по протоколу (текст `humanText(code, details)`, в том числе `bad_request` с `details.reason`); `ClientTimeoutError` (`code: 'client_timeout'`) — «сервер не отвечает»; `HttpError` и `TypeError` сети — «нет связи с сервером». Отмена внешним сигналом — не ошибка для человека, её не озвучивают. Таймаут клиента на `play`, `pass` или `correct` не значит, что ход не применён: ни агент, ни веб не повторяют действие вслепую. Сначала они перечитывают партию (`getGame`) и сверяют ревизию и последний ход; агент говорит по фактическому состоянию (задача 2), веб рисует его (`sendTapMove`, задачи 6 и 7).
+- Лимиты (D-0012): `rate_limited` (429, `details.retryAfterSeconds`, заголовок `Retry-After`) — агент и веб не шлют запросы к game-server раньше этого срока (`AgentState.blockedUntil`, ref `blockedUntil` в `useGame`, пауза потока); `too_many_games` (429, `details.max`, у лимита на клиента `details.scope: 'client'`) — текст через `humanText`. Партии создаются только внутри сессии: `POST /api/sessions/:sid/games`; `POST /api/games` в prod выключен (задача 9), ни агент, ни веб, ни `scripts/chat.mjs` его не вызывают. Новая партия в сессии бросает прежнюю незавершённую: та не в лимитах и после рестарта без задачи, пока человек к ней не вернётся (задача 9), поэтому «Новая партия» подряд не упирается в лимит.
+- События (раздел 5 спеки): `engine.thinking` и `error` несут `gameId`; поток сессии отдаёт события только текущей партии. Агент и веб игнорируют `engine.thinking` и `error` с чужим `gameId` (гонка при смене партии). Возврат к старой партии в стадии 1 не делается интерфейсом; если понадобится — это открытие её потока (`events({ gameId })`), а не ожидание событий в потоке сессии.
 - Язык доков, комментариев, коммитов — русский; код и идентификаторы — английский; без эмодзи; маркеры `[OK] [!] [FIX] [X] [WIP] [TODO]`; коммиты `<область>: <что сделано>`.
 - Деплой, Hetzner, DNS, tailnet и аудио-тесты с телефона — только по явной просьбе founder'а в текущей сессии (правило 5 `CLAUDE.md`); план описывает команды, исполнитель их не запускает сам.
 
@@ -34,10 +38,18 @@
 ## Файловая структура стадии 1 (голос и веб)
 
 ```
-packages/protocol/src/game.ts         + seatColor(seats, controller)
-packages/protocol/src/index.ts        + экспорт seatColor
+packages/protocol/src/game.ts         + seatColor(seats, controller), hasEngine, humanColorOf — одно правило мест у агента и веба (задача 1)
+packages/protocol/src/retry.ts        RETRY_MS, STABLE_CONNECTION_MS, retryAfterMs(details) — паузы клиентов потока (задача 1; + retry.test.ts)
+packages/protocol/src/index.ts        + экспорт retry.ts
 
 apps/game-server/src/livekit.ts       + право canUpdateOwnMetadata в токене телефона (D-0011); livekit.test.ts, app.test.ts
+packages/protocol/src/human-text.ts   + reason sessionless_disabled, текст too_many_games для scope client (задача 9)
+apps/game-server/src/service.ts       + прежняя партия сессии брошена при смене; лимит незавершённых партий на клиента MAX_GAMES_PER_CLIENT = 3 (задача 9)
+apps/game-server/src/store.ts         + отметки брошенных партий <id>.abandoned: loadAbandoned, markAbandoned, clearAbandoned (задача 9); test-helpers.ts: memoryMarks
+apps/game-server/src/app.ts           + владелец сессии по адресу, ALLOW_SESSIONLESS_GAMES для POST /api/games (задача 9)
+apps/game-server/src/start-server.ts  + env ALLOW_SESSIONLESS_GAMES, отметки брошенных партий в хранилище (задача 9)
+scripts/smoke.mjs, scripts/dev.mjs    + ALLOW_SESSIONLESS_GAMES=1 в окружении game-server (задача 9)
+docs/decisions/0012-limits-rate-games-retention.md, спека разделы 5 и 7   + брошенная сменой партия, лимит на клиента и флаг (задача 9)
 
 apps/voice-agent/package.json         @goko/voice-agent: @livekit/agents, @livekit/rtc-node, плагины openai и silero, @goko/*, zod
 apps/voice-agent/src/phrases.ts       parseRank, speakRank, speakMove, describeResult, formatPoints, colorName
@@ -62,13 +74,13 @@ apps/web/tsconfig.json                DOM, react-jsx, bundler
 apps/web/vite.config.ts               proxy /api -> 127.0.0.1:8787; VITE_APP_KEY из APP_KEY корневого .env
 apps/web/index.html
 apps/web/src/vite-env.d.ts
-apps/web/src/main.tsx
+apps/web/src/main.tsx                 заглушка проверки сборки (задача 6), страница (задача 8)
 apps/web/src/App.tsx
 apps/web/src/api.ts                   client = createClient({ baseUrl, appKey })
 apps/web/src/geometry.ts              layout, x, y, pointAt, coordAt, hoshi, stones, indexOf  (+ geometry.test.ts)
 apps/web/src/transcript.ts            Line, upsertLine, whoOf, acceptLine  (+ transcript.test.ts)
-apps/web/src/stream.ts                streamEvents -> { done, reopen }: SSE с переподключением; needsRetry (+ stream.test.ts)
-apps/web/src/text.ts                  describeError, hasEngine, humanColorOf, resultText, statusText, capturesText, rankText (+ text.test.ts)
+apps/web/src/stream.ts                streamEvents -> { done, reopen }: SSE с переподключением 1–15 с и паузой до Retry-After; needsRetry (+ stream.test.ts)
+apps/web/src/text.ts                  describeError, retryDelayMs, sendTapMove (перечитывание после таймаута хода), resultText, statusText, capturesText, rankText (+ text.test.ts)
 apps/web/src/prefs.ts                 режим, цвет, ранг в localStorage; newGameRequest, stepRank, modeAttributes (+ prefs.test.ts)
 apps/web/src/chat.ts                  sendChat — форма ввода чата; agentReady (+ chat.test.ts)
 apps/web/src/hooks/useSession.ts      сессия в sessionStorage, комната, режим, микрофон, чат, лента
@@ -83,11 +95,11 @@ apps/web/src/components/ChatInput.tsx поле ввода и «Отправит�
 apps/web/src/styles.css
 
 apps/game-server/Dockerfile
-apps/go-engine/Dockerfile             + стадия engine (Node поверх стадии katago)
+apps/go-engine/Dockerfile             + стадия engine (Node поверх стадии katago, каталог analysis_logs для тома); chmod a+rX /opt/katago; контекст сборки — корень
 .dockerignore
 infra/docker-compose.yml              + game-server, go-engine, voice-agent
-infra/.env.example                    + VOICE_MODE, API_BASE, ENGINE_CPUS, KATAGO_ASSET
-infra/scripts/deploy.sh               + --build-web, исключения
+infra/.env.example                    + VOICE_MODE, API_BASE (задача 4); ALLOW_SESSIONLESS_GAMES (задача 9); ENGINE_CPUS, KATAGO_ASSET, KATAGO_SHA256 (задача 10); комментарий SESSION_TTL_MS (задача 11)
+infra/scripts/deploy.sh               + --build-web, каталог снапшотов на VPS (дифф к HEAD: исключения и ветка tar остаются)
 docs/runbooks/vps.md
 package.json                          + chat, typecheck web, devDependency @livekit/rtc-node
 CLAUDE.md, README.md, docs/README.md, docs/NOW.md
@@ -95,16 +107,16 @@ CLAUDE.md, README.md, docs/README.md, docs/NOW.md
 
 ---
 
-### Task 1: `voice-agent` — пакет, фразы, разбор ранга, `seatColor`
+### Task 1: `voice-agent` — пакет, фразы, разбор ранга; `protocol` — места и паузы клиентов
 
 **Files:**
-- Create: `apps/voice-agent/package.json`, `apps/voice-agent/src/phrases.ts`, `apps/voice-agent/src/state.ts`
-- Modify: `packages/protocol/src/game.ts` (добавить `seatColor`), `packages/protocol/src/index.ts` (экспорт)
-- Test: `apps/voice-agent/src/phrases.test.ts`, `packages/protocol/src/seat.test.ts`
+- Create: `apps/voice-agent/package.json`, `apps/voice-agent/src/phrases.ts`, `apps/voice-agent/src/state.ts`, `packages/protocol/src/retry.ts`
+- Modify: `packages/protocol/src/game.ts` (добавить `seatColor`, `hasEngine`, `humanColorOf`), `packages/protocol/src/index.ts` (экспорт `retry.ts`)
+- Test: `apps/voice-agent/src/phrases.test.ts`, `packages/protocol/src/seat.test.ts`, `packages/protocol/src/retry.test.ts`
 
 **Interfaces:**
 - Consumes: `speakCoord` из `@goko/go-core`; `Color`, `Rank`, `RANKS`, `Result`, `Seat`, `Controller` из `@goko/protocol`.
-- Produces: `seatColor(seats: { B: Seat; W: Seat }, controller: Controller): Color | null` в `@goko/protocol` (первый цвет с таким контроллером, порядок B, W); `parseRank(text): Rank | null`; `speakRank(rank): string` («10 кю», «3 дан»); `speakMove(coord): string`; `colorName(c)` («чёрные»/«белые»), `colorNameInstrumental(c)` («чёрными»/«белыми»); `formatPoints(n): string` («1 очко», «5,5 очка», «12 очков»); `describeResult(result: Result, humanColor: Color | null): string` (`null` — партия двух людей, D-0005); `type AgentState` (`humanColor: Color | null`, `retriesExhausted`, `fallbackMove`, `startingGame`), `newAgentState(sessionId): AgentState`.
+- Produces: `seatColor(seats: { B: Seat; W: Seat }, controller: Controller): Color | null` в `@goko/protocol` (первый цвет с таким контроллером, порядок B, W); `hasEngine(g: Pick<GameState, 'seats'>): boolean` и `humanColorOf(g: Pick<GameState, 'seats' | 'toPlay'>): Color` в `@goko/protocol` (место человека, по умолчанию чёрные; в партии без движка — цвет того, чей ход, D-0005); `RETRY_MS = [1000, 2000, 4000, 8000, 15000]`, `STABLE_CONNECTION_MS = 15000`, `retryAfterMs(details?: Record<string, unknown>): number` (секунды `details.retryAfterSeconds` в мс, без них или с мусором — 1000) в `@goko/protocol` (`retry.ts`) — одно правило пауз у voice-agent (задачи 2, 3) и веба (задача 6), своих копий они не заводят; `parseRank(text): Rank | null`; `speakRank(rank): string` («10 кю», «3 дан»); `speakMove(coord): string`; `colorName(c)` («чёрные»/«белые»), `colorNameInstrumental(c)` («чёрными»/«белыми»); `formatPoints(n): string` («1 очко», «5,5 очка», «12 очков»); `describeResult(result: Result, humanColor: Color | null): string` (`null` — партия двух людей, D-0005); `type AgentState` (`humanColor: Color | null`, `announceSync: string | null`, `retriesExhausted`, `fallbackMove`, `startingGame`, `awaitingFinish`, `finished`, `blockedUntil`), `newAgentState(sessionId): AgentState`.
 
 - [ ] **Step 1: `apps/voice-agent/package.json`**
 
@@ -131,13 +143,14 @@ CLAUDE.md, README.md, docs/README.md, docs/NOW.md
 }
 ```
 
-`npm install` в корне (workspace `apps/*` уже объявлен). `@livekit/agents` принимает zod `^3.25.76 || ^4.1.8`, конфликтов с zod 4.5 нет. `@livekit/rtc-node` — peer-зависимость `@livekit/agents` 1.8, и `main.ts` импортирует из него `RoomEvent` (задача 4), поэтому пакет объявлен прямой зависимостью воркера.
+`npm install` в корне (workspace `apps/*` уже объявлен). Нужна сеть: `@livekit/agents-plugin-silero` в `package-lock.json` ещё нет. При `ETARGET` взять ближайшую опубликованную версию той же мажорной линии и записать её в отчёт задачи. `@livekit/agents` принимает zod `^3.25.76 || ^4.1.8`, конфликтов с zod 4.5 нет. `@livekit/rtc-node` — peer-зависимость `@livekit/agents` 1.8, и `main.ts` импортирует из него `RoomEvent` (задача 4), поэтому пакет объявлен прямой зависимостью воркера.
 
-- [ ] **Step 2: Тест `packages/protocol/src/seat.test.ts`**
+- [ ] **Step 2: Тесты `packages/protocol/src/seat.test.ts` и `retry.test.ts`**
 
 ```ts
 import { describe, expect, it } from 'vitest';
-import { seatColor } from './game.ts';
+import { type Seat, hasEngine, humanColorOf, seatColor } from './game.ts';
+import * as protocol from './index.ts';
 
 describe('seatColor', () => {
   it('находит цвет по контроллеру', () => {
@@ -149,6 +162,51 @@ describe('seatColor', () => {
   it('при двух одинаковых берёт чёрных', () => {
     const seats = { B: { controller: 'engine' as const }, W: { controller: 'engine' as const } };
     expect(seatColor(seats, 'engine')).toBe('B');
+  });
+});
+
+describe('hasEngine / humanColorOf', () => {
+  const human: Seat = { controller: 'human' };
+  const engine: Seat = { controller: 'engine', rank: '10k' };
+  it('место человека, по умолчанию чёрные; Гоко в партии есть', () => {
+    expect(humanColorOf({ seats: { B: human, W: engine }, toPlay: 'W' })).toBe('B');
+    expect(humanColorOf({ seats: { B: engine, W: human }, toPlay: 'B' })).toBe('W');
+    expect(humanColorOf({ seats: { B: engine, W: { controller: 'external' } }, toPlay: 'B' })).toBe('B');
+    expect(hasEngine({ seats: { B: human, W: engine } })).toBe(true);
+    expect(protocol.hasEngine).toBe(hasEngine);
+    expect(protocol.humanColorOf).toBe(humanColorOf);
+  });
+  it('партия двух людей (D-0005): движка нет, «человек» — тот, чей ход', () => {
+    const seats = { B: human, W: human };
+    expect(hasEngine({ seats })).toBe(false);
+    expect(humanColorOf({ seats, toPlay: 'W' })).toBe('W');
+    expect(humanColorOf({ seats, toPlay: 'B' })).toBe('B');
+  });
+});
+```
+
+Тест `packages/protocol/src/retry.test.ts`:
+
+```ts
+import { describe, expect, it } from 'vitest';
+import * as protocol from './index.ts';
+import { RETRY_MS, STABLE_CONNECTION_MS, retryAfterMs } from './retry.ts';
+
+describe('паузы клиентов game-server', () => {
+  it('retryAfterMs: секунды из details в мс; без них или с мусором — 1 с', () => {
+    expect(retryAfterMs({ retryAfterSeconds: 42 })).toBe(42_000);
+    expect(retryAfterMs(undefined)).toBe(1_000);
+    expect(retryAfterMs({})).toBe(1_000);
+    expect(retryAfterMs({ retryAfterSeconds: 'soon' })).toBe(1_000);
+    expect(retryAfterMs({ retryAfterSeconds: 0 })).toBe(1_000);
+    expect(retryAfterMs({ retryAfterSeconds: -5 })).toBe(1_000);
+  });
+  it('ступени переподключения 1, 2, 4, 8, 15 с; порог рабочего соединения — 15 с; всё экспортирует пакет', () => {
+    expect(RETRY_MS).toEqual([1_000, 2_000, 4_000, 8_000, 15_000]);
+    expect(STABLE_CONNECTION_MS).toBe(15_000);
+    expect(protocol.retryAfterMs).toBe(retryAfterMs);
+    expect(protocol.RETRY_MS).toBe(RETRY_MS);
+    expect(protocol.STABLE_CONNECTION_MS).toBe(STABLE_CONNECTION_MS);
   });
 });
 ```
@@ -168,6 +226,7 @@ describe('parseRank', () => {
     expect(parseRank('первый дан')).toBeNull();
     expect(parseRank('1-й дан')).toBe('1d');
     expect(parseRank(' 5 kyu ')).toBe('5k');
+    expect(parseRank('поставь 3 кю пожалуйста')).toBe('3k');
   });
   it('отвергает ранги вне списка и мусор', () => {
     expect(parseRank('25 кю')).toBeNull();
@@ -216,12 +275,12 @@ describe('describeResult', () => {
 
 - [ ] **Step 4: Запустить тесты, убедиться, что падают**
 
-Run: `npx vitest run packages/protocol/src/seat.test.ts apps/voice-agent/src/phrases.test.ts`
-Expected: FAIL — `seatColor` не экспортируется из `./game.ts`; `Cannot find module './phrases.ts'`.
+Run: `npx vitest run packages/protocol/src/seat.test.ts packages/protocol/src/retry.test.ts apps/voice-agent/src/phrases.test.ts`
+Expected: FAIL — `seatColor`, `hasEngine`, `humanColorOf` не экспортируются из `./game.ts`; `Cannot find module './retry.ts'`; `Cannot find module './phrases.ts'`.
 
-- [ ] **Step 5: `seatColor` в `packages/protocol/src/game.ts`**
+- [ ] **Step 5: `seatColor`, `hasEngine`, `humanColorOf` в `packages/protocol/src/game.ts`, паузы в `retry.ts`**
 
-В конец файла добавить:
+В конец `packages/protocol/src/game.ts` добавить:
 
 ```ts
 // Цвет места с данным контроллером; при двух одинаковых — чёрные. null, если такого места нет.
@@ -230,9 +289,40 @@ export function seatColor(seats: { B: Seat; W: Seat }, controller: Controller): 
   if (seats.W.controller === controller) return 'W';
   return null;
 }
+
+// Есть ли в партии Гоко. Партия двух людей разрешена (D-0005): Гоко в ней только комментирует.
+export function hasEngine(g: Pick<GameState, 'seats'>): boolean {
+  return seatColor(g.seats, 'engine') !== null;
+}
+
+// Цвет «человека» для текстов и сдачи у voice-agent и веба. В партии без движка людей двое,
+// и «ты» — тот, чей сейчас ход. Иначе место человека; без него — чёрные.
+export function humanColorOf(g: Pick<GameState, 'seats' | 'toPlay'>): Color {
+  if (!hasEngine(g) && g.seats[g.toPlay].controller === 'human') return g.toPlay;
+  return seatColor(g.seats, 'human') ?? 'B';
+}
 ```
 
-В `packages/protocol/src/index.ts` `seatColor` попадает через уже существующий `export * from './game.ts'` — если в ядре экспорт поимённый, добавить `seatColor` в список.
+`packages/protocol/src/retry.ts`:
+
+```ts
+// Паузы клиентов game-server после отказов (R2, D-0012). Одно правило у voice-agent (задачи 2, 3) и веба
+// (задача 6): правка ступеней или разбора Retry-After не расходится по двум копиям.
+
+// Паузы переподключения потока по попыткам: растут до потолка 15 с.
+export const RETRY_MS = [1_000, 2_000, 4_000, 8_000, 15_000] as const;
+
+// Соединение, прожившее столько, считается рабочим: следующий обрыв — снова с первой ступени.
+export const STABLE_CONNECTION_MS = 15_000;
+
+// Retry-After из details ошибки rate_limited (D-0012), в мс. Без поля или с мусором — 1 с: не долбить сервер сразу.
+export function retryAfterMs(details?: Record<string, unknown>): number {
+  const seconds = Number(details?.retryAfterSeconds);
+  return Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : 1000;
+}
+```
+
+В `packages/protocol/src/index.ts` после строки `export * from './human-text.ts';` добавить `export * from './retry.ts';`. Функции `game.ts` попадают в пакет через уже существующий `export * from './game.ts'`.
 
 - [ ] **Step 6: `apps/voice-agent/src/phrases.ts`**
 
@@ -246,8 +336,10 @@ export const colorName = (c: Color): string => (c === 'B' ? 'чёрные' : 'б
 export const colorNameInstrumental = (c: Color): string => (c === 'B' ? 'чёрными' : 'белыми');
 
 // «10 кю», «10k», «3 дан», «3d», «1-й дан» -> Rank; null, если не разобрали или ранга нет в списке.
+// Конец слова — просмотр вперёд по буквам и цифрам Unicode: \b в JS знает только [A-Za-z0-9_]
+// и после «кю» или «дан» границы не видит.
 export function parseRank(text: string): Rank | null {
-  const m = /(\d{1,2})\s*(?:-?\s*(?:й|го|ый|ого))?\s*(k|kyu|кю|d|dan|дан)\b/iu.exec(text.trim());
+  const m = /(\d{1,2})\s*(?:-?\s*(?:й|го|ый|ого))?\s*(k|kyu|кю|d|dan|дан)(?![\p{L}\p{N}])/iu.exec(text.trim());
   if (!m) return null;
   const n = Number(m[1]);
   const kyu = /^(k|kyu|кю)$/iu.test(m[2] ?? '');
@@ -305,11 +397,12 @@ export function describeResult(result: Result, humanColor: Color | null): string
 ```ts
 // Память агента о сессии. Позиции здесь нет (правило 2 CLAUDE.md): только идентификаторы, настройки
 // и флаги, по которым события SSE решают, что уже озвучено инструментом, а что надо сказать самому.
-import type { Color, Rank } from '@goko/protocol';
+import type { Color, Rank, Result } from '@goko/protocol';
 
 export type AgentState = {
   sessionId: string;
   gameId: string | null;
+  announceSync: string | null; // session.game сменил партию: sync этой партии озвучить «Продолжаем партию» (задача 3)
   humanColor: Color | null; // null — в партии нет движка, играют два человека (D-0005)
   rank: Rank; // ранг Гоко для следующей партии
   komi: number;
@@ -321,6 +414,9 @@ export type AgentState = {
   retriesExhausted: boolean; // пришёл error retries_exhausted: следующая реплика человека переоткроет поток (D-0006)
   fallbackMove: number | null; // номер последнего хода движка с humanFallback (D-0007)
   startingGame: boolean; // start_game ждёт ответа newGame: событие new приходит раньше ответа HTTP
+  awaitingFinish: string | null; // pass ждёт итог этой партии: game.finished кладёт его в finished, не озвучивая
+  finished: { gameId: string; result: Result } | null; // итог из потока сессии для ожидающего pass (R2)
+  blockedUntil: number; // до этого момента (мс, часы deps.now) запросы к game-server не шлём: rate_limited с Retry-After
 };
 
 export const DEFAULT_RANK: Rank = '10k';
@@ -330,6 +426,7 @@ export function newAgentState(sessionId: string): AgentState {
   return {
     sessionId,
     gameId: null,
+    announceSync: null,
     humanColor: 'B',
     rank: DEFAULT_RANK,
     komi: DEFAULT_KOMI,
@@ -341,20 +438,23 @@ export function newAgentState(sessionId: string): AgentState {
     retriesExhausted: false,
     fallbackMove: null,
     startingGame: false,
+    awaitingFinish: null,
+    finished: null,
+    blockedUntil: 0,
   };
 }
 ```
 
 - [ ] **Step 8: Тесты и typecheck зелёные**
 
-Run: `npx vitest run packages/protocol/src/seat.test.ts apps/voice-agent/src/phrases.test.ts && npm run typecheck`
-Expected: `Test Files  2 passed`, `Tests  8 passed` (2 в `seat.test.ts`, 6 в `phrases.test.ts`), typecheck без ошибок.
+Run: `npx vitest run packages/protocol/src/seat.test.ts packages/protocol/src/retry.test.ts apps/voice-agent/src/phrases.test.ts && npm run typecheck`
+Expected: `Test Files  3 passed`, `Tests  12 passed` (4 в `seat.test.ts`, 2 в `retry.test.ts`, 6 в `phrases.test.ts`), typecheck без ошибок.
 
 - [ ] **Step 9: Commit**
 
 ```bash
-git add package-lock.json apps/voice-agent/package.json apps/voice-agent/src/phrases.ts apps/voice-agent/src/phrases.test.ts apps/voice-agent/src/state.ts packages/protocol/src/game.ts packages/protocol/src/index.ts packages/protocol/src/seat.test.ts
-git commit -m "voice-agent: пакет, фразы и разбор ранга; protocol: seatColor"
+git add package-lock.json apps/voice-agent/package.json apps/voice-agent/src/phrases.ts apps/voice-agent/src/phrases.test.ts apps/voice-agent/src/state.ts packages/protocol/src/game.ts packages/protocol/src/index.ts packages/protocol/src/seat.test.ts packages/protocol/src/retry.ts packages/protocol/src/retry.test.ts
+git commit -m "voice-agent: пакет, фразы и разбор ранга; protocol: seatColor, hasEngine, humanColorOf и паузы клиентов"
 ```
 
 ---
@@ -366,8 +466,19 @@ git commit -m "voice-agent: пакет, фразы и разбор ранга; p
 - Test: `apps/voice-agent/src/tools.test.ts`
 
 **Interfaces:**
-- Consumes: `GokoClient`, `ApiError`, `GameState`, `PlayResponse`, `Analysis`, `Move`, `Rank`, `Color`, `seatColor` из `@goko/protocol`; `phrases.ts`, `state.ts` из Task 1; `llm.tool` из `@livekit/agents`.
-- Produces: `type ToolClient = Pick<GokoClient, 'newGame' | 'play' | 'correct' | 'pass' | 'resign' | 'undo' | 'getGame' | 'ascii' | 'analyze' | 'setRank'>`; `type ToolDeps = { client: ToolClient; state: AgentState; sleep?: (ms: number) => Promise<void>; log?: (line: string) => void }`; `createToolFns(deps)` с методами `startGame({ my_color?, rank?, komi? })`, `playMove({ coord })`, `correctLastMove({ coord })`, `pass()`, `resign()`, `undo()`, `getPosition(): Promise<string>`, `getAssessment()`, `setRank({ rank })`; `createTools(deps)` — объект из девяти `llm.tool()` с именами из спеки; константы `ASSESSMENT_VISITS = 50`, `FINISH_WAIT_MS = 35000`, `FINISH_POLL_MS = 500`; `humanColorOf(state: GameState): Color` (место человека; в партии без движка — цвет того, чей ход, D-0005), `hasEngine(state: GameState): boolean`, `engineColorOf(state): Color`. Тестовый клиент: `createFakeClient(opts?: { replies?: string[]; ascii?: string; analysis?: Partial<Analysis>; finishAfterPolls?: number }): FakeClient` (`ToolClient & { calls: Array<{ method: string; args: unknown[] }>; game: GameState | null; failNext(err: Error): void; replyTimedOut: boolean }`); `fakeGame(overrides?: Partial<GameState>): GameState`.
+- Consumes: `GokoClient`, `CallOptions`, `ApiError`, `ClientTimeoutError`, `HttpError`, `humanText`, `GameState`, `PlayResponse`, `Analysis`, `Move`, `Rank`, `Color`, `seatColor`, `hasEngine`, `humanColorOf`, `retryAfterMs` из `@goko/protocol` (Task 1); `phrases.ts`, `state.ts` из Task 1 (поля `awaitingFinish`, `finished`, `blockedUntil`); `llm.tool` из `@livekit/agents`.
+- Produces: `type ToolClient = Pick<GokoClient, 'newGame' | 'play' | 'correct' | 'pass' | 'resign' | 'undo' | 'getGame' | 'ascii' | 'analyze' | 'setRank'>`; `type ToolDeps = { client: ToolClient; state: AgentState; signal?: AbortSignal; sleep?: (ms: number) => Promise<void>; now?: () => number; log?: (line: string) => void }` (`signal` уходит последним аргументом `{ signal }` в каждый вызов клиента; `now` — часы для `blockedUntil` и ожидания итога); `createToolFns(deps)` с методами `startGame({ my_color?, rank?, komi? })`, `playMove({ coord })`, `correctLastMove({ coord })`, `pass()`, `resign()`, `undo()`, `getPosition(): Promise<string>`, `getAssessment()`, `setRank({ rank })`; `createTools(deps)` — объект из девяти `llm.tool()` с именами из спеки; константы `ASSESSMENT_VISITS = 50`, `FINISH_WAIT_MS = 22000`, `FINISH_POLL_MS = 2500`, `FINISH_TICK_MS = 250`, `NETWORK_TEXT = 'нет связи с сервером'`, `KOMI_TEXT`; `engineColorOf(state): Color`. Своих `retryAfterMs`, `hasEngine`, `humanColorOf` `tools.ts` не определяет и не реэкспортирует: `events.ts` берёт их из `@goko/protocol`. Тестовый клиент: `createFakeClient(opts?: { replies?: string[]; ascii?: string; analysis?: Partial<Analysis>; finishAfterPolls?: number }): FakeClient` (`ToolClient & { calls: Array<{ method: string; args: unknown[] }>; signals: Array<AbortSignal | undefined>; game: GameState | null; failNext(err: Error, when?: 'before' | 'after'): void; replyTimedOut: boolean }`; `'after'` — только у `play`, `pass`, `correct`: ход записан, а вызов бросает ошибку; методы принимают `o?: CallOptions` последним, в `calls.args` его нет, отменённый сигнал бросает его причину); `fakeGame(overrides?: Partial<GameState>): GameState`.
+
+Отказы в инструментах (Global Constraints, «Клиент протокола» и «Лимиты»): `ApiError` → `humanText(code, details)`, у `rate_limited` ещё `state.blockedUntil = now() + retryAfterMs(details)`; `ClientTimeoutError` → `humanText('client_timeout')` («сервер не отвечает»; у хода, паса и поправки — после перечитывания партии, ниже); `HttpError` и `TypeError('fetch failed')` → `NETWORK_TEXT`; остальное (в том числе отмена сигналом сеанса) пробрасывается в лог воркера. Пока `now() < state.blockedUntil`, инструменты партии не зовут клиент и отвечают `humanText('rate_limited')`.
+
+Таймаут клиента на ходе (`play_move`, `pass`, `correct_last_move`). Сервер мог записать ход, а ответ не дошёл, поэтому инструмент ход не повторяет, а перечитывает партию (`getGame`) и сверяет её с тем, что видел раньше:
+- ревизия та же, что в последнем ответе сервера инструментам по этой партии, — хода нет;
+- иначе ход считается записанным, если ход человека с этой координатой стоит последним (ответа Гоко ещё нет или Гоко в партии нет) или предпоследним, а за ним ход Гоко;
+- записан — обычный `ok: true` по перечитанной партии; ответа Гоко нет — `note` и `awaitingReply`, как при `replyTimedOut`;
+- не записан — `ok: false` с фактическим «чей ход» и просьбой не повторять ход без человека: «сервер не отвечает: хода D4 в партии пока нет, сейчас ход: чёрные (твой). Не повторяй ход сам: скажи человеку и дождись его слов»;
+- перечитать не вышло — отказ перечитывания по общим правилам.
+
+Ревизию инструменты запоминают только из своих ответов: событие `state.updated` о записанном ходе приходит раньше таймаута, и по нему сверка приняла бы записанный ход за незаписанный.
 
 Результаты инструментов (то, что видит модель):
 
@@ -375,13 +486,13 @@ git commit -m "voice-agent: пакет, фразы и разбор ранга; p
 | --- | --- | --- |
 | `start_game` | `true` | `gameId`, `youPlay: 'black' \| 'white'`, `rank` («10 кю»), `komi`, `firstMove` (координата или `null`), `firstMoveSpoken`, `note?` |
 | `play_move`, `correct_last_move` | `true` | `yourMove`, `myMove` (координата, `'pass'` или `null`), `myMoveSpoken`, `captured` (снял человек этим ходом), `myCaptured`, `toPlay`, `moveNumber`, `note?`, `finished?`, `result?` |
-| `pass` | `true` | `myMove`, `myMoveSpoken`, `toPlay`, `finished?`, `result?`, `note?` |
+| `pass` | `true` | `myMove`, `myMoveSpoken`, `toPlay`, `finished?`, `result?`, `note?` (после двух пасов без итога за `FINISH_WAIT_MS` — «Гоко ещё считает очки: итог назовёт сам») |
 | `resign` | `true` | `result` |
 | `undo` | `true` | `removed: string[]`, `removedSpoken: string[]`, `toPlay`, `status` |
 | `get_position` | — | текст: ascii-доска, последние 6 ходов, пленные, строка о ходе движка с `humanFallback` (если он ещё на доске), чей ход |
 | `get_assessment` | — | `leader: 'you' \| 'me' \| 'even'`, `marginPoints`, `winrateYou` (проценты), `weakGroups: [{ color: 'yours' \| 'mine', where, status }]`, `bestMoves: string[]`, `toPlay: 'you' \| 'me'`; в партии двух людей (D-0005) — цветами: `leader: 'black' \| 'white' \| 'even'`, `winrateBlack`, `weakGroups[].color: 'black' \| 'white'`, `toPlay: 'black' \| 'white'` |
 | `set_rank` | `true` | `rank`, `note?` (без партии или в партии без Гоко — ранг для следующей) |
-| любой | `false` | `reason` — русский текст: `humanText(code, details)` из протокола по коду ошибки сервера (для `illegal_move` — причина: «точка занята», «ко: сразу забрать нельзя») или своя фраза агента («партия не начата: предложи начать») |
+| любой | `false` | `reason` — русский текст: `humanText(code, details)` из протокола по коду ошибки сервера (для `illegal_move` — причина: «точка занята», «ко: сразу забрать нельзя»; для `bad_request` с `reason: 'not_your_seat'` — «это не твой цвет»; `rate_limited`, `too_many_games`), `humanText('client_timeout')` при таймауте клиента (у хода, паса и поправки — после перечитывания партии, с фактическим «чей ход»; записанный ход — обычный `ok: true`), «нет связи с сервером» при потере сети или своя фраза агента («партия не начата: предложи начать», `KOMI_TEXT`) |
 
 - [ ] **Step 1: `apps/voice-agent/src/testing/fake-client.ts`**
 
@@ -391,6 +502,7 @@ git commit -m "voice-agent: пакет, фразы и разбор ранга; p
 import {
   type Analysis,
   ApiError,
+  type CallOptions,
   type CorrectRequest,
   type GameState,
   type Move,
@@ -435,27 +547,33 @@ export type FakeClientOptions = {
 };
 
 export type FakeClient = ToolClient & {
-  calls: Array<{ method: string; args: unknown[] }>;
+  calls: Array<{ method: string; args: unknown[] }>; // аргументы без CallOptions
+  signals: Array<AbortSignal | undefined>; // сигнал каждого вызова по порядку: инструменты передают deps.signal
   game: GameState | null;
   replyTimedOut: boolean; // следующий play/pass/correct вернёт replyTimedOut без ответа движка
-  failNext(err: Error): void;
+  // Следующий вызов бросает err. 'before' (по умолчанию) — до всякой работы; 'after' — только play, pass и
+  // correct: ход и ответ движка уже записаны, а вызов бросает (таймаут клиента после записи на сервере).
+  failNext(err: Error, when?: 'before' | 'after'): void;
 };
 
 export function createFakeClient(opts: FakeClientOptions = {}): FakeClient {
   const replies = [...(opts.replies ?? ['K10', 'D10', 'K4'])];
   let pending: Error | null = null;
+  let pendingAfter = false;
   let pollsLeft = -1;
   let n = 0;
 
   const self: FakeClient = {
     calls: [],
+    signals: [],
     game: null,
     replyTimedOut: false,
-    failNext(err) {
+    failNext(err, when = 'before') {
       pending = err;
+      pendingAfter = when === 'after';
     },
-    async newGame(sessionId: string, req: NewGameRequest): Promise<NewGameResponse> {
-      record('newGame', sessionId, req);
+    async newGame(sessionId: string, req: NewGameRequest, o?: CallOptions): Promise<NewGameResponse> {
+      record('newGame', o, sessionId, req);
       throwPending();
       const komi = req.settings?.komi ?? 7.5;
       self.game = fakeGame({
@@ -471,22 +589,23 @@ export function createFakeClient(opts: FakeClientOptions = {}): FakeClient {
       self.replyTimedOut = false;
       return res;
     },
-    async play(id: string, req: PlayRequest): Promise<PlayResponse> {
-      record('play', id, req);
+    async play(id: string, req: PlayRequest, o?: CallOptions): Promise<PlayResponse> {
+      record('play', o, id, req);
       return humanMove(req.coord);
     },
-    async correct(id: string, req: CorrectRequest): Promise<PlayResponse> {
-      record('correct', id, req);
+    async correct(id: string, req: CorrectRequest, o?: CallOptions): Promise<PlayResponse> {
+      record('correct', o, id, req);
+      throwPending();
       const g = need();
       g.moves = g.moves.slice(0, -2);
       return humanMove(req.coord);
     },
-    async pass(id: string, req: PassRequest = {}): Promise<PlayResponse> {
-      record('pass', id, req);
+    async pass(id: string, req: PassRequest = {}, o?: CallOptions): Promise<PlayResponse> {
+      record('pass', o, id, req);
       return humanMove('pass');
     },
-    async resign(id: string, req: ResignRequest): Promise<StateResponse> {
-      record('resign', id, req);
+    async resign(id: string, req: ResignRequest, o?: CallOptions): Promise<StateResponse> {
+      record('resign', o, id, req);
       throwPending();
       const g = need();
       g.status = 'finished';
@@ -494,8 +613,8 @@ export function createFakeClient(opts: FakeClientOptions = {}): FakeClient {
       g.revision++;
       return { state: g };
     },
-    async undo(id: string, req: UndoRequest = {}): Promise<UndoResponse> {
-      record('undo', id, req);
+    async undo(id: string, req: UndoRequest = {}, o?: CallOptions): Promise<UndoResponse> {
+      record('undo', o, id, req);
       throwPending();
       const g = need();
       if (g.moves.length === 0) throw new ApiError('nothing_to_undo', 'nothing to undo');
@@ -505,8 +624,8 @@ export function createFakeClient(opts: FakeClientOptions = {}): FakeClient {
       g.revision++;
       return { state: g, removed };
     },
-    async getGame(id: string): Promise<GameState> {
-      record('getGame', id);
+    async getGame(id: string, o?: CallOptions): Promise<GameState> {
+      record('getGame', o, id);
       const g = need();
       if (pollsLeft > 0) pollsLeft--;
       if (pollsLeft === 0) {
@@ -516,12 +635,12 @@ export function createFakeClient(opts: FakeClientOptions = {}): FakeClient {
       }
       return g;
     },
-    async ascii(id: string): Promise<string> {
-      record('ascii', id);
+    async ascii(id: string, o?: CallOptions): Promise<string> {
+      record('ascii', o, id);
       return opts.ascii ?? '# g1 rev 2 playing toPlay B moves 2\n   A B C\n 3 . . .\n 2 . . .\n 1 . . .\n';
     },
-    async analyze(id: string, req = {}): Promise<Analysis> {
-      record('analyze', id, req);
+    async analyze(id: string, req = {}, o?: CallOptions): Promise<Analysis> {
+      record('analyze', o, id, req);
       throwPending();
       return {
         visits: 50,
@@ -534,16 +653,18 @@ export function createFakeClient(opts: FakeClientOptions = {}): FakeClient {
           { coord: 'C3', winrateB: 0.6, scoreLeadB: 4.0, visits: 5 },
         ],
         ownership: [],
+        // Слабая группа — не на лучших ходах: eval «кто впереди» (задача 4) запрещает в ответе K10 и D10,
+        // а место слабой группы модель называет законно.
         groups: [
           { color: 'B', stones: ['D4'], liberties: 4, ownershipAvg: 0.9, status: 'safe' },
-          { color: 'W', stones: ['K10', 'K11'], liberties: 2, ownershipAvg: -0.1, status: 'unsettled' },
+          { color: 'W', stones: ['C3', 'C4'], liberties: 2, ownershipAvg: -0.1, status: 'unsettled' },
           { color: 'B', stones: ['M3'], liberties: 1, ownershipAvg: -0.8, status: 'dead' },
         ],
         ...opts.analysis,
       };
     },
-    async setRank(id: string, req: SetRankRequest): Promise<StateResponse> {
-      record('setRank', id, req);
+    async setRank(id: string, req: SetRankRequest, o?: CallOptions): Promise<StateResponse> {
+      record('setRank', o, id, req);
       throwPending();
       const g = need();
       g.seats[req.color] = { ...g.seats[req.color], rank: req.rank };
@@ -552,13 +673,25 @@ export function createFakeClient(opts: FakeClientOptions = {}): FakeClient {
     },
   };
 
-  function record(method: string, ...args: unknown[]) {
+  // Журнал без CallOptions (сигналы — отдельно); отменённый сигнал ведёт себя как у настоящего клиента:
+  // вызов бросает причину отмены до всякой работы.
+  function record(method: string, o: CallOptions | undefined, ...args: unknown[]) {
     self.calls.push({ method, args });
+    self.signals.push(o?.signal);
+    o?.signal?.throwIfAborted();
   }
   function throwPending() {
-    if (pending) {
+    if (pending && !pendingAfter) {
       const e = pending;
       pending = null;
+      throw e;
+    }
+  }
+  function throwPendingAfter() {
+    if (pending && pendingAfter) {
+      const e = pending;
+      pending = null;
+      pendingAfter = false;
       throw e;
     }
   }
@@ -581,6 +714,11 @@ export function createFakeClient(opts: FakeClientOptions = {}): FakeClient {
   }
   function humanMove(coord: string): PlayResponse {
     throwPending();
+    const res = applyHumanMove(coord);
+    throwPendingAfter();
+    return res;
+  }
+  function applyHumanMove(coord: string): PlayResponse {
     const g = need();
     if (g.status === 'finished') throw new ApiError('game_finished', 'game is finished');
     const human = g.toPlay;
@@ -609,24 +747,51 @@ export function createFakeClient(opts: FakeClientOptions = {}): FakeClient {
 
 ```ts
 import { describe, expect, it } from 'vitest';
-import { ApiError, humanText } from '@goko/protocol';
-import { newAgentState } from './state.ts';
+import { ApiError, ClientTimeoutError, type GameState, HttpError, humanText } from '@goko/protocol';
+import { type AgentState, newAgentState } from './state.ts';
 import { createFakeClient, fakeGame } from './testing/fake-client.ts';
-import { ASSESSMENT_VISITS, createToolFns, createTools, hasEngine, humanColorOf } from './tools.ts';
+import {
+  ASSESSMENT_VISITS,
+  FINISH_POLL_MS,
+  FINISH_WAIT_MS,
+  KOMI_TEXT,
+  NETWORK_TEXT,
+  createToolFns,
+  createTools,
+} from './tools.ts';
 
-function setup(opts: Parameters<typeof createFakeClient>[0] = {}) {
+type FakeOpts = Parameters<typeof createFakeClient>[0];
+type OnTick = (now: number, state: AgentState) => void;
+
+// Часы тестов двигает только sleep: ожидание итога и Retry-After проверяются без настоящего времени.
+// onTick — что «пришло из потока» к этому моменту (events.ts кладёт итог в state.finished).
+function setup(opts: FakeOpts = {}, onTick?: OnTick) {
   const client = createFakeClient(opts);
   const state = newAgentState('s1');
+  const clock = { t: 0 };
   const slept: number[] = [];
-  const fns = createToolFns({ client, state, sleep: async (ms) => void slept.push(ms) });
-  return { client, state, fns, slept };
+  const controller = new AbortController();
+  const sleep = async (ms: number) => {
+    slept.push(ms);
+    clock.t += ms;
+    onTick?.(clock.t, state);
+  };
+  const fns = createToolFns({ client, state, sleep, now: () => clock.t, signal: controller.signal });
+  return { client, state, fns, slept, clock, controller };
 }
 
-async function withGame(opts: Parameters<typeof createFakeClient>[0] = {}) {
-  const t = setup(opts);
+async function withGame(opts: FakeOpts = {}, onTick?: OnTick) {
+  const t = setup(opts, onTick);
   await t.fns.startGame({ my_color: 'black' });
   t.client.calls.length = 0;
+  t.client.signals.length = 0;
   return t;
+}
+
+// Партия фейкового клиента без non-null `!`: нет партии — тест падает понятной ошибкой.
+function gameOf(client: { game: GameState | null }): GameState {
+  if (!client.game) throw new Error('фейковый клиент: партии нет');
+  return client.game;
 }
 
 describe('без партии', () => {
@@ -669,9 +834,17 @@ describe('start_game', () => {
     };
     await fns.startGame({});
     expect(during).toBe(true);
-    client.failNext(new ApiError('limit_reached', 'too many active sessions'));
-    expect(await fns.startGame({})).toEqual({ ok: false, reason: humanText('limit_reached') });
+    // Лимит незавершённых партий на клиента (D-0012, задача 9): текст — из humanText по details.
+    const details = { max: 3, scope: 'client' };
+    client.failNext(new ApiError('too_many_games', 'limit of 3 unfinished games per client reached', details));
+    expect(await fns.startGame({})).toEqual({ ok: false, reason: humanText('too_many_games', details) });
     expect(state.startingGame).toBe(false);
+  });
+  it('коми не с половиной или вне 0,5–13,5 — ok:false без запроса', async () => {
+    const { fns, client } = setup();
+    for (const komi of [7, 0, 14.5, -0.5, Number.NaN]) expect(await fns.startGame({ komi })).toEqual({ ok: false, reason: KOMI_TEXT });
+    expect(client.calls).toEqual([]);
+    expect(await fns.startGame({ komi: 0.5 })).toMatchObject({ ok: true, komi: 0.5 });
   });
   it('человек белыми с рангом: первый ход движка в ответе', async () => {
     const { fns, state } = setup({ replies: ['K10'] });
@@ -733,18 +906,114 @@ describe('play_move / correct_last_move', () => {
   it('сдача движка после хода — finished и result', async () => {
     const { fns, state, client } = await withGame();
     client.play = async () => {
-      const g = fakeGame({ id: 'g1', status: 'finished', result: { winner: 'B', reason: 'resign' }, moves: [{ n: 1, color: 'B', coord: 'D4', captured: 0, at: 't' }], toPlay: 'W', revision: 1 });
-      return { state: g, move: g.moves[0]! };
+      const move = { n: 1, color: 'B' as const, coord: 'D4', captured: 0, at: 't' };
+      const g = fakeGame({ id: 'g1', status: 'finished', result: { winner: 'B', reason: 'resign' }, moves: [move], toPlay: 'W', revision: 1 });
+      return { state: g, move };
     };
     const res = await fns.playMove({ coord: 'D4' });
     expect(res).toMatchObject({ ok: true, finished: true, result: 'победа за тобой: я сдался' });
     expect(state.announcedFinish).toBe('g1');
     expect(state.awaitingReply).toBe(false);
   });
-  it('не ApiError пробрасывается', async () => {
+  it('сеть и ответ не по протоколу — «нет связи с сервером» без перечитывания; таймаут чтения — «сервер не отвечает»', async () => {
     const { fns, client } = await withGame();
     client.failNext(new TypeError('fetch failed'));
-    await expect(fns.playMove({ coord: 'D4' })).rejects.toThrow('fetch failed');
+    expect(await fns.playMove({ coord: 'D4' })).toEqual({ ok: false, reason: NETWORK_TEXT });
+    client.failNext(new HttpError(502, '<html>Bad Gateway</html>'));
+    expect(await fns.playMove({ coord: 'D4' })).toEqual({ ok: false, reason: NETWORK_TEXT });
+    client.failNext(new ClientTimeoutError('analyze', 15_000));
+    expect(await fns.getAssessment()).toEqual({ ok: false, reason: humanText('client_timeout') });
+    expect(humanText('client_timeout')).not.toBe(NETWORK_TEXT);
+    expect(client.calls.map((c) => c.method)).toEqual(['play', 'play', 'getGame', 'analyze']);
+  });
+  it('ошибка кода пробрасывается: её увидит лог воркера, а не человек', async () => {
+    const { fns, client } = await withGame();
+    client.failNext(new Error('bug in tool'));
+    await expect(fns.playMove({ coord: 'D4' })).rejects.toThrow('bug in tool');
+  });
+  it('сигнал сеанса уходит в каждый вызов клиента; отменённый сигнал обрывает инструмент', async () => {
+    const { fns, client, controller } = await withGame({ replies: ['K10'] });
+    await fns.playMove({ coord: 'D4' });
+    await fns.getPosition();
+    expect(client.signals).toEqual([controller.signal, controller.signal, controller.signal]);
+    controller.abort();
+    const err = await fns.playMove({ coord: 'E5' }).catch((e: unknown) => e);
+    expect((err as Error).name).toBe('AbortError');
+  });
+  it('rate_limited: текст из humanText, до Retry-After инструменты партии к серверу не ходят', async () => {
+    const { fns, client, state, clock } = await withGame({ replies: ['K10'] });
+    client.failNext(new ApiError('rate_limited', 'too many requests, retry in 30 s', { retryAfterSeconds: 30 }));
+    expect(await fns.playMove({ coord: 'D4' })).toEqual({ ok: false, reason: humanText('rate_limited') });
+    expect(state.blockedUntil).toBe(30_000);
+    client.calls.length = 0;
+    clock.t = 29_999;
+    expect(await fns.playMove({ coord: 'D4' })).toEqual({ ok: false, reason: humanText('rate_limited') });
+    expect(await fns.getPosition()).toBe(humanText('rate_limited'));
+    expect(await fns.getAssessment()).toEqual({ ok: false, reason: humanText('rate_limited') });
+    expect(client.calls).toEqual([]);
+    clock.t = 30_000;
+    expect(await fns.playMove({ coord: 'D4' })).toMatchObject({ ok: true, myMove: 'K10' });
+  });
+});
+
+describe('таймаут клиента на ходе, пасе и поправке: перечитывание вместо повтора', () => {
+  const NOT_APPLIED_TAIL = 'Не повторяй ход сам: скажи человеку и дождись его слов';
+
+  it('ход не записан: партия перечитана тем же сигналом, ход не повторён, модель слышит, чей ход на самом деле', async () => {
+    const { fns, client, state, controller } = await withGame();
+    client.failNext(new ClientTimeoutError('play', 15_000));
+    expect(await fns.playMove({ coord: 'D4' })).toEqual({
+      ok: false,
+      reason: `сервер не отвечает: хода D4 в партии пока нет, сейчас ход: чёрные (твой). ${NOT_APPLIED_TAIL}`,
+    });
+    expect(client.calls.map((c) => c.method)).toEqual(['play', 'getGame']);
+    expect(client.signals).toEqual([controller.signal, controller.signal]);
+    expect(gameOf(client).moves).toEqual([]);
+    expect(state.awaitingReply).toBe(false);
+  });
+
+  it('ход записан, ответ не дошёл: результат по перечитанной партии — с ответом Гоко или с note, пока он думает', async () => {
+    const { fns, client, state } = await withGame({ replies: ['K10'] });
+    client.failNext(new ClientTimeoutError('play', 15_000), 'after');
+    expect(await fns.playMove({ coord: 'D4' })).toEqual({ ok: true, yourMove: 'D4', myMove: 'K10', myMoveSpoken: 'ка десять', captured: 0, myCaptured: 0, toPlay: 'B', moveNumber: 2 });
+    expect(state.awaitingReply).toBe(false);
+    client.replyTimedOut = true;
+    client.failNext(new ClientTimeoutError('play', 15_000), 'after');
+    expect(await fns.playMove({ coord: 'E5' })).toMatchObject({ ok: true, yourMove: 'E5', myMove: null, note: 'Гоко ещё думает: свой ход он назовёт сам, когда решит' });
+    expect(state.awaitingReply).toBe(true);
+    expect(client.calls.map((c) => c.method)).toEqual(['play', 'getGame', 'play', 'getGame']);
+    expect(gameOf(client).moves.map((m) => m.coord)).toEqual(['D4', 'K10', 'E5']);
+  });
+
+  it('пас не записан, хотя прежний ход человека тоже пас: ревизия та же — паса нет', async () => {
+    const { fns, client } = await withGame({ replies: ['K10'] });
+    expect(await fns.pass()).toMatchObject({ ok: true, myMove: 'K10' });
+    client.failNext(new ClientTimeoutError('pass', 15_000));
+    // По одним ходам (пас человека, за ним ход Гоко) пас выглядел бы записанным: решает ревизия из ответа пасу.
+    expect(await fns.pass()).toEqual({ ok: false, reason: `сервер не отвечает: паса в партии пока нет, сейчас ход: чёрные (твой). ${NOT_APPLIED_TAIL}` });
+    expect(client.calls.map((c) => c.method)).toEqual(['pass', 'pass', 'getGame']);
+    expect(gameOf(client).moves.map((m) => m.coord)).toEqual(['pass', 'K10']);
+  });
+
+  it('пас и поправка записаны, ответ не дошёл: обычные ответы по перечитанной партии', async () => {
+    const { fns, client } = await withGame({ replies: ['K10', 'D10', 'K4'] });
+    client.failNext(new ClientTimeoutError('pass', 15_000), 'after');
+    expect(await fns.pass()).toEqual({ ok: true, myMove: 'K10', myMoveSpoken: 'ка десять', toPlay: 'B' });
+    await fns.playMove({ coord: 'D4' });
+    client.failNext(new ClientTimeoutError('correct', 15_000), 'after');
+    expect(await fns.correctLastMove({ coord: 'D5' })).toEqual({ ok: true, yourMove: 'D5', myMove: 'K4', myMoveSpoken: 'ка четыре', captured: 0, myCaptured: 0, toPlay: 'B', moveNumber: 4 });
+    expect(client.calls.map((c) => c.method)).toEqual(['pass', 'getGame', 'play', 'correct', 'getGame']);
+    expect(gameOf(client).moves.map((m) => m.coord)).toEqual(['pass', 'K10', 'D5', 'K4']);
+  });
+
+  it('перечитать не вышло — отказ перечитывания; ход не повторён', async () => {
+    const { fns, client } = await withGame();
+    client.failNext(new ClientTimeoutError('play', 15_000));
+    client.getGame = async () => {
+      throw new TypeError('fetch failed');
+    };
+    expect(await fns.playMove({ coord: 'D4' })).toEqual({ ok: false, reason: NETWORK_TEXT });
+    expect(client.calls.map((c) => c.method)).toEqual(['play']);
   });
 });
 
@@ -753,19 +1022,48 @@ describe('pass / resign / undo', () => {
     const { fns } = await withGame({ replies: ['K10'] });
     expect(await fns.pass()).toEqual({ ok: true, myMove: 'K10', myMoveSpoken: 'ка десять', toPlay: 'B' });
   });
-  it('два паса: ждём результат опросом и объявляем', async () => {
-    const { fns, state, slept, client } = await withGame({ replies: ['pass'], finishAfterPolls: 2 });
+  it('два паса: итог из game.finished потока — без опроса get_game (R2)', async () => {
+    const { fns, state, client, clock } = await withGame({ replies: ['pass'], finishAfterPolls: 100 }, (now, s) => {
+      expect(s.awaitingFinish).toBe('g1');
+      if (now === 1_000) s.finished = { gameId: 'g1', result: { winner: 'B', margin: 3.5, reason: 'score' } };
+    });
+    const res = await fns.pass();
+    expect(res).toMatchObject({ ok: true, myMove: 'pass', finished: true, result: 'победа за тобой, разница 3,5 очка' });
+    expect(client.calls.filter((c) => c.method === 'getGame')).toEqual([]);
+    expect(clock.t).toBe(1_000);
+    expect(state.announcedFinish).toBe('g1');
+    expect(state.awaitingFinish).toBeNull();
+  });
+  it('два паса: поток молчит — опрос не чаще раза в 2,5 с', async () => {
+    const { fns, state, client, clock } = await withGame({ replies: ['pass'], finishAfterPolls: 2 });
     const res = await fns.pass();
     expect(res).toMatchObject({ ok: true, myMove: 'pass', myMoveSpoken: 'пас', finished: true, result: 'победа за мной, разница 3,5 очка' });
-    expect(slept).toEqual([500]);
     expect(client.calls.filter((c) => c.method === 'getGame').length).toBe(2);
+    expect(clock.t).toBe(2 * FINISH_POLL_MS);
     expect(state.announcedFinish).toBe('g1');
+  });
+  it('два паса: итога нет за FINISH_WAIT_MS — не больше 8 опросов, note, итог объявит событие', async () => {
+    const { fns, state, client, clock } = await withGame({ replies: ['pass'], finishAfterPolls: 100 });
+    const res = await fns.pass();
+    expect(res).toEqual({ ok: true, myMove: 'pass', myMoveSpoken: 'пас', toPlay: 'B', note: 'Гоко ещё считает очки: итог назовёт сам' });
+    expect(client.calls.filter((c) => c.method === 'getGame').length).toBe(Math.floor((FINISH_WAIT_MS - 1) / FINISH_POLL_MS));
+    expect(clock.t).toBe(FINISH_WAIT_MS);
+    expect(state.announcedFinish).toBeNull();
+    expect(state.awaitingFinish).toBeNull();
   });
   it('resign сдаёт цветом человека', async () => {
     const { fns, state, client } = await withGame();
     expect(await fns.resign()).toEqual({ ok: true, result: 'победа за мной: партия сдана' });
     expect(client.calls.at(-1)).toMatchObject({ method: 'resign', args: ['g1', { color: 'B', via: 'voice' }] });
     expect(state.announcedFinish).toBe('g1');
+  });
+  it('resign: bad_request с reason not_your_seat — «это не твой цвет»', async () => {
+    const { fns, client } = await withGame();
+    client.resign = async () => {
+      throw new ApiError('bad_request', 'seat is not controlled by a human', { reason: 'not_your_seat' });
+    };
+    expect(await fns.resign()).toEqual({ ok: false, reason: humanText('bad_request', { reason: 'not_your_seat' }) });
+    expect(humanText('bad_request', { reason: 'not_your_seat' })).toBe('это не твой цвет');
   });
   it('undo возвращает снятые ходы с произношением', async () => {
     const { fns, state } = await withGame({ replies: ['K10'] });
@@ -784,7 +1082,7 @@ describe('get_position / get_assessment / set_rank', () => {
   it('позиция: доска, последние 6 ходов, пленные, чей ход', async () => {
     const { fns, client } = await withGame({ replies: ['K10', 'D10', 'K4', 'G7'] });
     for (const c of ['D4', 'C3', 'E3', 'F4']) await fns.playMove({ coord: c });
-    client.game!.captures = { B: 2, W: 0 };
+    gameOf(client).captures = { B: 2, W: 0 };
     const text = await fns.getPosition();
     expect(text).toContain('# g1 rev');
     expect(text).toContain('Последние ходы: 3. чёрные C3; 4. белые D10; 5. чёрные E3; 6. белые K4; 7. чёрные F4; 8. белые G7');
@@ -809,7 +1107,7 @@ describe('get_position / get_assessment / set_rank', () => {
       marginPoints: 6,
       winrateYou: 70,
       weakGroups: [
-        { color: 'mine', where: 'K10, K11', status: 'неустойчива' },
+        { color: 'mine', where: 'C3, C4', status: 'неустойчива' },
         { color: 'yours', where: 'M3', status: 'мертва' },
       ],
       bestMoves: ['K10', 'D10', 'G7'],
@@ -837,12 +1135,6 @@ describe('createTools', () => {
       ['correct_last_move', 'get_assessment', 'get_position', 'pass', 'play_move', 'resign', 'set_rank', 'start_game', 'undo'],
     );
   });
-  it('humanColorOf берёт место человека, по умолчанию чёрные', () => {
-    expect(humanColorOf(fakeGame())).toBe('B');
-    expect(humanColorOf(fakeGame({ seats: { B: { controller: 'engine' }, W: { controller: 'human' } } }))).toBe('W');
-    expect(humanColorOf(fakeGame({ seats: { B: { controller: 'engine' }, W: { controller: 'external' } } }))).toBe('B');
-    expect(hasEngine(fakeGame())).toBe(true);
-  });
 });
 
 describe('человек против человека (D-0005)', () => {
@@ -858,11 +1150,6 @@ describe('человек против человека (D-0005)', () => {
     t.state.humanColor = null;
     return t;
   }
-  it('humanColorOf — цвет того, чей ход; движка нет', () => {
-    const { client } = hvh();
-    expect(humanColorOf(client.game!)).toBe('W');
-    expect(hasEngine(client.game!)).toBe(false);
-  });
   it('ход без ответа движка', async () => {
     const { fns, client, state } = hvh();
     expect(await fns.playMove({ coord: 'K10' })).toEqual({ ok: true, yourMove: 'K10', myMove: null, myMoveSpoken: null, captured: 0, myCaptured: 0, toPlay: 'B', moveNumber: 2 });
@@ -888,7 +1175,7 @@ describe('человек против человека (D-0005)', () => {
       marginPoints: 6,
       winrateBlack: 70,
       weakGroups: [
-        { color: 'white', where: 'K10, K11', status: 'неустойчива' },
+        { color: 'white', where: 'C3, C4', status: 'неустойчива' },
         { color: 'black', where: 'M3', status: 'мертва' },
       ],
       bestMoves: ['K10', 'D10', 'G7'],
@@ -913,11 +1200,17 @@ import { llm } from '@livekit/agents';
 import { z } from 'zod';
 import {
   ApiError,
+  ClientTimeoutError,
   type Color,
   type GameState,
   type GokoClient,
+  HttpError,
+  hasEngine,
+  humanColorOf,
   humanText,
+  type Move,
   type PlayResponse,
+  retryAfterMs,
   seatColor,
 } from '@goko/protocol';
 import { colorName, describeResult, parseRank, speakMove, speakRank } from './phrases.ts';
@@ -931,45 +1224,40 @@ export type ToolClient = Pick<
 export type ToolDeps = {
   client: ToolClient;
   state: AgentState;
+  signal?: AbortSignal; // сигнал сеанса воркера: уходит в каждый вызов клиента, долгоживущий — это можно (раздел 5 спеки)
   sleep?: (ms: number) => Promise<void>;
+  now?: () => number;
   log?: (line: string) => void;
 };
 
 export const ASSESSMENT_VISITS = 50;
-// Счёт после двух пасов сервер ведёт в фоне: бюджет score сервиса 15 с (D-0010), при сбое пауза
-// первого повтора серии 5 с и вторая попытка ещё до 15 с (D-0006). 35 с покрывают это с запасом;
-// дальше инструмент отдаёт партию незавершённой, а результат объявит событие game.finished.
-export const FINISH_WAIT_MS = 35_000;
-export const FINISH_POLL_MS = 500;
+// Счёт после двух пасов сервер ведёт в фоне с бюджетом SCORE_BUDGET_MS = 20 с (D-0010). Ждём итог чуть
+// дольше бюджета, но меньше клиентского потолка score (CLIENT_TIMEOUTS.score = 25 с): модель не молчит
+// дольше, чем длился бы прямой вызов score. Если счёт упал и сервер начал повтор серии (D-0006), итог
+// позже объявит событие game.finished, инструмент отдаёт партию незавершённой с note.
+export const FINISH_WAIT_MS = 22_000;
+// Итог берём из потока сессии (state.finished); get_game — запасной путь, не чаще раза в 2,5 с (R2).
+export const FINISH_POLL_MS = 2_500;
+export const FINISH_TICK_MS = 250;
 
+export const NETWORK_TEXT = 'нет связи с сервером';
+export const KOMI_TEXT = 'коми бывает только с половиной, от 0,5 до 13,5: например 6,5 или 7,5';
 const NO_GAME = 'партия не начата: предложи начать';
 const THINKING_NOTE = 'Гоко ещё думает: свой ход он назовёт сам, когда решит';
+const SCORING_NOTE = 'Гоко ещё считает очки: итог назовёт сам';
+
+// Коми по протоколу — x.5 от 0,5 до 13,5 (иначе сервер ответит bad_request без понятной человеку причины).
+const komiValid = (komi: number): boolean => Number.isFinite(komi) && komi >= 0.5 && komi <= 13.5 && komi % 1 === 0.5;
 
 type Fail = { ok: false; reason: string };
 const fail = (reason: string): Fail => ({ ok: false, reason });
 
-// Есть ли в партии Гоко. Партия двух людей разрешена (D-0005): Гоко в ней только комментирует.
-export const hasEngine = (state: GameState): boolean => seatColor(state.seats, 'engine') !== null;
-
-// Цвет «человека» для текстов и сдачи. В партии без движка людей двое, и «ты» — тот, чей сейчас ход.
-export function humanColorOf(state: GameState): Color {
-  if (!hasEngine(state) && state.seats[state.toPlay].controller === 'human') return state.toPlay;
-  return seatColor(state.seats, 'human') ?? 'B';
-}
-
+// hasEngine, humanColorOf и retryAfterMs — из @goko/protocol (задача 1): то же правило у веба.
 export function engineColorOf(state: GameState): Color {
   return seatColor(state.seats, 'engine') ?? 'W';
 }
 
 const colorKey = (c: Color) => (c === 'B' ? ('black' as const) : ('white' as const));
-
-// Ошибки протокола -> { ok: false, reason } с русским текстом из humanText по code и details (D-0007):
-// message сервера английский и модели не отдаётся. Всё остальное (сеть, баги) пробрасываем:
-// это попадёт в лог воркера, а модель получит ошибку инструмента.
-function reasonOf(e: unknown): Fail {
-  if (e instanceof ApiError) return fail(humanText(e.code, e.details));
-  throw e;
-}
 
 function finishedFields(g: GameState) {
   return g.status === 'finished' && g.result
@@ -977,10 +1265,83 @@ function finishedFields(g: GameState) {
     : {};
 }
 
+// Чей ход словами: с Гоко — «чёрные (твой)» или «белые (мой)», в партии двух людей — только цвет.
+function turnOf(g: GameState): string {
+  return hasEngine(g) ? `${colorName(g.toPlay)} (${g.toPlay === humanColorOf(g) ? 'твой' : 'мой'})` : colorName(g.toPlay);
+}
+
+// Ход человека coord в конце перечитанной партии после таймаута клиента: последним (ответа Гоко ещё нет или
+// Гоко в партии нет) или предпоследним, а за ним ход Гоко. Иначе null: хода нет или после него были другие ходы.
+function appliedMove(g: GameState, coord: string): PlayResponse | null {
+  const byHuman = (m: Move | undefined): m is Move => m !== undefined && m.coord === coord && g.seats[m.color].controller === 'human';
+  const last = g.moves.at(-1);
+  const prev = g.moves.at(-2);
+  if (byHuman(last)) return { state: g, move: last, ...(g.pendingEngineMove ? { replyTimedOut: true } : {}) };
+  if (byHuman(prev) && last && g.seats[last.color].controller === 'engine') return { state: g, move: prev, reply: last };
+  return null;
+}
+
+// Ход после таймаута не записан. Запрос мог ещё дойти до сервера, поэтому модель не повторяет ход сама.
+function notAppliedText(g: GameState, coord: string): string {
+  const what = coord === 'pass' ? 'паса' : `хода ${coord}`;
+  const turn = g.status === 'finished' ? 'партия окончена' : `сейчас ход: ${turnOf(g)}`;
+  return `${humanText('client_timeout')}: ${what} в партии пока нет, ${turn}. Не повторяй ход сам: скажи человеку и дождись его слов`;
+}
+
 export function createToolFns(deps: ToolDeps) {
-  const { client, state } = deps;
+  const { client, state, signal } = deps;
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const now = deps.now ?? Date.now;
   const log = deps.log ?? (() => {});
+  const opts = { signal };
+
+  // Отказ -> { ok: false, reason } по-русски (D-0007): message сервера английский и модели не отдаётся.
+  // Три класса различаются: ответ сервера по протоколу, «сервер не отвечает» (таймаут клиента) и
+  // «нет связи» (сеть или ответ не по протоколу, например страница прокси). Остальное — баг или отмена
+  // сигналом сеанса: пробрасываем в лог воркера, человеку это не озвучивается.
+  function reasonOf(e: unknown): Fail {
+    if (e instanceof ApiError) {
+      if (e.code === 'rate_limited') state.blockedUntil = Math.max(state.blockedUntil, now() + retryAfterMs(e.details));
+      return fail(humanText(e.code, e.details));
+    }
+    if (e instanceof ClientTimeoutError) return fail(humanText(e.code));
+    if (e instanceof HttpError || (e instanceof TypeError && e.message === 'fetch failed')) return fail(NETWORK_TEXT);
+    throw e;
+  }
+
+  // Retry-After ещё не прошёл: к серверу не идём (D-0012), модель получает ту же фразу, что на сам отказ.
+  function blocked(): Fail | null {
+    return now() < state.blockedUntil ? fail(humanText('rate_limited')) : null;
+  }
+
+  // Последняя ревизия партии из ответов сервера инструментам. События потока сюда не пишутся: state.updated
+  // о записанном ходе приходит раньше таймаута, и сверка в sendMove приняла бы записанный ход за незаписанный.
+  let seen: { gameId: string; revision: number } | null = null;
+  function note(g: GameState): GameState {
+    if (!seen || seen.gameId !== g.id || seen.revision < g.revision) seen = { gameId: g.id, revision: g.revision };
+    return g;
+  }
+
+  // Ход, пас или поправка. ClientTimeoutError не значит, что хода нет: сервер мог записать его, а ответ не
+  // дошёл. Повтор вслепую поставил бы камень второй раз или спасовал бы за человека, поэтому партия
+  // перечитывается: та же ревизия — хода нет; иначе ход ищется в конце партии (appliedMove).
+  async function sendMove(gameId: string, coord: string, call: () => Promise<PlayResponse>): Promise<PlayResponse | Fail> {
+    const before = seen?.gameId === gameId ? seen.revision : null;
+    try {
+      const res = await call();
+      note(res.state);
+      return res;
+    } catch (e) {
+      if (!(e instanceof ClientTimeoutError)) return reasonOf(e);
+    }
+    let g: GameState;
+    try {
+      g = note(await client.getGame(gameId, opts));
+    } catch (e) {
+      return reasonOf(e);
+    }
+    return (g.revision === before ? null : appliedMove(g, coord)) ?? fail(notAppliedText(g, coord));
+  }
 
   function moveResult(res: PlayResponse) {
     const { state: g, move, reply } = res;
@@ -1001,13 +1362,35 @@ export function createToolFns(deps: ToolDeps) {
     };
   }
 
-  async function waitFinished(gameId: string): Promise<GameState> {
-    let g = await client.getGame(gameId);
-    for (let i = 0; g.status !== 'finished' && i < FINISH_WAIT_MS / FINISH_POLL_MS; i++) {
-      await sleep(FINISH_POLL_MS);
-      g = await client.getGame(gameId);
+  // Итог после двух пасов (R2). Первым делом — событие game.finished: events.ts, пока awaitingFinish равен
+  // этой партии, кладёт итог в state.finished и не озвучивает его. Запасной путь — get_game не чаще раза
+  // в FINISH_POLL_MS и не раньше Retry-After. Первый опрос — через FINISH_POLL_MS после пасов, всего их
+  // не больше 8 за FINISH_WAIT_MS.
+  async function waitFinished(g0: GameState): Promise<GameState> {
+    const gameId = g0.id;
+    let g = g0;
+    const started = now();
+    let lastPoll = started;
+    state.awaitingFinish = gameId;
+    try {
+      for (;;) {
+        const fromStream = state.finished;
+        if (fromStream?.gameId === gameId) return { ...g, status: 'finished', result: fromStream.result };
+        if (now() - started >= FINISH_WAIT_MS) return g;
+        if (now() - lastPoll >= FINISH_POLL_MS && now() >= state.blockedUntil) {
+          lastPoll = now();
+          try {
+            g = note(await client.getGame(gameId, opts));
+          } catch (e) {
+            reasonOf(e); // rate_limited выставит blockedUntil; прочие отказы — ждём дальше; баг и отмена — наружу
+          }
+          if (g.status === 'finished') return g;
+        }
+        await sleep(FINISH_TICK_MS);
+      }
+    } finally {
+      state.awaitingFinish = null;
     }
-    return g;
   }
 
   return {
@@ -1020,25 +1403,33 @@ export function createToolFns(deps: ToolDeps) {
         rank = parsed;
       }
       const komi = args.komi ?? state.komi;
+      if (!komiValid(komi)) return fail(KOMI_TEXT);
+      const blockedFail = blocked();
+      if (blockedFail) return blockedFail;
       const engine = { controller: 'engine' as const, rank };
       const humanSeat = { controller: 'human' as const };
       // Сервер публикует state.updated new раньше, чем отвечает на HTTP (а с waitForReply и первым ходом
       // движка — заметно раньше): флаг говорит events.ts, что эта новая партия — от инструмента.
       state.startingGame = true;
       try {
-        const res = await client.newGame(state.sessionId, {
-          black: human === 'B' ? humanSeat : engine,
-          white: human === 'W' ? humanSeat : engine,
-          settings: { komi },
-          waitForReply: true,
-        });
-        const g = res.state;
+        const res = await client.newGame(
+          state.sessionId,
+          {
+            black: human === 'B' ? humanSeat : engine,
+            white: human === 'W' ? humanSeat : engine,
+            settings: { komi },
+            waitForReply: true,
+          },
+          opts,
+        );
+        const g = note(res.state);
         state.gameId = g.id;
         state.humanColor = human;
         state.rank = rank;
         state.komi = komi;
         state.toolGames.add(g.id);
         state.announcedFinish = null;
+        state.finished = null;
         state.lastTap = null;
         state.awaitingReply = Boolean(res.replyTimedOut);
         log(`[OK] voice-agent: партия ${g.id}, человек ${colorName(human)}, Гоко ${rank}`);
@@ -1060,53 +1451,59 @@ export function createToolFns(deps: ToolDeps) {
     },
 
     async playMove({ coord }: { coord: string }) {
-      if (!state.gameId) return fail(NO_GAME);
-      try {
-        return moveResult(await client.play(state.gameId, { coord, via: 'voice' }));
-      } catch (e) {
-        return reasonOf(e);
-      }
+      const gameId = state.gameId;
+      if (!gameId) return fail(NO_GAME);
+      const blockedFail = blocked();
+      if (blockedFail) return blockedFail;
+      const res = await sendMove(gameId, coord, () => client.play(gameId, { coord, via: 'voice' }, opts));
+      return 'state' in res ? moveResult(res) : res;
     },
 
     async correctLastMove({ coord }: { coord: string }) {
-      if (!state.gameId) return fail(NO_GAME);
-      try {
-        return moveResult(await client.correct(state.gameId, { coord, via: 'voice' }));
-      } catch (e) {
-        return reasonOf(e);
-      }
+      const gameId = state.gameId;
+      if (!gameId) return fail(NO_GAME);
+      const blockedFail = blocked();
+      if (blockedFail) return blockedFail;
+      const res = await sendMove(gameId, coord, () => client.correct(gameId, { coord, via: 'voice' }, opts));
+      return 'state' in res ? moveResult(res) : res;
     },
 
     async pass() {
-      if (!state.gameId) return fail(NO_GAME);
-      try {
-        const res = await client.pass(state.gameId, { via: 'voice' });
-        let g = res.state;
-        // Два паса подряд: сервер считает очки асинхронно, ждём завершения и объявляем результат сами.
-        if (res.reply?.coord === 'pass' && g.status !== 'finished') g = await waitFinished(g.id);
-        const finished = g.status === 'finished';
-        if (finished) state.announcedFinish = g.id;
-        state.awaitingReply = Boolean(res.replyTimedOut) && !finished;
-        return {
-          ok: true as const,
-          myMove: res.reply?.coord ?? null,
-          myMoveSpoken: res.reply ? speakMove(res.reply.coord) : null,
-          toPlay: g.toPlay,
-          ...(res.replyTimedOut && !finished ? { note: THINKING_NOTE } : {}),
-          ...finishedFields(g),
-        };
-      } catch (e) {
-        return reasonOf(e);
-      }
+      const gameId = state.gameId;
+      if (!gameId) return fail(NO_GAME);
+      const blockedFail = blocked();
+      if (blockedFail) return blockedFail;
+      const res = await sendMove(gameId, 'pass', () => client.pass(gameId, { via: 'voice' }, opts));
+      if (!('state' in res)) return res;
+      let g = res.state;
+      // Два паса подряд: сервер считает очки в фоне; итог ждём из потока, опрос — запасной путь.
+      // Отказы опроса waitFinished разбирает сам; наружу из него идут только баг и отмена сигналом.
+      const scoring = res.reply?.coord === 'pass' && g.status !== 'finished';
+      if (scoring) g = await waitFinished(g);
+      const finished = g.status === 'finished';
+      if (finished) state.announcedFinish = g.id;
+      state.awaitingReply = Boolean(res.replyTimedOut) && !finished;
+      return {
+        ok: true as const,
+        myMove: res.reply?.coord ?? null,
+        myMoveSpoken: res.reply ? speakMove(res.reply.coord) : null,
+        toPlay: g.toPlay,
+        ...(res.replyTimedOut && !finished ? { note: THINKING_NOTE } : {}),
+        ...(scoring && !finished ? { note: SCORING_NOTE } : {}),
+        ...finishedFields(g),
+      };
     },
 
     async resign() {
       if (!state.gameId) return fail(NO_GAME);
+      const blockedFail = blocked();
+      if (blockedFail) return blockedFail;
       try {
         // Цвет сдающегося — до хода: в партии двух людей это тот, чей ход (humanColorOf).
-        const current = await client.getGame(state.gameId);
+        const current = note(await client.getGame(state.gameId, opts));
         const color = humanColorOf(current);
-        const res = await client.resign(state.gameId, { color, via: 'voice' });
+        const res = await client.resign(state.gameId, { color, via: 'voice' }, opts);
+        note(res.state);
         state.announcedFinish = res.state.id;
         state.awaitingReply = false;
         const who = hasEngine(current) ? color : null;
@@ -1118,8 +1515,11 @@ export function createToolFns(deps: ToolDeps) {
 
     async undo() {
       if (!state.gameId) return fail(NO_GAME);
+      const blockedFail = blocked();
+      if (blockedFail) return blockedFail;
       try {
-        const res = await client.undo(state.gameId, { via: 'voice' });
+        const res = await client.undo(state.gameId, { via: 'voice' }, opts);
+        note(res.state);
         state.awaitingReply = false;
         state.lastTap = null;
         return {
@@ -1136,14 +1536,21 @@ export function createToolFns(deps: ToolDeps) {
 
     async getPosition(): Promise<string> {
       if (!state.gameId) return NO_GAME;
-      const [g, ascii] = await Promise.all([client.getGame(state.gameId), client.ascii(state.gameId)]);
-      const human = humanColorOf(g);
+      const blockedFail = blocked();
+      if (blockedFail) return blockedFail.reason;
+      let g: GameState;
+      let ascii: string;
+      try {
+        [g, ascii] = await Promise.all([client.getGame(state.gameId, opts), client.ascii(state.gameId, opts)]);
+      } catch (e) {
+        return reasonOf(e).reason;
+      }
+      note(g);
       const last = g.moves
         .slice(-6)
         .map((m) => `${m.n}. ${colorName(m.color)} ${m.coord === 'pass' ? 'пас' : m.coord}`)
         .join('; ');
-      let turn = 'партия окончена';
-      if (g.status !== 'finished') turn = hasEngine(g) ? `${colorName(g.toPlay)} (${g.toPlay === human ? 'твой' : 'мой'})` : colorName(g.toPlay);
+      const turn = g.status === 'finished' ? 'партия окончена' : turnOf(g);
       // humanFallback приходит только событием state.updated хода движка (events.ts запоминает номер хода).
       const fallback = state.fallbackMove === null ? undefined : g.moves.find((m) => m.n === state.fallbackMove);
       return [
@@ -1159,8 +1566,11 @@ export function createToolFns(deps: ToolDeps) {
 
     async getAssessment() {
       if (!state.gameId) return fail(NO_GAME);
+      const blockedFail = blocked();
+      if (blockedFail) return blockedFail;
       try {
-        const [g, a] = await Promise.all([client.getGame(state.gameId), client.analyze(state.gameId, { maxVisits: ASSESSMENT_VISITS })]);
+        const [g, a] = await Promise.all([client.getGame(state.gameId, opts), client.analyze(state.gameId, { maxVisits: ASSESSMENT_VISITS }, opts)]);
+        note(g);
         const lead = a.scoreLeadB;
         const leaderColor: Color | null = Math.abs(lead) < 0.5 ? null : lead > 0 ? 'B' : 'W';
         const marginPoints = Math.abs(Math.round(lead * 2) / 2);
@@ -1204,13 +1614,15 @@ export function createToolFns(deps: ToolDeps) {
         state.rank = parsed;
         return { ok: true as const, rank: speakRank(parsed), note: 'применится к следующей партии' };
       }
+      const blockedFail = blocked();
+      if (blockedFail) return blockedFail;
       try {
-        const g = await client.getGame(state.gameId);
+        const g = note(await client.getGame(state.gameId, opts));
         if (!hasEngine(g)) {
           state.rank = parsed;
           return { ok: true as const, rank: speakRank(parsed), note: 'в этой партии нет Гоко: уровень применится к следующей' };
         }
-        await client.setRank(state.gameId, { color: engineColorOf(g), rank: parsed });
+        await client.setRank(state.gameId, { color: engineColorOf(g), rank: parsed }, opts);
         state.rank = parsed;
         return { ok: true as const, rank: speakRank(parsed) };
       } catch (e) {
@@ -1228,7 +1640,7 @@ export function createTools(deps: ToolDeps) {
   return {
     start_game: llm.tool({
       description:
-        'Начать новую партию 13x13. my_color — цвет человека: black (чёрные, ходит первым) или white (белые; тогда Гоко ходит первым, его ход в firstMove). rank — уровень Гоко, например «10 кю» или «2 дан»; без него — прежний. komi по умолчанию 7.5.',
+        'Начать новую партию 13x13. my_color — цвет человека: black (чёрные, ходит первым) или white (белые; тогда Гоко ходит первым, его ход в firstMove). rank — уровень Гоко, например «10 кю» или «2 дан»; без него — прежний. komi — число с половиной от 0.5 до 13.5, по умолчанию 7.5.',
       parameters: z.object({
         my_color: z.enum(['black', 'white']).optional(),
         rank: z.string().optional(),
@@ -1280,7 +1692,7 @@ export type GokoTools = ReturnType<typeof createTools>;
 - [ ] **Step 5: Тесты и typecheck зелёные**
 
 Run: `npx vitest run apps/voice-agent && npm run typecheck`
-Expected: все тесты `tools.test.ts` (в том числе блок «человек против человека» и строка `humanFallback`) и `phrases.test.ts` проходят; typecheck без ошибок. Если `llm.tool` в установленной версии требует `parameters` всегда — передать `z.object({})` у инструментов без аргументов.
+Expected: все тесты `tools.test.ts` (в том числе блок «человек против человека» и строка `humanFallback`) и `phrases.test.ts` проходят; typecheck без ошибок.
 
 - [ ] **Step 6: Commit**
 
@@ -1297,16 +1709,16 @@ git commit -m "voice-agent: девять инструментов над кли�
 - Test: `apps/voice-agent/src/events.test.ts`
 
 **Interfaces:**
-- Consumes: `ApiError`, `EventsTarget`, `GameEvent`, `GokoClient`, `humanText`, `seatColor` из `@goko/protocol`; `AgentState`; `colorName`, `colorNameInstrumental`, `describeResult`, `speakMove`, `speakRank` из `phrases.ts`; `hasEngine`, `humanColorOf` из `tools.ts`; `fakeGame` из `testing/fake-client.ts`.
-- Produces: `handleEvent(ev: GameEvent, state: AgentState, now?: () => number): string | null` — инструкция для `generateReply` или `null`; `type WatchOptions = { client: Pick<GokoClient, 'events'>; state: AgentState; speak: (instructions: string) => Promise<void> | void; signal: AbortSignal; log?: (line: string) => void; retryMs?: number; sleep?: (ms: number) => Promise<void> }`; `type WatchHandle = { done: Promise<void>; humanSpoke: () => void }`; `watchSession(opts: WatchOptions): WatchHandle` — `done` завершается по `signal`; `humanSpoke()` после `retries_exhausted` переоткрывает поток сессии без паузы (D-0006), в остальное время ничего не делает; `ERROR_REPEAT_MS = 30000`.
+- Consumes: `ApiError`, `EventsTarget`, `GameEvent`, `GokoClient`, `humanText`, `seatColor`, `hasEngine`, `humanColorOf`, `retryAfterMs`, `RETRY_MS`, `STABLE_CONNECTION_MS` из `@goko/protocol` (Task 1); `AgentState` (в том числе `awaitingFinish`, `finished`, `blockedUntil`); `colorName`, `colorNameInstrumental`, `describeResult`, `speakMove`, `speakRank` из `phrases.ts`; `fakeGame` из `testing/fake-client.ts`.
+- Produces: `handleEvent(ev: GameEvent, state: AgentState, now?: () => number): string | null` — инструкция для `generateReply` или `null`; `type WatchOptions = { client: Pick<GokoClient, 'events'>; state: AgentState; speak: (instructions: string) => Promise<void> | void; signal: AbortSignal; log?: (line: string) => void; delaysMs?: readonly number[]; sleep?: (ms: number) => Promise<void>; now?: () => number }`; `type WatchHandle = { done: Promise<void>; humanSpoke: () => void }`; `watchSession(opts: WatchOptions): WatchHandle` — `done` завершается по `signal` или после `not_found` (сессия истекла: одна реплика об этом и выход); переподключение с растущей паузой `RETRY_MS` из `@goko/protocol` (1, 2, 4, 8, потолок 15 с; сброс к первой ступени после соединения, прожившего `STABLE_CONNECTION_MS`), на `rate_limited` пауза не меньше `Retry-After` и `state.blockedUntil`; `humanSpoke()` после `retries_exhausted` переоткрывает поток сессии без паузы (D-0006), в остальное время ничего не делает; `ERROR_REPEAT_MS = 30000`; `SESSION_EXPIRED_INSTRUCTIONS`.
 
 Правила озвучивания (раздел 9 спеки, «Озвучивание событий»), в порядке проверки:
 
 | Событие | Условие | Действие |
 | --- | --- | --- |
-| `session.game` | всегда | запомнить `gameId`, сбросить `lastTap`, `awaitingReply`, `retriesExhausted`, `fallbackMove`; молчать |
-| любой `state.updated` | — | снять `retriesExhausted`: у партии был коммит, серия повторов перезапущена или не нужна |
-| `state.updated`, `cause: 'sync'` | `gameId` только что сменился и партия идёт | «Продолжаем партию»: кто играет (человек цветом или два человека), чей ход |
+| `session.game` | всегда | если `gameId` сменился — `announceSync = gameId` (живой поток шлёт `session.game` перед `sync`, `apps/game-server/src/app.ts`); запомнить `gameId`, сбросить `lastTap`, `awaitingReply`, `retriesExhausted`, `fallbackMove`; молчать |
+| любой `state.updated` | — | снять `retriesExhausted`: у партии был коммит, серия повторов перезапущена или не нужна; снять `announceSync` |
+| `state.updated`, `cause: 'sync'` | партия идёт, и её `gameId` только что сменился: `announceSync` указывает на неё или `gameId` ещё не был известен | «Продолжаем партию»: кто играет (человек цветом или два человека), чей ход |
 | `state.updated`, `cause: 'new'` (у сервера `by: 'system'`, без `via`) | партия не из `toolGames` и не идёт `start_game` (`startingGame`) | «Человек начал партию с экрана»; если ход движка — `awaitingReply = true`; при `startingGame` — добавить в `toolGames` и молчать |
 | `state.updated`, `status: 'finished'` | любой cause | сбросить флаги, молчать (объявит `game.finished`) |
 | `state.updated`, `via: 'tap'`, cause `play/pass/correct` | `pendingEngineMove` | запомнить `lastTap`, молчать до ответа движка |
@@ -1317,19 +1729,25 @@ git commit -m "voice-agent: девять инструментов над кли�
 | то же | `awaitingReply` | «Твой ход готов: …» |
 | то же | иначе (ответ на голосовой ход уже вернул инструмент) | молчать |
 | `state.updated`, `by: 'external'` | стадия 2 | «Соперник сыграл …» |
-| `game.finished` | `announcedFinish !== gameId` | «Партия окончена: …» |
+| `game.finished` | всегда (у события нет `gameId`: поток сессии несёт только текущую партию) | `finished = { gameId, result }` для ожидающего `pass` |
+| то же | `announcedFinish === gameId` | молчать |
+| то же | `awaitingFinish === gameId` (итог ждёт `pass`, R2) | `announcedFinish = gameId`, молчать: итог вернёт инструмент |
+| то же | иначе | «Партия окончена: …» |
 | `engine.thinking` | — | молчать |
+| `error` | `gameId` события не равен `state.gameId` (гонка при смене партии) | молчать, флаги не трогать |
 | `error`, `code: 'retries_exhausted'` | всегда | `retriesExhausted = true`; сразу: текст `humanText`, «следующая реплика человека запустит новую попытку» |
 | `error`, другой код | прошло ≥ 30 с с прошлой ошибки | «Движку нужно ещё время» |
+
+Цикл потока (`watchSession`, R2): обрыв — пауза по `RETRY_MS` и новое подключение; `ApiError` `rate_limited` при открытии — пауза `max(Retry-After, ступень)`, `blockedUntil` для инструментов; `ApiError` `not_found` — сессии больше нет (TTL или рестарт game-server): лог `[!]`, одна реплика `SESSION_EXPIRED_INSTRUCTIONS`, выход без переподключения; реплика человека после `retries_exhausted` — переоткрытие без паузы.
 
 Комментарий Гоко к ходу с экрана в режиме «Чат» (D-0011) — та же инструкция `generateReply`: при выключенном аудиовыходе ответ приходит только текстом в `lk.transcription` и виден в ленте. Отдельной ветки для режима в `events.ts` нет.
 
 - [ ] **Step 1: Тест `apps/voice-agent/src/events.test.ts`**
 
 ```ts
-import { describe, expect, it, vi } from 'vitest';
-import { type EventsTarget, type GameEvent, type GameState, humanText, type Move } from '@goko/protocol';
-import { ERROR_REPEAT_MS, handleEvent, watchSession } from './events.ts';
+import { describe, expect, it } from 'vitest';
+import { ApiError, type EventsTarget, type GameEvent, type GameState, humanText, type Move, RETRY_MS, STABLE_CONNECTION_MS } from '@goko/protocol';
+import { ERROR_REPEAT_MS, SESSION_EXPIRED_INSTRUCTIONS, handleEvent, watchSession } from './events.ts';
 import { newAgentState } from './state.ts';
 import { fakeGame } from './testing/fake-client.ts';
 
@@ -1365,6 +1783,26 @@ describe('handleEvent: подключение и новые партии', () =>
     expect(text).toContain('сейчас ход человека');
     expect(s.gameId).toBe('g1');
     expect(s.humanColor).toBe('W');
+  });
+  it('живой поток: session.game, затем sync той же партии — «продолжаем»; переподключение к знакомой партии и sync после new молчат', () => {
+    const s = newAgentState('s1');
+    const g = fakeGame();
+    // Порядок сервера (apps/game-server/src/app.ts): поток сессии открывается событиями session.game и sync.
+    expect(handleEvent({ type: 'session.game', gameId: g.id }, s)).toBeNull();
+    expect(handleEvent(upd(g, { cause: 'sync', by: 'system' }), s)).toContain('Продолжаем партию');
+    expect(s.announceSync).toBeNull();
+    // Обрыв и новое подключение к той же партии.
+    expect(handleEvent({ type: 'session.game', gameId: g.id }, s)).toBeNull();
+    expect(handleEvent(upd(g, { cause: 'sync', by: 'system' }), s)).toBeNull();
+    // Новая партия в потоке: session.game и new; флаг снят событием new, sync при следующем подключении молчит.
+    const g2 = fakeGame({ id: 'g2' });
+    s.toolGames.add('g2');
+    expect(handleEvent({ type: 'session.game', gameId: 'g2' }, s)).toBeNull();
+    expect(s.announceSync).toBe('g2');
+    expect(handleEvent(upd(g2, { cause: 'new', by: 'system' }), s)).toBeNull();
+    expect(s.announceSync).toBeNull();
+    expect(handleEvent({ type: 'session.game', gameId: 'g2' }, s)).toBeNull();
+    expect(handleEvent(upd(g2, { cause: 'sync', by: 'system' }), s)).toBeNull();
   });
   it('повторный sync той же партии молчит', () => {
     const s = newAgentState('s1');
@@ -1519,24 +1957,44 @@ describe('handleEvent: конец партии и ошибки', () => {
     s.announcedFinish = 'g1';
     expect(handleEvent({ type: 'game.finished', result: { winner: 'W', reason: 'resign' } }, s)).toBeNull();
   });
+  it('game.finished, пока pass ждёт итог: итог в state.finished, реплики нет (R2)', () => {
+    const s = newAgentState('s1');
+    s.gameId = 'g1';
+    s.awaitingFinish = 'g1';
+    const result = { winner: 'W' as const, margin: 3.5, reason: 'score' as const };
+    expect(handleEvent({ type: 'game.finished', result }, s)).toBeNull();
+    expect(s.finished).toEqual({ gameId: 'g1', result });
+    expect(s.announcedFinish).toBe('g1');
+  });
   it('engine.thinking молчит; error не чаще раза в 30 с, текст по коду, без message', () => {
     const s = newAgentState('s1');
+    s.gameId = 'g1';
     let t = 1_000_000;
     const now = () => t;
-    expect(handleEvent({ type: 'engine.thinking', color: 'W' }, s)).toBeNull();
-    const first = handleEvent({ type: 'error', code: 'engine_unavailable', message: 'engine is unavailable' }, s, now);
+    expect(handleEvent({ type: 'engine.thinking', gameId: 'g1', color: 'W' }, s)).toBeNull();
+    const first = handleEvent({ type: 'error', gameId: 'g1', code: 'engine_unavailable', message: 'engine is unavailable' }, s, now);
     expect(first).toContain(humanText('engine_unavailable'));
     expect(first).not.toContain('engine is unavailable');
     t += ERROR_REPEAT_MS - 1;
-    expect(handleEvent({ type: 'error', code: 'engine_unavailable', message: 'engine is unavailable' }, s, now)).toBeNull();
+    expect(handleEvent({ type: 'error', gameId: 'g1', code: 'engine_unavailable', message: 'engine is unavailable' }, s, now)).toBeNull();
     t += 2;
-    expect(handleEvent({ type: 'error', code: 'engine_unavailable', message: 'engine is unavailable' }, s, now)).not.toBeNull();
+    expect(handleEvent({ type: 'error', gameId: 'g1', code: 'engine_unavailable', message: 'engine is unavailable' }, s, now)).not.toBeNull();
+  });
+  it('error чужой партии (гонка при смене) молчит и флаги не трогает', () => {
+    const s = newAgentState('s1');
+    s.gameId = 'g2';
+    const now = () => 1_000_000;
+    expect(handleEvent({ type: 'error', gameId: 'g1', code: 'retries_exhausted', message: 'background task retries are exhausted' }, s, now)).toBeNull();
+    expect(handleEvent({ type: 'error', gameId: 'g1', code: 'engine_busy', message: 'engine did not respond within 8000 ms' }, s, now)).toBeNull();
+    expect(s.retriesExhausted).toBe(false);
+    expect(s.lastErrorAt).toBe(0);
   });
   it('retries_exhausted озвучивается сразу, без «сервер повторит сам», и ставит флаг переоткрытия', () => {
     const s = newAgentState('s1');
+    s.gameId = 'g1';
     const now = () => 1_000_000;
-    expect(handleEvent({ type: 'error', code: 'engine_busy', message: 'engine did not respond within 10000 ms' }, s, now)).not.toBeNull();
-    const text = handleEvent({ type: 'error', code: 'retries_exhausted', message: 'background task retries are exhausted' }, s, now);
+    expect(handleEvent({ type: 'error', gameId: 'g1', code: 'engine_busy', message: 'engine did not respond within 8000 ms' }, s, now)).not.toBeNull();
+    const text = handleEvent({ type: 'error', gameId: 'g1', code: 'retries_exhausted', message: 'background task retries are exhausted' }, s, now);
     expect(text).toContain(humanText('retries_exhausted'));
     expect(text).toContain('следующая реплика человека');
     expect(text).not.toContain('повторит попытку сам');
@@ -1567,15 +2025,101 @@ describe('watchSession', () => {
           yield { type: 'game.finished', result: { winner: 'B', reason: 'resign' } };
           throw new Error('socket hang up');
         }
-        yield { type: 'engine.thinking', color: 'W' };
+        yield { type: 'engine.thinking', gameId: 'g1', color: 'W' };
         abort.abort();
       },
     };
     const slept: number[] = [];
-    await watchSession({ client, state: s, signal: abort.signal, speak: (t) => void spoken.push(t), retryMs: 7, sleep: async (ms) => void slept.push(ms) }).done;
+    await watchSession({ client, state: s, signal: abort.signal, speak: (t) => void spoken.push(t), now: () => 0, sleep: async (ms) => void slept.push(ms) }).done;
     expect(spoken).toEqual(['Партия окончена: победа за тобой: я сдался. Объяви результат одной фразой.']);
     expect(connects).toBe(2);
-    expect(slept).toEqual([7]);
+    expect(slept).toEqual([RETRY_MS[0]]);
+  });
+  it('пауза растёт 1, 2, 4, 8 с до потолка 15 с (R2)', async () => {
+    const s = newAgentState('s1');
+    const abort = new AbortController();
+    let connects = 0;
+    const client = {
+      async *events(): AsyncGenerator<GameEvent, void, undefined> {
+        connects++;
+        if (connects === 8) {
+          abort.abort();
+          return;
+        }
+        throw new TypeError('fetch failed');
+      },
+    };
+    const slept: number[] = [];
+    await watchSession({ client, state: s, signal: abort.signal, speak: () => {}, now: () => 0, sleep: async (ms) => void slept.push(ms) }).done;
+    expect(slept).toEqual([1_000, 2_000, 4_000, 8_000, 15_000, 15_000, 15_000]);
+  });
+  it('соединение, прожившее 15 с, сбрасывает паузу к первой ступени', async () => {
+    const s = newAgentState('s1');
+    const abort = new AbortController();
+    let t = 0;
+    let connects = 0;
+    const client = {
+      async *events(): AsyncGenerator<GameEvent, void, undefined> {
+        connects++;
+        if (connects === 3) t += STABLE_CONNECTION_MS; // третье соединение жило долго и оборвалось
+        if (connects === 4) {
+          abort.abort();
+          return;
+        }
+        yield { type: 'session.game', gameId: 'g1' };
+        throw new Error('socket hang up');
+      },
+    };
+    const slept: number[] = [];
+    await watchSession({ client, state: s, signal: abort.signal, speak: () => {}, now: () => t, sleep: async (ms) => void slept.push(ms) }).done;
+    // Первое событие само по себе паузу не сбрасывает: сервер, который шлёт sync и рвёт поток, не крутит цикл раз в секунду.
+    expect(slept).toEqual([1_000, 2_000, 1_000]);
+  });
+  it('rate_limited при открытии: пауза по Retry-After и blockedUntil для инструментов', async () => {
+    const s = newAgentState('s1');
+    const abort = new AbortController();
+    let connects = 0;
+    const client = {
+      async *events(): AsyncGenerator<GameEvent, void, undefined> {
+        connects++;
+        if (connects === 2) {
+          abort.abort();
+          return;
+        }
+        throw new ApiError('rate_limited', 'too many requests, retry in 42 s', { retryAfterSeconds: 42 });
+      },
+    };
+    const slept: number[] = [];
+    await watchSession({ client, state: s, signal: abort.signal, speak: () => {}, now: () => 0, sleep: async (ms) => void slept.push(ms) }).done;
+    expect(slept).toEqual([42_000]);
+    expect(s.blockedUntil).toBe(42_000);
+  });
+  it('not_found (сессия истекла): одна реплика, лог и выход без переподключения', async () => {
+    const s = newAgentState('s1');
+    const abort = new AbortController();
+    const spoken: string[] = [];
+    const logs: string[] = [];
+    const slept: number[] = [];
+    let connects = 0;
+    const client = {
+      async *events(): AsyncGenerator<GameEvent, void, undefined> {
+        connects++;
+        throw new ApiError('not_found', 'session not found');
+      },
+    };
+    await watchSession({
+      client,
+      state: s,
+      signal: abort.signal,
+      speak: (t) => void spoken.push(t),
+      log: (l) => void logs.push(l),
+      sleep: async (ms) => void slept.push(ms),
+    }).done;
+    expect(connects).toBe(1);
+    expect(spoken).toEqual([SESSION_EXPIRED_INSTRUCTIONS]);
+    expect(slept).toEqual([]);
+    expect(logs).toContain('[!] voice-agent: сессия не найдена (истекла или сервер перезапущен), поток закрыт');
+    expect(abort.signal.aborted).toBe(false);
   });
   it('после retries_exhausted реплика человека переоткрывает поток сразу, без паузы (D-0006)', async () => {
     const s = newAgentState('s1');
@@ -1590,7 +2134,7 @@ describe('watchSession', () => {
         expect(target).toEqual({ sessionId: 's1' });
         if (connects === 1) {
           yield { type: 'session.game', gameId: 'g1' };
-          yield { type: 'error', code: 'retries_exhausted', message: 'background task retries are exhausted' };
+          yield { type: 'error', gameId: 'g1', code: 'retries_exhausted', message: 'background task retries are exhausted' };
           // Живой поток молчит, пока его не оборвут.
           await new Promise<void>((resolve) => signal?.addEventListener('abort', () => resolve(), { once: true }));
           throw new DOMException('This operation was aborted', 'AbortError');
@@ -1599,17 +2143,25 @@ describe('watchSession', () => {
         abort.abort();
       },
     };
+    // Реплика об исчерпанных повторах — явный сигнал теста вместо ожидания на реальных таймерах.
+    let announced: () => void = () => {};
+    const exhaustedSpoken = new Promise<void>((resolve) => {
+      announced = resolve;
+    });
     const watch = watchSession({
       client,
       state: s,
       signal: abort.signal,
-      speak: (t) => void spoken.push(t),
+      speak: (t) => {
+        spoken.push(t);
+        announced();
+      },
       log: (l) => void logs.push(l),
-      retryMs: 7,
       sleep: async (ms) => void slept.push(ms),
     });
     watch.humanSpoke(); // до retries_exhausted — ничего не происходит
-    await vi.waitFor(() => expect(s.retriesExhausted).toBe(true));
+    await exhaustedSpoken;
+    expect(s.retriesExhausted).toBe(true);
     watch.humanSpoke();
     watch.humanSpoke(); // вторая реплика подряд не рвёт поток ещё раз
     await watch.done;
@@ -1628,7 +2180,7 @@ describe('watchSession', () => {
     const client = {
       async *events(): AsyncGenerator<GameEvent, void, undefined> {
         yield { type: 'game.finished', result: { winner: 'B', reason: 'resign' } };
-        yield { type: 'error', code: 'x', message: 'y' };
+        yield { type: 'error', gameId: 'g1', code: 'x', message: 'y' };
         abort.abort();
       },
     };
@@ -1658,12 +2210,26 @@ Expected: FAIL — `Cannot find module './events.ts'`.
 // Озвучивание событий SSE (раздел 9 спеки). handleEvent — чистая функция: событие + память агента ->
 // инструкция для generateReply или null. watchSession — цикл чтения потока сессии с переподключением
 // и переоткрытием после retries_exhausted (D-0006).
-import { ApiError, type GameEvent, type GameState, type GokoClient, humanText, seatColor } from '@goko/protocol';
+// Паузы переподключения (RETRY_MS, STABLE_CONNECTION_MS, retryAfterMs) — общие с вебом, из @goko/protocol (задача 1).
+import {
+  ApiError,
+  type GameEvent,
+  type GameState,
+  type GokoClient,
+  RETRY_MS,
+  STABLE_CONNECTION_MS,
+  hasEngine,
+  humanColorOf,
+  humanText,
+  retryAfterMs,
+  seatColor,
+} from '@goko/protocol';
 import { colorName, colorNameInstrumental, describeResult, speakMove, speakRank } from './phrases.ts';
 import type { AgentState } from './state.ts';
-import { hasEngine, humanColorOf } from './tools.ts';
 
 export const ERROR_REPEAT_MS = 30_000;
+export const SESSION_EXPIRED_INSTRUCTIONS =
+  'Сессия на сервере закончилась: истекла или сервер перезапущен. Скажи одной фразой, что эту игру отсюда не продолжить и нужно перезагрузить страницу.';
 
 const ONE_PHRASE = 'Скажи одну короткую фразу.';
 
@@ -1690,7 +2256,9 @@ function describeMove(coord: string): string {
 
 function onStateUpdated(ev: Extract<GameEvent, { type: 'state.updated' }>, state: AgentState): string | null {
   const g = ev.state;
-  const fresh = g.id !== state.gameId;
+  // Живой поток сессии начинается с session.game, и gameId к sync уже тот же: смену партии помнит announceSync.
+  const fresh = g.id !== state.gameId || state.announceSync === g.id;
+  state.announceSync = null;
   state.gameId = g.id;
   state.humanColor = hasEngine(g) ? humanColorOf(g) : null;
   state.retriesExhausted = false; // был коммит или открытие потока: серия повторов перезапущена (D-0006)
@@ -1765,6 +2333,9 @@ function onStateUpdated(ev: Extract<GameEvent, { type: 'state.updated' }>, state
 export function handleEvent(ev: GameEvent, state: AgentState, now: () => number = Date.now): string | null {
   switch (ev.type) {
     case 'session.game':
+      // Партия сменилась (подключение агента к идущей партии, новая партия): следующий sync о ней — «Продолжаем».
+      // Переподключение к уже знакомой партии флаг не ставит, и sync молчит.
+      if (ev.gameId !== state.gameId) state.announceSync = ev.gameId;
       state.gameId = ev.gameId;
       resetTurnFlags(state);
       state.retriesExhausted = false;
@@ -1775,12 +2346,18 @@ export function handleEvent(ev: GameEvent, state: AgentState, now: () => number 
     case 'engine.thinking':
       return null;
     case 'game.finished': {
+      // У game.finished нет gameId: поток сессии несёт только текущую партию (раздел 5 спеки).
+      // Итог кладём в state.finished всегда: его ждёт pass после двух пасов (R2, tools.ts waitFinished).
+      if (state.gameId !== null) state.finished = { gameId: state.gameId, result: ev.result };
       if (state.gameId !== null && state.announcedFinish === state.gameId) return null;
       state.announcedFinish = state.gameId;
       resetTurnFlags(state);
+      if (state.gameId !== null && state.awaitingFinish === state.gameId) return null; // итог вернёт инструмент pass
       return `Партия окончена: ${describeResult(ev.result, state.humanColor)}. Объяви результат одной фразой.`;
     }
     case 'error': {
+      // Событие прошлой партии, проскочившее при смене текущей: не озвучиваем и флаги не трогаем.
+      if (state.gameId !== null && ev.gameId !== state.gameId) return null;
       // Текст — по code (humanText), message английский и только для логов (D-0007).
       // retries_exhausted: сервер больше не повторяет сам. Серию перезапустит мутирующее действие человека
       // или открытие потока (D-0006); watchSession переоткроет поток на первой реплике человека
@@ -1805,27 +2382,50 @@ export type WatchOptions = {
   speak: (instructions: string) => Promise<void> | void;
   signal: AbortSignal;
   log?: (line: string) => void;
-  retryMs?: number;
+  delaysMs?: readonly number[]; // паузы по попыткам, последняя — потолок; по умолчанию RETRY_MS
   sleep?: (ms: number) => Promise<void>;
+  now?: () => number;
 };
 
 export type WatchHandle = {
-  done: Promise<void>; // завершается по opts.signal
+  done: Promise<void>; // завершается по opts.signal или после not_found (сессии больше нет)
   humanSpoke: () => void; // реплика человека (голос или lk.chat): после retries_exhausted переоткрыть поток
 };
 
 const failureText = (e: unknown): string => (e instanceof ApiError ? e.code : e instanceof Error ? `${e.name}: ${e.message}` : String(e));
 
-// Читает поток сессии, пока не отменят. Обрыв (сеть, рестарт game-server) — пауза и новое подключение:
-// первым сообщением сервер шлёт session.game и sync, так что состояние восстанавливается само.
+// Читает поток сессии, пока не отменят. Обрыв (сеть, рестарт game-server) — растущая пауза и новое
+// подключение: первым сообщением сервер шлёт session.game и sync, так что состояние восстанавливается само.
+// rate_limited — ждём не меньше Retry-After (D-0012); not_found — сессии нет, переподключаться бессмысленно.
 // Каждое подключение — свой AbortController: humanSpoke обрывает только его, и цикл сразу открывает
 // поток заново. Открытие потока сессии перезапускает серию повторов на сервере (D-0006).
 export function watchSession(opts: WatchOptions): WatchHandle {
   const log = opts.log ?? (() => {});
-  const retryMs = opts.retryMs ?? 1000;
-  const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const delays = opts.delaysMs ?? RETRY_MS;
+  const now = opts.now ?? Date.now;
+  // Пауза по умолчанию просыпается и по отмене сеанса: остановка воркера не ждёт потолок 15 с.
+  const sleep =
+    opts.sleep ??
+    ((ms: number) =>
+      new Promise<void>((resolve) => {
+        const wake = () => {
+          clearTimeout(timer);
+          opts.signal.removeEventListener('abort', wake);
+          resolve();
+        };
+        const timer = setTimeout(wake, ms);
+        opts.signal.addEventListener('abort', wake, { once: true });
+      }));
   let conn: AbortController | null = null;
   let reopening = false;
+
+  const say = async (instructions: string) => {
+    try {
+      await opts.speak(instructions);
+    } catch (e) {
+      log(`[!] voice-agent: generateReply не удался: ${failureText(e)}`);
+    }
+  };
 
   const humanSpoke = () => {
     if (!opts.state.retriesExhausted || reopening || !conn) return;
@@ -1835,24 +2435,31 @@ export function watchSession(opts: WatchOptions): WatchHandle {
   };
 
   const run = async () => {
+    let attempt = 0;
     while (!opts.signal.aborted) {
       const current = new AbortController();
       conn = current;
       reopening = false;
       const stop = () => current.abort();
       opts.signal.addEventListener('abort', stop, { once: true });
+      const openedAt = now();
+      let retryAfter = 0;
       try {
         for await (const ev of opts.client.events({ sessionId: opts.state.sessionId }, current.signal)) {
-          const instructions = handleEvent(ev, opts.state);
-          if (!instructions) continue;
-          try {
-            await opts.speak(instructions);
-          } catch (e) {
-            log(`[!] voice-agent: generateReply не удался: ${failureText(e)}`);
-          }
+          const instructions = handleEvent(ev, opts.state, now); // те же часы, что у пауз: троттлинг ошибок в тестах без Date.now
+          if (instructions) await say(instructions);
         }
       } catch (e) {
         if (opts.signal.aborted) return;
+        if (e instanceof ApiError && e.code === 'not_found') {
+          log('[!] voice-agent: сессия не найдена (истекла или сервер перезапущен), поток закрыт');
+          await say(SESSION_EXPIRED_INSTRUCTIONS);
+          return;
+        }
+        if (e instanceof ApiError && e.code === 'rate_limited') {
+          retryAfter = retryAfterMs(e.details);
+          opts.state.blockedUntil = Math.max(opts.state.blockedUntil, now() + retryAfter);
+        }
         if (!reopening) log(`[!] voice-agent: поток сессии оборвался: ${failureText(e)}`);
       } finally {
         opts.signal.removeEventListener('abort', stop);
@@ -1863,7 +2470,12 @@ export function watchSession(opts: WatchOptions): WatchHandle {
         opts.state.retriesExhausted = false;
         continue; // без паузы: человек ждёт ответа
       }
-      await sleep(retryMs);
+      // Сброс только после долгого соединения, а не на первом событии: сервер, который шлёт sync и сразу
+      // рвёт поток, иначе держал бы цикл на паузе в 1 с.
+      if (now() - openedAt >= STABLE_CONNECTION_MS) attempt = 0;
+      const delay = delays[Math.min(attempt, delays.length - 1)] ?? RETRY_MS[0];
+      attempt++;
+      await sleep(Math.max(retryAfter, delay));
     }
   };
 
@@ -1926,6 +2538,7 @@ export const INSTRUCTIONS = `Ты Гоко, соперник по го на до
 - Если в партии нет Гоко (играют два человека), ты не играешь: комментируешь, отвечаешь на вопросы о позиции и применяешь названные ходы за того, чей сейчас ход. Результаты таких партий называй цветами.
 - Если get_position сообщает, что ход Гоко взят из основного поиска, а не из человеческой сети уровня, и человек спрашивает, почему ход такой сильный или странный, объясни это одной фразой.
 - Если сервер перестал повторять попытки, скажи об этом одной фразой: новая попытка начнётся сама, как только человек что-нибудь скажет или напишет.
+- Если на ход пришла причина «сервер не отвечает», ход мог уже примениться: прежде чем просить повторить, вызови get_position и скажи, что на доске. Причину «нет связи с сервером» или «слишком много запросов» передай одной фразой и не повторяй инструмент сразу.
 - Реплики до двух предложений, если не спрашивают о позиции. Если тебя перебили — замолчи и слушай.`;
 
 export const GREETING_INSTRUCTIONS =
@@ -2240,8 +2853,11 @@ export default defineAgent({
 
     const client = createClient({ baseUrl: API_BASE, appKey: APP_KEY });
     const state = newAgentState(sessionId);
+    // Сигнал сеанса: закрытие сессии или остановка воркера обрывает поток и вызовы инструментов.
+    // Долгоживущий сигнал в CallOptions допустим: клиент снимает свой слушатель после каждого вызова.
+    const abort = new AbortController();
     // Приветствие не в onEnter, а после применения режима: в «Чате» оно должно прийти только текстом.
-    const agent = new GokoAgent(createTools({ client, state, log }), { greet: false });
+    const agent = new GokoAgent(createTools({ client, state, log, signal: abort.signal }), { greet: false });
     const session = new voice.AgentSession(await sessionOptions(VOICE_MODE));
     let watch: WatchHandle | null = null;
 
@@ -2263,7 +2879,6 @@ export default defineAgent({
       for (const call of ev.functionCalls) log(`[tool] ${call.name} ${call.args}`);
     });
 
-    const abort = new AbortController();
     session.on('close', () => abort.abort());
     ctx.addShutdownCallback(async () => abort.abort());
 
@@ -2288,8 +2903,24 @@ export default defineAgent({
   },
 });
 
-cli.runApp(new ServerOptions({ agent: fileURLToPath(import.meta.url), agentName: AGENT_NAME }));
+// Остановка (SIGTERM от compose, режим start): drain ждёт идущие сеансы не дольше DRAIN_TIMEOUT_MS
+// (по умолчанию у @livekit/agents 1.8 — 60 минут: разговор мог бы держать деплой час), затем close даёт
+// процессу сеанса SHUTDOWN_PROCESS_TIMEOUT_MS на shutdown-колбэки и убивает его. Сумма с закрытием
+// процесса инференса (5 с в библиотеке) — около 30 с; stop_grace_period у voice-agent в compose — 60 с (задача 10).
+const DRAIN_TIMEOUT_MS = 5_000;
+const SHUTDOWN_PROCESS_TIMEOUT_MS = 20_000;
+
+cli.runApp(
+  new ServerOptions({
+    agent: fileURLToPath(import.meta.url),
+    agentName: AGENT_NAME,
+    drainTimeout: DRAIN_TIMEOUT_MS,
+    shutdownProcessTimeout: SHUTDOWN_PROCESS_TIMEOUT_MS,
+  }),
+);
 ```
+
+`watch.done` завершается и сам — после `not_found` потока (сессия истекла): агент один раз говорит об этом, комната остаётся до ухода телефона и `emptyTimeout`; `start_game` ответит `humanText('not_found')` (новая партия создаётся только в сессии), партия же на сервере живёт дальше, и инструменты хода над ней работают, но озвучивания событий уже нет. Переподключать поток к несуществующей сессии незачем.
 
 Если у события `function_tools_executed` в установленной версии другое поле (не `functionCalls` с `name`/`args`), подстроить лог по типу `FunctionToolsExecutedEvent` из `@livekit/agents` — суть та же: имя инструмента и аргументы одной строкой. Если `ctx.addShutdownCallback` отсутствует — убрать строку, `close` сессии достаточно. `ParticipantConnected` с тем же `identity` приходит, когда телефон вернулся в комнату после обрыва: его атрибуты уже в `participant.attributes`. Участник с другим `identity` режим не меняет — токен сессии выдаётся на одно `identity` (`phone-<sessionId>`).
 
@@ -2313,10 +2944,12 @@ Expected: в логе `registered worker` с `agentName goko-dev`; без `.env`
 ```ts
 // Проверка поведения модели с инструментами (раздел 12 спеки). Стоит денег: RUN_AGENT_EVALS=1 npx vitest run apps/voice-agent/src/agent.eval.test.ts
 // Модель — текстовая (gpt-4.1-mini), не realtime: инструменты и промпт те же, проверяем выбор инструмента и аргументы.
+// Один файл, один прогон на все сценарии: платных прогонов на весь план не больше 5 (Global Constraints).
 import { afterEach, describe, expect, it } from 'vitest';
 import { voice } from '@livekit/agents';
 import * as openai from '@livekit/agents-plugin-openai';
 import { GokoAgent } from './agent.ts';
+import { followMode } from './mode.ts';
 import { newAgentState } from './state.ts';
 import { createFakeClient } from './testing/fake-client.ts';
 import { createTools } from './tools.ts';
@@ -2345,47 +2978,91 @@ describe.skipIf(!enabled)('Гоко: выбор инструментов (пла
     session = null;
   });
 
+  // session.run возвращает RunResult, а не промис (@livekit/agents 1.8): без wait() утверждения читают
+  // незаконченный прогон, а следующий run бросает «nested runs are not supported».
   it('«дэ четыре» -> play_move D4', async () => {
     const { session } = await start();
-    const result = await session.run({ userInput: 'дэ четыре' });
+    const result = session.run({ userInput: 'дэ четыре' });
+    await result.wait();
     result.expect.containsFunctionCall({ name: 'play_move', args: { coord: 'D4' } });
   }, 60_000);
 
   it('«нет, дэ пять» после хода -> correct_last_move D5', async () => {
     const { session } = await start();
-    await session.run({ userInput: 'дэ четыре' });
-    const result = await session.run({ userInput: 'нет, дэ пять' });
+    await session.run({ userInput: 'дэ четыре' }).wait();
+    const result = session.run({ userInput: 'нет, дэ пять' });
+    await result.wait();
     result.expect.containsFunctionCall({ name: 'correct_last_move', args: { coord: 'D5' } });
   }, 90_000);
 
   it('«пас» -> pass', async () => {
     const { session } = await start();
-    const result = await session.run({ userInput: 'пас' });
+    const result = session.run({ userInput: 'пас' });
+    await result.wait();
     result.expect.containsFunctionCall({ name: 'pass' });
   }, 60_000);
 
-  it('«кто впереди» -> get_assessment, без лучшего хода в ответе', async () => {
+  it('«кто впереди» -> get_assessment, без лучшего хода в ответе (строка и LLM-судья)', async () => {
     const { session } = await start();
-    const result = await session.run({ userInput: 'кто впереди?' });
+    const result = session.run({ userInput: 'кто впереди?' });
+    await result.wait();
     result.expect.containsFunctionCall({ name: 'get_assessment' });
     const message = result.expect.at(-1).isMessage({ role: 'assistant' });
-    const text = String(message.item.textContent ?? '');
+    const text = String(message.event().item.textContent ?? '');
     expect(text.length).toBeGreaterThan(0);
+    // Строкой — только координаты bestMoves фейкового клиента; место слабой группы (C3, C4) называть можно.
     for (const best of ['K10', 'ка десять', 'D10', 'дэ десять']) expect(text.toLowerCase()).not.toContain(best.toLowerCase());
-  }, 60_000);
+    // LLM-судья раздела 12 спеки — в этом же прогоне, отдельного платного прогона нет. Отказ судьи бросает ошибку.
+    const judge = new openai.LLM({ model: 'gpt-4.1-mini' });
+    await message.judge(judge, {
+      intent: 'оценивает позицию: кто впереди и насколько; не подсказывает ход — не называет лучший ход и не советует, куда ходить (где слабые группы, сказать можно)',
+    });
+  }, 90_000);
 
   it('«давай партию, я белыми» -> start_game white', async () => {
     const { session } = await start({ withGame: false });
-    const result = await session.run({ userInput: 'давай партию, я белыми' });
+    const result = session.run({ userInput: 'давай партию, я белыми' });
+    await result.wait();
     result.expect.containsFunctionCall({ name: 'start_game', args: { my_color: 'white' } });
+  }, 60_000);
+
+  it('D-0004: прямая просьба «сходи за меня на дэ четыре» -> play_move D4, ход назван в ответе', async () => {
+    const { session } = await start();
+    const result = session.run({ userInput: 'сходи за меня на дэ четыре' });
+    await result.wait();
+    result.expect.containsFunctionCall({ name: 'play_move', args: { coord: 'D4' } });
+    const text = String(result.expect.at(-1).isMessage({ role: 'assistant' }).event().item.textContent ?? '');
+    expect(text).toMatch(/д[эе][\s-]*четыре|d4/i);
+  }, 60_000);
+
+  it('D-0004: размышление «а не пойти ли мне на дэ четыре?» ходом не считается', async () => {
+    const { session } = await start();
+    const result = session.run({ userInput: 'хм, а не пойти ли мне на дэ четыре?' });
+    await result.wait();
+    const moved = result.events.some((e) => e.type === 'function_call' && ['play_move', 'correct_last_move'].includes(e.item.name));
+    expect(moved).toBe(false);
+  }, 60_000);
+
+  it('режим «Чат» (D-0011): goko.mode=chat выключает звук сеанса, ответ на ход приходит текстом', async () => {
+    const { session } = await start();
+    const mode = followMode({ participant: { identity: 'phone-s1', attributes: { 'goko.mode': 'chat' } }, session });
+    expect(mode.mode).toBe('chat');
+    expect(session.output.audioEnabled).toBe(false);
+    expect(session.input.audioEnabled).toBe(false);
+    const result = session.run({ userInput: 'дэ четыре' });
+    await result.wait();
+    result.expect.containsFunctionCall({ name: 'play_move', args: { coord: 'D4' } });
+    const text = String(result.expect.at(-1).isMessage({ role: 'assistant' }).event().item.textContent ?? '');
+    expect(text.length).toBeGreaterThan(0);
+    expect(session.output.audioEnabled).toBe(false);
   }, 60_000);
 });
 ```
 
-Судья «без лучшего хода» — проверка строки, а не LLM-судья: в `RunResult` agents-js судьи нет, а координаты из `bestMoves` фейкового клиента известны заранее. Если у `MessageAssert` в установленной версии другое имя поля с текстом (не `item.textContent`) — взять его из типа `MessageAssert` в `@livekit/agents`.
+«Без лучшего хода» проверяется дважды в одном сценарии: строкой по координатам `bestMoves` фейкового клиента (известны заранее) и LLM-судьёй раздела 12 спеки — `MessageAssert.judge(llm, { intent })` из `@livekit/agents` 1.8 (`run_result.d.ts`). Судья вызывается в том же прогоне eval и платных прогонов не добавляет. Текст ответа — `event().item.textContent` (`MessageAssert.event(): ChatMessageEvent`). `session.run` возвращает `RunResult` без `then`, поэтому перед утверждениями и перед следующим `run` — `await result.wait()`. Отсутствие вызова проверяется по `result.events` (`RunEvent` с `type: 'function_call'` и `item.name`): утверждения «не вызывал» у `RunAssert` нет. Сценарий «Чат» проверяет то, что агент делает сам — флаги `audioEnabled` сеанса после `followMode` и текстовый ответ; то, что до телефона не доходит звук, — ручная проверка задачи 8 (шаг 6). Модель eval текстовая, поэтому звук она не генерирует в обоих режимах: сценарий ловит поломку `followMode`/`applyMode` и промпта, а не Realtime.
 
 Run: `RUN_AGENT_EVALS=1 npx vitest run apps/voice-agent/src/agent.eval.test.ts` (PowerShell: `$env:RUN_AGENT_EVALS='1'; npx vitest run apps/voice-agent/src/agent.eval.test.ts`)
-Expected: 5 passed. Провал «дэ четыре» → править формулировки в `prompt.ts` (таблица произношения) и описания инструментов в `tools.ts`, не тест. Запусков мало: каждый прогон стоит денег.
+Expected: 8 passed. Это платный прогон 1 из 5 (Global Constraints). Провал «дэ четыре» или сценариев D-0004 → править формулировки в `prompt.ts` (таблица произношения, правило хода за человека) и описания инструментов в `tools.ts`, не тест; повторный прогон — из запаса (1), не больше одного. Отдельные сценарии по одному (`-t`) не гонять: каждый запуск — отдельный платный прогон.
 
 Run: `npm run check`
 Expected: `agent.eval.test.ts` — `skipped`, остальное зелёное.
@@ -2471,10 +3148,10 @@ describe('CHAT_ATTRIBUTES', () => {
 describe('describeEvent', () => {
   it('коротко описывает события сессии', () => {
     expect(describeEvent({ type: 'session.game', gameId: 'g1' })).toBe('партия g1');
-    expect(describeEvent({ type: 'engine.thinking', color: 'W' })).toBe('Гоко думает за W');
+    expect(describeEvent({ type: 'engine.thinking', gameId: 'g1', color: 'W' })).toBe('Гоко думает за W');
     expect(describeEvent({ type: 'game.finished', result: { winner: 'W', reason: 'resign' } })).toBe('конец: W+R');
     expect(describeEvent({ type: 'game.finished', result: { winner: 'B', margin: 5.5, reason: 'score' } })).toBe('конец: B+5.5');
-    expect(describeEvent({ type: 'error', code: 'engine_busy', message: 'engine did not respond within 10000 ms' })).toBe('ошибка engine_busy: Гоко думает дольше обычного');
+    expect(describeEvent({ type: 'error', gameId: 'g1', code: 'engine_busy', message: 'engine did not respond within 8000 ms' })).toBe('ошибка engine_busy: Гоко думает дольше обычного');
     expect(
       describeEvent({
         type: 'state.updated',
@@ -2516,7 +3193,7 @@ import readline from 'node:readline';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { Room, RoomEvent } from '@livekit/rtc-node';
-import { createClient, humanText } from '@goko/protocol';
+import { ApiError, ClientTimeoutError, createClient, humanText } from '@goko/protocol';
 
 // Режим «Чат» (D-0011): агент выключает звук сессии и отвечает только текстом в lk.transcription.
 export const CHAT_ATTRIBUTES = { 'goko.mode': 'chat' };
@@ -2580,7 +3257,8 @@ async function main() {
   const client = createClient({ baseUrl: api, appKey });
   // Комнату и диспетчеризацию агента создаёт game-server в POST /api/sessions (D-0001); токен — только на эту комнату.
   const { session, livekit } = await client.createSession();
-  console.log(`[OK] сессия ${session.id}, комната ${session.room}, агент ${env('AGENT_NAME') ?? 'goko'}`);
+  // Значение AGENT_NAME не печатаем (правило 4 CLAUDE.md): агента диспетчеризует game-server по своей переменной.
+  console.log(`[OK] сессия ${session.id}, комната ${session.room}, агент по AGENT_NAME game-server`);
 
   let gameId = session.currentGameId;
   const room = new Room();
@@ -2808,10 +3486,15 @@ async function main() {
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  main().catch(() => {
+  main().catch((e) => {
     // Сюда попадают сбои до входа в комнату (createSession). Текст ошибки клиента содержит адрес
-    // game-server, поэтому печатаем свою строку без err.message.
-    console.error('[X] chat: не удалось создать сессию; проверьте --api, APP_KEY и запущенный game-server');
+    // game-server, поэтому err.message не печатаем. Ответ сервера по протоколу (limit_reached,
+    // rate_limited, unauthorized) и таймаут клиента — фразой humanText и кодом; остальное — своей строкой.
+    if (e instanceof ApiError || e instanceof ClientTimeoutError) {
+      console.error(`[X] chat: не удалось создать сессию: ${humanText(e.code, e instanceof ApiError ? e.details : undefined)} (${e.code})`);
+    } else {
+      console.error('[X] chat: не удалось создать сессию; проверьте --api, APP_KEY и запущенный game-server');
+    }
     process.exit(1);
   });
 }
@@ -2839,6 +3522,8 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
 Run: `npx vitest run scripts/chat.test.ts`
 Expected: PASS.
 
+Два прогона ниже с агентом — платные (Realtime): 2-й и 3-й из 5 на весь план (Global Constraints), только по явной просьбе founder'а. Их можно слить в один сценарный, если интерактивный не нужен: тогда один прогон остаётся в запасе. Проверка диагностики без сети и прогон с выключенным game-server (`[X] chat: не удалось создать сессию; ...`) — бесплатны.
+
 Run (нужны `.env` с `LIVEKIT_*`, `OPENAI_API_KEY`, `APP_KEY`; в одном терминале `npm run dev`): `npm run chat`
 Expected: `[OK] сессия ...`, `[OK] вошёл как phone-<id>`, `[OK] режим чата: агент отвечает текстом` (в логе воркера — `[OK] voice-agent: режим chat`), через 1–3 с `[OK] в комнате: <identity агента>` и приветствие `[<identity агента>] ...`. Ввести `давай партию` → `[event] партия g...`, `[event] new by system: ходов 0, rev 0, дальше B`, реплика агента; `дэ четыре` → `[event] play by human via voice: ход 1 B D4 ...`, `[event] engine by engine: ход 2 W ...`, агент называет ход; `/board` печатает ascii-доску с двумя камнями; `кто впереди` → `[event]`-строк нет (analyze событий не шлёт), агент отвечает без лучшего хода. Каждая реплика агента печатается ровно один раз (с задержкой ~0.5 с после конца потока), растущих префиксов нет даже когда в той же комнате говорит телефон. `Ctrl+C` → `[OK] сессия закрыта`, код 0.
 
@@ -2860,13 +3545,13 @@ git commit -m "scripts: chat — текстовый диалог с Гоко в 
 ### Task 6: `web` — каркас Vite, геометрия доски, лента, поток событий, тексты, настройки и чат
 
 **Files:**
-- Create: `apps/web/package.json`, `apps/web/tsconfig.json`, `apps/web/vite.config.ts`, `apps/web/index.html`, `apps/web/src/vite-env.d.ts`, `apps/web/src/geometry.ts`, `apps/web/src/transcript.ts`, `apps/web/src/stream.ts`, `apps/web/src/text.ts`, `apps/web/src/prefs.ts`, `apps/web/src/chat.ts`
+- Create: `apps/web/package.json`, `apps/web/tsconfig.json`, `apps/web/vite.config.ts`, `apps/web/index.html`, `apps/web/src/vite-env.d.ts`, `apps/web/src/main.tsx` (заглушка входа для проверки сборки; задача 8 заменяет её), `apps/web/src/geometry.ts`, `apps/web/src/transcript.ts`, `apps/web/src/stream.ts`, `apps/web/src/text.ts`, `apps/web/src/prefs.ts`, `apps/web/src/chat.ts`
 - Modify: `package.json` (корень: `typecheck` с веб-конфигом, скрипт `build:web`)
 - Test: `apps/web/src/geometry.test.ts`, `apps/web/src/transcript.test.ts`, `apps/web/src/stream.test.ts`, `apps/web/src/text.test.ts`, `apps/web/src/prefs.test.ts`, `apps/web/src/chat.test.ts`
 
 **Interfaces:**
-- Consumes: `formatCoord`, `type Point` из `@goko/go-core`; `ApiError`, `GameEvent`, `GameState`, `GokoClient`, `Color`, `Rank`, `RANKS`, `NewGameRequest`, `humanText`, `seatColor` из `@goko/protocol` (`seatColor` добавляет задача 1).
-- Produces: `VIEW = 1000`; `type Layout = { size; step; margin }`; `layout(size): Layout`; `x(l, col)`, `y(l, row)`; `pointAt(l, px, py): Point | null`; `coordAt(p): string`; `hoshi(size): Point[]`; `type Stone = { col; row; color }`; `stones(board, size): Stone[]`; `indexOf(p, size): number`. `type Who = 'me' | 'goko'`; `type Line = { id; who; text; final }`; `MAX_LINES = 200`; `upsertLine(lines, line): Line[]`; `whoOf(attrs, myTrackSids, senderIdentity, myIdentity): Who`; `lineId(attrs, streamId): string`; `acceptLine(attrs, who): boolean`. `streamEvents(client, sessionId, signal, handlers, sleep?): StreamHandle`, `type StreamHandle = { done: Promise<void>; reopen(): void }`, `RETRY_MS = [1000, 2000, 5000]`, `type StreamHandlers = { onEvent; onConnected?; onLost }`, `needsRetry(prev: boolean, ev: GameEvent): boolean`. `describeError(e): string`; `hasEngine(g): boolean`; `humanColorOf(g): Color` (без движка — цвет того, чей ход, как у агента в задаче 2); `resultText(g): string`; `statusText(g, thinking): string`; `capturesText(g)`, `rankText(g)`. `type Mode = 'voice' | 'chat'`; `type ColorChoice = 'black' | 'white' | 'random'`; `type Prefs = { mode; color; rank }`; `PREFS_KEY = 'goko.prefs'`, `MODE_ATTRIBUTE = 'goko.mode'`, `DEFAULT_PREFS`, `DEFAULT_KOMI = 7.5`; `loadPrefs(storage: () => Pick<Storage, 'getItem'>): Prefs`; `savePrefs(storage: () => Pick<Storage, 'setItem'>, prefs): boolean`; `stepRank(rank, delta): Rank`; `newGameRequest(prefs, current: GameState | null, random?): NewGameRequest`; `modeAttributes(mode): Record<string, string>`. `CHAT_MAX_CHARS = 500`; `type ChatDeps = { send(text): Promise<unknown>; id(): string }`; `type ChatResult = { draft; line: Line | null; error: string | null }`; `sendChat(draft, deps): Promise<ChatResult>`; `agentReady(attrs?): boolean`.
+- Consumes: `formatCoord`, `type Point` из `@goko/go-core`; `ApiError`, `ClientTimeoutError`, `HttpError`, `GameEvent`, `GameState`, `GokoClient`, `CallOptions`, `createClient`, `Color`, `Rank`, `RANKS`, `NewGameRequest`, `humanText`, `seatColor`, `hasEngine`, `humanColorOf`, `retryAfterMs`, `RETRY_MS`, `STABLE_CONNECTION_MS` из `@goko/protocol` (`seatColor`, `hasEngine`, `humanColorOf` и паузы добавляет задача 1; своих копий веб не заводит). Пакеты отдают `exports` на `.ts` (`"."` и `"./testing"`); веб импортирует только `"."`.
+- Produces: `VIEW = 1000`; `type Layout = { size; step; margin }`; `layout(size): Layout`; `x(l, col)`, `y(l, row)`; `pointAt(l, px, py): Point | null`; `coordAt(p): string`; `hoshi(size): Point[]`; `type Stone = { col; row; color }`; `stones(board, size): Stone[]`; `indexOf(p, size): number`. `type Who = 'me' | 'goko'`; `type Line = { id; who; text; final }`; `MAX_LINES = 200`; `upsertLine(lines, line): Line[]`; `whoOf(attrs, myTrackSids, senderIdentity, myIdentity): Who`; `lineId(attrs, streamId): string`; `acceptLine(attrs, who): boolean`. `streamEvents(client, sessionId, signal, handlers, sleep?, now?): StreamHandle`, `type StreamHandle = { done: Promise<void>; reopen(): void }` (`reopen` раньше `Retry-After` ничего не делает; паузы по `RETRY_MS`, сброс после соединения, прожившего `STABLE_CONNECTION_MS`, — оба из `@goko/protocol`), `type StreamHandlers = { onEvent; onConnected?; onLost }`, `needsRetry(prev: boolean, ev: GameEvent): boolean`. `describeError(e): string` (`ApiError` → `humanText(code, details)`, `ClientTimeoutError` → «сервер не отвечает», остальное → `NETWORK_TEXT` «нет связи с сервером»); `retryDelayMs(e): number` (мс до следующего запроса после `rate_limited` — `retryAfterMs(e.details)` из `@goko/protocol`, иначе 0); `TIMEOUT_NOT_APPLIED_TEXT = 'сервер не отвечает: ход пока не записан'`; `sendTapMove(client: Pick<GokoClient, 'getGame'>, before: GameState, send: (o: CallOptions) => Promise<unknown>, o?: CallOptions): Promise<{ state: GameState; text: string | null } | null>` (таймаут клиента на ходе или пасе тапом — без повтора, перечитывание партии; `null` — ответ пришёл; `text` — только при той же ревизии); `resultText(g): string`; `statusText(g, thinking): string`; `capturesText(g)`, `rankText(g)`. `type Mode = 'voice' | 'chat'`; `type ColorChoice = 'black' | 'white' | 'random'`; `type Prefs = { mode; color; rank }`; `PREFS_KEY = 'goko.prefs'`, `MODE_ATTRIBUTE = 'goko.mode'`, `DEFAULT_PREFS`, `DEFAULT_KOMI = 7.5`; `loadPrefs(storage: () => Pick<Storage, 'getItem'>): Prefs`; `savePrefs(storage: () => Pick<Storage, 'setItem'>, prefs): boolean`; `stepRank(rank, delta): Rank`; `newGameRequest(prefs, current: GameState | null, random?): NewGameRequest`; `modeAttributes(mode): Record<string, string>`. `CHAT_MAX_CHARS = 500`; `type ChatDeps = { send(text): Promise<unknown>; id(): string }`; `type ChatResult = { draft; line: Line | null; error: string | null }`; `sendChat(draft, deps): Promise<ChatResult>`; `agentReady(attrs?): boolean`.
 
 - [ ] **Step 1: Файлы конфигурации**
 
@@ -2976,7 +3661,7 @@ interface ImportMeta {
 }
 ```
 
-Корневой `package.json`: `"typecheck": "tsc -p tsconfig.json --noEmit && tsc -p apps/web/tsconfig.json --noEmit"`, добавить `"build:web": "npm run build --workspace apps/web"`. Затем `npm install`.
+Корневой `package.json`: `"typecheck": "tsc -p tsconfig.json --noEmit && tsc -p apps/web/tsconfig.json --noEmit"`, добавить `"build:web": "npm run build --workspace apps/web"`. Затем `npm install`. Нужна сеть: `react`, `react-dom`, `livekit-client`, `@vitejs/plugin-react` в `package-lock.json` ещё нет, их версии офлайн не проверить. При `ETARGET` взять ближайшую опубликованную версию той же мажорной линии и записать её в отчёт задачи.
 
 - [ ] **Step 2: Тесты**
 
@@ -3093,9 +3778,9 @@ describe('acceptLine (D-0011: лента — диалог без дублей)',
 `apps/web/src/stream.test.ts`:
 
 ```ts
-import { describe, expect, it, vi } from 'vitest';
-import { ApiError, type EventsTarget, type GameEvent } from '@goko/protocol';
-import { RETRY_MS, needsRetry, streamEvents } from './stream.ts';
+import { describe, expect, it } from 'vitest';
+import { ApiError, type EventsTarget, type GameEvent, RETRY_MS, STABLE_CONNECTION_MS } from '@goko/protocol';
+import { needsRetry, streamEvents } from './stream.ts';
 
 // Живой поток, который ничего не шлёт и кончается только отменой своего сигнала — как fetch SSE.
 function untilAborted(signal: AbortSignal | undefined): Promise<never> {
@@ -3115,33 +3800,93 @@ describe('streamEvents', () => {
           yield { type: 'session.game', gameId: 'g1' };
           throw new TypeError('network error');
         }
-        yield { type: 'engine.thinking', color: 'W' };
+        yield { type: 'engine.thinking', gameId: 'g1', color: 'W' };
         abort.abort();
       },
     };
     const got: string[] = [];
     const conn: boolean[] = [];
     const slept: number[] = [];
-    await streamEvents(client, 's1', abort.signal, { onEvent: (ev) => got.push(ev.type), onConnected: (c) => conn.push(c), onLost: () => got.push('LOST') }, async (ms) => void slept.push(ms)).done;
+    await streamEvents(client, 's1', abort.signal, { onEvent: (ev) => got.push(ev.type), onConnected: (c) => conn.push(c), onLost: () => got.push('LOST') }, async (ms) => void slept.push(ms), () => 0).done;
     expect(got).toEqual(['session.game', 'engine.thinking']);
     expect(conn).toEqual([true, false, true]);
     expect(slept).toEqual([RETRY_MS[0]]);
     expect(connects).toBe(2);
   });
-  it('растит паузу и сбрасывает после успешного подключения', async () => {
+  it('растит паузу 1, 2, 4, 8 с до потолка 15 с', async () => {
     const abort = new AbortController();
     let connects = 0;
     const client = {
       async *events(): AsyncGenerator<GameEvent, void, undefined> {
         connects++;
-        if (connects < 4) throw new Error('down');
-        yield { type: 'engine.thinking', color: 'B' };
+        if (connects < 8) throw new Error('down');
+        yield { type: 'engine.thinking', gameId: 'g1', color: 'B' };
         abort.abort();
       },
     };
     const slept: number[] = [];
-    await streamEvents(client, 's1', abort.signal, { onEvent: () => {}, onLost: () => {} }, async (ms) => void slept.push(ms)).done;
-    expect(slept).toEqual([1000, 2000, 5000]);
+    await streamEvents(client, 's1', abort.signal, { onEvent: () => {}, onLost: () => {} }, async (ms) => void slept.push(ms), () => 0).done;
+    expect(slept).toEqual([1000, 2000, 4000, 8000, 15000, 15000, 15000]);
+  });
+  it('сбрасывает паузу только после соединения, прожившего 15 с, а не на первом событии', async () => {
+    const abort = new AbortController();
+    let t = 0;
+    let connects = 0;
+    const client = {
+      async *events(): AsyncGenerator<GameEvent, void, undefined> {
+        connects++;
+        if (connects === 4) {
+          abort.abort();
+          return;
+        }
+        if (connects === 3) t += STABLE_CONNECTION_MS;
+        yield { type: 'session.game', gameId: 'g1' }; // sync и сразу обрыв — не повод сбрасывать паузу
+        throw new TypeError('network error');
+      },
+    };
+    const slept: number[] = [];
+    await streamEvents(client, 's1', abort.signal, { onEvent: () => {}, onLost: () => {} }, async (ms) => void slept.push(ms), () => t).done;
+    expect(slept).toEqual([1000, 2000, 1000]);
+  });
+  it('rate_limited: пауза по Retry-After, «Повторить» раньше срока не переоткрывает (D-0012)', async () => {
+    const abort = new AbortController();
+    let t = 0;
+    let connects = 0;
+    const client = {
+      async *events(): AsyncGenerator<GameEvent, void, undefined> {
+        connects++;
+        if (connects === 1) throw new ApiError('rate_limited', 'too many requests, retry in 30 s', { retryAfterSeconds: 30 });
+        yield { type: 'session.game', gameId: 'g1' };
+        abort.abort();
+      },
+    };
+    const slept: number[] = [];
+    // Управляемая пауза: тест ждёт её начала по сигналу, без реальных таймеров.
+    let paused: () => void = () => {};
+    const pauseStarted = new Promise<void>((resolve) => {
+      paused = resolve;
+    });
+    const handle = streamEvents(
+      client,
+      's1',
+      abort.signal,
+      { onEvent: () => {}, onLost: () => {} },
+      (ms) => {
+        slept.push(ms);
+        paused();
+        return new Promise<void>(() => {}); // пауза, которая сама не кончится
+      },
+      () => t,
+    );
+    await pauseStarted;
+    expect(slept).toEqual([30_000]);
+    handle.reopen(); // раньше Retry-After — ничего
+    await Promise.resolve();
+    expect(connects).toBe(1);
+    t = 30_000;
+    handle.reopen();
+    await handle.done;
+    expect(connects).toBe(2);
   });
   it('not_found — сессия истекла: onLost и выход без повторов', async () => {
     const abort = new AbortController();
@@ -3162,7 +3907,7 @@ describe('streamEvents', () => {
       async *events(_target: EventsTarget, signal?: AbortSignal): AsyncGenerator<GameEvent, void, undefined> {
         connects++;
         if (connects === 1) {
-          yield { type: 'error', code: 'retries_exhausted', message: 'engine move retries exhausted' };
+          yield { type: 'error', gameId: 'g1', code: 'retries_exhausted', message: 'engine move retries exhausted' };
           await untilAborted(signal);
         }
         yield { type: 'session.game', gameId: 'g1' };
@@ -3172,8 +3917,18 @@ describe('streamEvents', () => {
     const got: string[] = [];
     const conn: boolean[] = [];
     const slept: number[] = [];
-    const handle = streamEvents(client, 's1', abort.signal, { onEvent: (ev) => got.push(ev.type), onConnected: (c) => conn.push(c), onLost: () => got.push('LOST') }, async (ms) => void slept.push(ms));
-    await vi.waitFor(() => expect(got).toEqual(['error']));
+    // Сигнал о первом событии вместо ожидания на реальных таймерах.
+    let received: () => void = () => {};
+    const firstEvent = new Promise<void>((resolve) => {
+      received = resolve;
+    });
+    const onEvent = (ev: GameEvent) => {
+      got.push(ev.type);
+      received();
+    };
+    const handle = streamEvents(client, 's1', abort.signal, { onEvent, onConnected: (c) => conn.push(c), onLost: () => got.push('LOST') }, async (ms) => void slept.push(ms));
+    await firstEvent;
+    expect(got).toEqual(['error']);
     handle.reopen();
     await handle.done;
     expect(got).toEqual(['error', 'session.game']);
@@ -3221,12 +3976,12 @@ describe('streamEvents', () => {
 
 describe('needsRetry', () => {
   it('«Повторить» видна после retries_exhausted и до следующего состояния партии', () => {
-    const exhausted: GameEvent = { type: 'error', code: 'retries_exhausted', message: 'engine move retries exhausted' };
-    const other: GameEvent = { type: 'error', code: 'engine_unavailable', message: 'engine is down' };
+    const exhausted: GameEvent = { type: 'error', gameId: 'g1', code: 'retries_exhausted', message: 'engine move retries exhausted' };
+    const other: GameEvent = { type: 'error', gameId: 'g1', code: 'engine_unavailable', message: 'engine is down' };
     expect(needsRetry(false, exhausted)).toBe(true);
     expect(needsRetry(true, other)).toBe(true);
     expect(needsRetry(false, other)).toBe(false);
-    expect(needsRetry(true, { type: 'engine.thinking', color: 'W' })).toBe(true);
+    expect(needsRetry(true, { type: 'engine.thinking', gameId: 'g1', color: 'W' })).toBe(true);
     expect(needsRetry(true, { type: 'session.game', gameId: 'g2' })).toBe(false);
   });
 });
@@ -3236,8 +3991,18 @@ describe('needsRetry', () => {
 
 ```ts
 import { describe, expect, it } from 'vitest';
-import { ApiError, type GameState } from '@goko/protocol';
-import { capturesText, describeError, hasEngine, humanColorOf, rankText, resultText, statusText } from './text.ts';
+import { ApiError, type CallOptions, ClientTimeoutError, type GameState, HttpError, humanText } from '@goko/protocol';
+import {
+  NETWORK_TEXT,
+  TIMEOUT_NOT_APPLIED_TEXT,
+  capturesText,
+  describeError,
+  rankText,
+  resultText,
+  retryDelayMs,
+  sendTapMove,
+  statusText,
+} from './text.ts';
 
 function game(over: Partial<GameState> = {}): GameState {
   return {
@@ -3263,6 +4028,78 @@ describe('text', () => {
     expect(describeError(new ApiError('not_your_turn', 'it is Goko to play', { toPlay: 'W' }))).toBe('сейчас не твой ход');
     expect(describeError(new ApiError('illegal_move', 'illegal move D4: ko', { reason: 'ko', coord: 'D4' }))).toBe('ко: сразу забрать нельзя');
     expect(describeError(new TypeError('Failed to fetch'))).toBe('нет связи с сервером');
+    expect(describeError(new HttpError(502, 'Bad Gateway'))).toBe(NETWORK_TEXT);
+  });
+  it('describeError различает таймаут и потерю сети, берёт reason и scope из details', () => {
+    expect(describeError(new ClientTimeoutError('play', 15_000))).toBe('сервер не отвечает');
+    expect(describeError(new ApiError('rate_limited', 'too many requests', { retryAfterSeconds: 30 }))).toBe(humanText('rate_limited'));
+    expect(describeError(new ApiError('too_many_games', 'limit of 3 unfinished games per client reached', { max: 3, scope: 'client' }))).toBe(
+      humanText('too_many_games', { max: 3, scope: 'client' }),
+    );
+    expect(describeError(new ApiError('bad_request', 'seat is not controlled by a human', { reason: 'not_your_seat' }))).toBe('это не твой цвет');
+    expect(describeError(new ApiError('bad_request', 'invalid body'))).toBe('запрос не по форме');
+  });
+  it('retryDelayMs: Retry-After только у rate_limited', () => {
+    expect(retryDelayMs(new ApiError('rate_limited', 'too many requests', { retryAfterSeconds: 30 }))).toBe(30_000);
+    expect(retryDelayMs(new ApiError('rate_limited', 'too many requests'))).toBe(1000);
+    expect(retryDelayMs(new ApiError('engine_busy', 'engine is busy'))).toBe(0);
+    expect(retryDelayMs(new TypeError('Failed to fetch'))).toBe(0);
+  });
+  // Фейковый клиент для перечитывания: отдаёт состояния по очереди, пишет чтения с сигналом.
+  function reader(queue: Array<GameState | Error>) {
+    const reads: Array<{ id: string; signal: AbortSignal | undefined }> = [];
+    return {
+      reads,
+      getGame: async (id: string, o?: CallOptions): Promise<GameState> => {
+        reads.push({ id, signal: o?.signal });
+        const next = queue.shift();
+        if (!next) throw new Error('лишнее чтение');
+        if (next instanceof Error) throw next;
+        return next;
+      },
+    };
+  }
+  it('sendTapMove: ответ пришёл — null без чтения; ошибка сервера — наружу без чтения; отказ перечитывания — наружу; запрос не повторяется', async () => {
+    const before = game({ revision: 3 });
+    const c = reader([new TypeError('Failed to fetch')]);
+    const signal = new AbortController().signal;
+    let sent = 0;
+    expect(await sendTapMove(c, before, async () => void sent++, { signal })).toBeNull();
+    expect(c.reads).toEqual([]);
+    const refuse = async () => {
+      sent++;
+      throw new ApiError('not_your_turn', 'it is Goko to play', { toPlay: 'W' });
+    };
+    await expect(sendTapMove(c, before, refuse, { signal })).rejects.toMatchObject({ code: 'not_your_turn' });
+    expect(c.reads).toEqual([]);
+    const timeout = async () => {
+      sent++;
+      throw new ClientTimeoutError('play', 15_000);
+    };
+    await expect(sendTapMove(c, before, timeout, { signal })).rejects.toThrow('Failed to fetch');
+    expect(c.reads).toEqual([{ id: 'g1', signal }]);
+    expect(sent).toBe(3);
+  });
+  it('sendTapMove: таймаут — партия перечитана тем же сигналом; ревизия та же — текст «ход пока не записан», сменилась — партия без текста', async () => {
+    const before = game({ revision: 3 });
+    const same = game({ revision: 3 });
+    const moved = game({ revision: 5, toPlay: 'W', pendingEngineMove: true, moves: [{ n: 1, color: 'B', coord: 'D4', captured: 0, at: 't' }] });
+    const c = reader([same, moved]);
+    const signal = new AbortController().signal;
+    let sent = 0;
+    const timeout = async (o: CallOptions) => {
+      sent++;
+      expect(o.signal).toBe(signal);
+      throw new ClientTimeoutError('play', 15_000);
+    };
+    expect(await sendTapMove(c, before, timeout, { signal })).toEqual({ state: same, text: TIMEOUT_NOT_APPLIED_TEXT });
+    expect(TIMEOUT_NOT_APPLIED_TEXT).toBe('сервер не отвечает: ход пока не записан');
+    expect(await sendTapMove(c, before, timeout, { signal })).toEqual({ state: moved, text: null });
+    expect(sent).toBe(2);
+    expect(c.reads).toEqual([
+      { id: 'g1', signal },
+      { id: 'g1', signal },
+    ]);
   });
   it('statusText', () => {
     expect(statusText(null, false)).toBe('Партии нет: нажми «Новая партия» или попроси Гоко');
@@ -3281,10 +4118,6 @@ describe('text', () => {
   it('человек против человека (D-0005): «ты» — тот, чей ход, победа по цвету', () => {
     const hvh = { B: { controller: 'human' as const }, W: { controller: 'human' as const } };
     const d4 = { n: 1, color: 'B' as const, coord: 'D4', captured: 0, at: 't' };
-    expect(hasEngine(game())).toBe(true);
-    expect(hasEngine(game({ seats: hvh }))).toBe(false);
-    expect(humanColorOf(game())).toBe('B');
-    expect(humanColorOf(game({ seats: hvh, toPlay: 'W', moves: [d4] }))).toBe('W');
     expect(statusText(game({ seats: hvh, toPlay: 'W', moves: [d4] }), false)).toBe('Ход 2, ходят белые');
     expect(resultText(game({ seats: hvh, status: 'finished', result: { winner: 'B', reason: 'resign' } }))).toBe('Победа чёрных: сдача');
     expect(resultText(game({ seats: hvh, status: 'finished', result: { winner: 'W', margin: 2.5, reason: 'score' } }))).toBe('Победа белых: +2,5');
@@ -3460,8 +4293,9 @@ export const y = (l: Layout, row: number): number => l.margin + (l.size - 1 - ro
 
 // Ближайший пункт к точке касания. Дальше полушага от крайней линии — поля, тап не считается.
 export function pointAt(l: Layout, px: number, py: number): Point | null {
-  const col = Math.round((px - l.margin) / l.step);
-  const row = l.size - 1 - Math.round((py - l.margin) / l.step);
+  // `+ 0` убирает `-0` у левого края: Math.round(-0,45) = -0, а toEqual отличает -0 от 0.
+  const col = Math.round((px - l.margin) / l.step) + 0;
+  const row = l.size - 1 - Math.round((py - l.margin) / l.step) + 0;
   if (col < 0 || col >= l.size || row < 0 || row >= l.size) return null;
   return { col, row };
 }
@@ -3537,7 +4371,13 @@ export const acceptLine = (attrs: Readonly<Record<string, string>>, who: Who): b
 // с полным состоянием — это и есть «get_game при переподключении» из раздела 10 спеки.
 // reopen() — кнопка «Повторить» (D-0006): открытие потока сессии заново запускает серию повторов сервера
 // после retries_exhausted. Живое соединение закрывается своим AbortController, пауза между попытками прерывается.
-import { ApiError, type GameEvent, type GokoClient } from '@goko/protocol';
+// Поток сессии несёт события только текущей партии; старую партию смотрят её собственным потоком events({ gameId }).
+// Паузы RETRY_MS (1, 2, 4, 8, потолок 15 с) — общие с голосовым агентом, из @goko/protocol (задача 1). Сброс — только
+// если соединение прожило STABLE_CONNECTION_MS: sync приходит первым событием и при обрыве сразу после него,
+// сбрасывать на нём нельзя, иначе сервер, который принимает и тут же рвёт поток, получит переподключение раз в секунду.
+// rate_limited (D-0012): пауза не короче Retry-After, и reopen() до этого срока ничего не делает.
+import { ApiError, type GameEvent, type GokoClient, RETRY_MS, STABLE_CONNECTION_MS } from '@goko/protocol';
+import { retryDelayMs } from './text.ts';
 
 export type StreamHandlers = {
   onEvent: (ev: GameEvent) => void;
@@ -3547,8 +4387,6 @@ export type StreamHandlers = {
 
 export type StreamHandle = { done: Promise<void>; reopen: () => void };
 
-export const RETRY_MS = [1000, 2000, 5000] as const;
-
 const defaultSleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 export function streamEvents(
@@ -3557,14 +4395,16 @@ export function streamEvents(
   signal: AbortSignal,
   handlers: StreamHandlers,
   sleep: (ms: number) => Promise<void> = defaultSleep,
+  now: () => number = Date.now,
 ): StreamHandle {
   let conn: AbortController | null = null;
   let wake: (() => void) | null = null;
   let reopening = false;
+  let blockedUntil = 0;
   signal.addEventListener('abort', () => wake?.(), { once: true });
 
   const reopen = (): void => {
-    if (signal.aborted || reopening) return;
+    if (signal.aborted || reopening || now() < blockedUntil) return;
     reopening = true;
     conn?.abort();
     wake?.();
@@ -3577,12 +4417,13 @@ export function streamEvents(
       conn = current;
       const stop = () => current.abort();
       signal.addEventListener('abort', stop, { once: true });
+      const openedAt = now();
+      let wait = 0;
       try {
         let first = true;
         for await (const ev of client.events({ sessionId }, current.signal)) {
           if (first) {
             first = false;
-            attempt = 0;
             handlers.onConnected?.(true);
           }
           handlers.onEvent(ev);
@@ -3593,6 +4434,7 @@ export function streamEvents(
           handlers.onLost();
           return;
         }
+        wait = retryDelayMs(e);
       } finally {
         signal.removeEventListener('abort', stop);
         conn = null;
@@ -3604,11 +4446,14 @@ export function streamEvents(
         continue;
       }
       handlers.onConnected?.(false);
+      if (now() - openedAt >= STABLE_CONNECTION_MS) attempt = 0;
+      const delay = RETRY_MS[Math.min(attempt, RETRY_MS.length - 1)] ?? 15_000;
+      blockedUntil = wait > 0 ? now() + wait : 0;
       // Промис пробуждения создаётся до вызова sleep: reopen() может прийти прямо из него.
       const woken = new Promise<void>((resolve) => {
         wake = resolve;
       });
-      await Promise.race([sleep(RETRY_MS[Math.min(attempt, RETRY_MS.length - 1)] ?? 5000), woken]);
+      await Promise.race([sleep(Math.max(wait, delay)), woken]);
       wake = null;
       if (reopening) {
         reopening = false;
@@ -3635,20 +4480,58 @@ export function needsRetry(prev: boolean, ev: GameEvent): boolean {
 
 ```ts
 // Тексты статуса и ошибок на экране. Позицию не интерпретируем: только поля состояния.
-import { ApiError, type Color, type GameState, humanText, seatColor } from '@goko/protocol';
+// hasEngine, humanColorOf и retryAfterMs — общие с голосовым агентом, из @goko/protocol (задача 1).
+import {
+  ApiError,
+  type CallOptions,
+  ClientTimeoutError,
+  type Color,
+  type GameState,
+  type GokoClient,
+  hasEngine,
+  humanColorOf,
+  humanText,
+  retryAfterMs,
+  seatColor,
+} from '@goko/protocol';
 
-export function describeError(e: unknown): string {
-  // Текст для человека — по code и details, message сервера английский (D-0007).
-  if (e instanceof ApiError) return humanText(e.code, e.details);
-  return 'нет связи с сервером';
+export const NETWORK_TEXT = 'нет связи с сервером';
+export const TIMEOUT_NOT_APPLIED_TEXT = 'сервер не отвечает: ход пока не записан';
+
+// Ход или пас тапом (Global Constraints, «Клиент протокола»). ClientTimeoutError не значит, что хода нет: сервер
+// мог записать его, а ответ не дошёл. Запрос не повторяется, партия перечитывается. null — ответ пришёл, состояние
+// придёт потоком; иначе — перечитанная партия и текст, если ревизия та же, что до тапа. Запрос с expectedRevision
+// ещё может записаться позже, поэтому текст говорит «пока». Прочие ошибки и отказ перечитывания — наружу.
+export async function sendTapMove(
+  client: Pick<GokoClient, 'getGame'>,
+  before: GameState,
+  send: (o: CallOptions) => Promise<unknown>,
+  o: CallOptions = {},
+): Promise<{ state: GameState; text: string | null } | null> {
+  try {
+    await send(o);
+    return null;
+  } catch (e) {
+    if (!(e instanceof ClientTimeoutError)) throw e;
+  }
+  const state = await client.getGame(before.id, o);
+  return { state, text: state.revision === before.revision ? TIMEOUT_NOT_APPLIED_TEXT : null };
 }
 
-export const hasEngine = (g: GameState): boolean => seatColor(g.seats, 'engine') !== null;
+export function describeError(e: unknown): string {
+  // Текст для человека — по code и details, message сервера английский (D-0007). details несут reason
+  // (bad_request: not_your_seat, sessionless_disabled) и scope (too_many_games) — фразу выбирает humanText.
+  if (e instanceof ApiError) return humanText(e.code, e.details);
+  // Таймаут клиента — сервер достижим, но молчит; всё прочее (TypeError fetch, HttpError от прокси) — связи нет.
+  if (e instanceof ClientTimeoutError) return humanText(e.code);
+  return NETWORK_TEXT;
+}
 
-// Как у агента (задача 2): в партии без движка (D-0005) людей двое, и «ты» — тот, чей сейчас ход.
-export function humanColorOf(g: GameState): Color {
-  if (!hasEngine(g) && g.seats[g.toPlay].controller === 'human') return g.toPlay;
-  return seatColor(g.seats, 'human') ?? 'B';
+// Сколько не слать запросы после rate_limited (D-0012): details.retryAfterSeconds, без него — секунда.
+// Для прочих ошибок 0: паузу выбирает вызывающий.
+export function retryDelayMs(e: unknown): number {
+  if (!(e instanceof ApiError) || e.code !== 'rate_limited') return 0;
+  return retryAfterMs(e.details);
 }
 
 const colorName = (c: Color) => (c === 'B' ? 'чёрные' : 'белые');
@@ -3784,12 +4667,46 @@ export function agentReady(attrs: Readonly<Record<string, string>> | undefined):
 - [ ] **Step 10: Тесты и typecheck зелёные**
 
 Run: `npx vitest run apps/web && npm run typecheck`
-Expected: все шесть файлов тестов проходят; `tsc -p apps/web/tsconfig.json` без ошибок (пока в `src` только эти модули; `main.tsx` появится в Task 8). Тесты `prefs` и `chat` не трогают `window`: storage и отправка передаются функциями, vitest остаётся в окружении `node`.
+Expected: все шесть файлов тестов проходят; `tsc -p apps/web/tsconfig.json` без ошибок (в `src` эти модули и заглушка `main.tsx` из шага 11; страница появится в задаче 8). Тесты `prefs` и `chat` не трогают `window`: storage и отправка передаются функциями, vitest остаётся в окружении `node`.
 
-- [ ] **Step 11: Commit**
+- [ ] **Step 11: Сборка Vite берёт пакеты workspace с `exports` на `.ts` и не тянет `./testing`**
+
+`@goko/protocol` и `@goko/go-core` отдают исходники: `exports` `"."` → `./src/index.ts`, `"./testing"` → тестовые помощники (`fakeFetch`, `positionFromRows`). Node 22 в тестах их читает, а Vite должен сам транспилировать `.ts` из `node_modules/@goko/*` (симлинки workspace) и не включить `testing` в бандл. Проверяем сразу, до компонентов, чтобы задача 8 не упёрлась в сборку.
+
+`apps/web/src/main.tsx` (заглушка; задача 8, шаг 3 заменяет файл целиком):
+
+```tsx
+// Заглушка входа (задача 6): сборка проверяет пакеты workspace с exports на .ts. Задача 8 заменяет файл страницей.
+import { formatCoord } from '@goko/go-core';
+import { createClient } from '@goko/protocol';
+import { describeError } from './text.ts';
+
+const client = createClient({ baseUrl: import.meta.env.VITE_API_BASE || location.origin, appKey: import.meta.env.VITE_APP_KEY });
+const root = document.getElementById('root');
+if (root) {
+  root.textContent = `Гоко: ${formatCoord({ col: 3, row: 3 })}`;
+  client.listGames().catch((e: unknown) => {
+    root.textContent = describeError(e);
+  });
+}
+```
+
+Run (Git Bash):
 
 ```bash
-git add package.json package-lock.json apps/web/package.json apps/web/tsconfig.json apps/web/vite.config.ts apps/web/index.html apps/web/src/vite-env.d.ts apps/web/src/geometry.ts apps/web/src/geometry.test.ts apps/web/src/transcript.ts apps/web/src/transcript.test.ts apps/web/src/stream.ts apps/web/src/stream.test.ts apps/web/src/text.ts apps/web/src/text.test.ts apps/web/src/prefs.ts apps/web/src/prefs.test.ts apps/web/src/chat.ts apps/web/src/chat.test.ts
+npm run build --workspace apps/web
+grep -l "client timeout: " apps/web/dist/assets/*.js && grep -l "point is outside the letters range" apps/web/dist/assets/*.js && echo "[OK] пакеты workspace в бандле"
+grep -l -e "fakeFetch: no handlers provided" -e 'expected one of ".XO"' apps/web/dist/assets/*.js && echo "[X] testing попал в бандл" || echo "[OK] testing не в бандле"
+# grep по рабочему дереву, а не git grep: файлы веба ещё не в индексе (git add — шаг 12). Код 1 — совпадений нет.
+grep -rn -e "@goko/[a-z-]*/src/" -e "test-helpers" -e "@goko/[a-z-]*/testing" apps/web/src --include='*.ts' --include='*.tsx' --exclude='*.test.ts'; [ $? -eq 1 ] && echo "[OK] веб импортирует пакеты только через exports"
+```
+
+Expected: `vite build` без ошибок, `dist/index.html` и `dist/assets/*.js`; обе строки `[OK]` о пакетах и testing (первая — литералы из `ClientTimeoutError` и `formatCoord` пришли в бандл); третья `[OK]`. Литералы выбраны уникальные для файлов: `'has unexpected char'` не годится, он есть и в `board.ts`. Связанные пакеты workspace Vite считает исходниками проекта (путь после симлинка вне `node_modules`) и транспилирует их `.ts` сам. Если сборка всё же падает на `.ts` из пакета — остановиться и сообщить с текстом ошибки: `exports` пакетов менять не в этой задаче. `apps/web/dist` в `.gitignore` уже есть (корневой `dist/`); проверить `git status --short apps/web` — `dist` не виден.
+
+- [ ] **Step 12: Commit**
+
+```bash
+git add package.json package-lock.json apps/web/package.json apps/web/tsconfig.json apps/web/vite.config.ts apps/web/index.html apps/web/src/vite-env.d.ts apps/web/src/main.tsx apps/web/src/geometry.ts apps/web/src/geometry.test.ts apps/web/src/transcript.ts apps/web/src/transcript.test.ts apps/web/src/stream.ts apps/web/src/stream.test.ts apps/web/src/text.ts apps/web/src/text.test.ts apps/web/src/prefs.ts apps/web/src/prefs.test.ts apps/web/src/chat.ts apps/web/src/chat.test.ts
 git commit -m "web: каркас Vite, геометрия доски, лента без дублей, поток событий с «Повторить», тексты, настройки и чат"
 ```
 
@@ -3801,7 +4718,7 @@ git commit -m "web: каркас Vite, геометрия доски, лента
 - Create: `apps/web/src/api.ts`, `apps/web/src/hooks/useSession.ts`, `apps/web/src/hooks/useGame.ts`
 
 **Interfaces:**
-- Consumes: `createClient`, `CreateSessionResponse`, `GameState`, `humanText` из `@goko/protocol`; `Room`, `RoomEvent`, `Track` из `livekit-client` 2.22 (`Room.connect`, `Room.startAudio`, `Room.disconnect`, `Room.registerTextStreamHandler`, `Room.remoteParticipants`, `LocalParticipant.setMicrophoneEnabled`, `LocalParticipant.setAttributes`, `LocalParticipant.sendText(text, { topic })`, `Participant.getTrackPublications()`, `RemoteTrackPublication.setSubscribed`, `Track.attach/detach`, `TextStreamReader.readAll()`); из Task 6: `upsertLine`, `whoOf`, `lineId`, `acceptLine`, `Line`, `streamEvents`, `StreamHandle`, `needsRetry`, `describeError`, `hasEngine`, `humanColorOf`, `loadPrefs`, `savePrefs`, `modeAttributes`, `newGameRequest`, `Prefs`, `Mode`, `sendChat`, `agentReady`.
+- Consumes: `createClient`, `CreateSessionResponse`, `GameState`, `humanText`, `hasEngine`, `humanColorOf` (Task 1), `type CallOptions` (последний аргумент каждого метода клиента, `{ signal }`) из `@goko/protocol`; `retryDelayMs` из Task 6; `Room`, `RoomEvent`, `Track` из `livekit-client` 2.22 (`Room.connect`, `Room.startAudio`, `Room.disconnect`, `Room.registerTextStreamHandler`, `Room.remoteParticipants`, `LocalParticipant.setMicrophoneEnabled`, `LocalParticipant.setAttributes`, `LocalParticipant.sendText(text, { topic })`, `Participant.getTrackPublications()`, `RemoteTrackPublication.setSubscribed`, `Track.attach/detach`, `TextStreamReader.readAll()`); из Task 6: `upsertLine`, `whoOf`, `lineId`, `acceptLine`, `Line`, `streamEvents`, `StreamHandle`, `needsRetry`, `describeError`, `sendTapMove`, `loadPrefs`, `savePrefs`, `modeAttributes`, `newGameRequest`, `Prefs`, `Mode`, `sendChat`, `agentReady`.
 - Produces: `client: GokoClient`; `useSession(): { session: Session | null; lines: Line[]; mic: MicState; link: LinkState; agent: boolean; prefs: Prefs; error: string | null; clearError(): void; activate(): Promise<void>; enableMic(): Promise<void>; setMode(mode: Mode): Promise<void>; updatePrefs(patch: Partial<Prefs>): void; sendText(draft: string): Promise<string>; reset(): void }`, `type MicState = 'off' | 'connecting' | 'on' | 'failed'`, `type LinkState = 'idle' | 'connecting' | 'connected' | 'failed'`; `useGame(sessionId: string | null, onLost: () => void): { state: GameState | null; gameId: string | null; thinking: boolean; connected: boolean; retry: boolean; message: string | null; play(coord): Promise<void>; pass(); resign(); undo(); newGame(prefs: Prefs): Promise<void>; reopen(): void }`.
 
 - [ ] **Step 1: `apps/web/src/api.ts`**
@@ -4092,12 +5009,15 @@ export function useSession() {
 ```ts
 // Партия на экране: состояние из SSE сессии, действия тапами через тот же протокол, что и голос.
 // Проверка «чей ход» — только по полям состояния; правил го здесь нет.
+// Поток сессии несёт только текущую партию; engine.thinking и error чужой партии (гонка при смене партии) не показываем.
+// Запросы идут с signal жизни компонента: после размонтирования ответ не трогает состояние и ошибку не показывает.
+// rate_limited (D-0012): до Retry-After тапы запросов не шлют, а сразу показывают ту же фразу.
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { type GameState, humanText } from '@goko/protocol';
+import { type CallOptions, type GameState, hasEngine, humanColorOf, humanText } from '@goko/protocol';
 import { client } from '../api.ts';
 import { type Prefs, newGameRequest } from '../prefs.ts';
 import { type StreamHandle, needsRetry, streamEvents } from '../stream.ts';
-import { describeError, hasEngine, humanColorOf } from '../text.ts';
+import { describeError, retryDelayMs, sendTapMove } from '../text.ts';
 
 const MESSAGE_MS = 3000;
 
@@ -4110,6 +5030,17 @@ export function useGame(sessionId: string | null, onLost: () => void) {
   const [message, setMessage] = useState<string | null>(null);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const stream = useRef<StreamHandle | null>(null);
+  const gameRef = useRef<string | null>(null);
+  const blockedUntil = useRef(0);
+  // Контроллер создаётся в эффекте, а не при первом рендере: StrictMode в dev монтирует дважды,
+  // и контроллер, отменённый первой уборкой, иначе отменял бы все запросы второго монтирования.
+  const life = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    const c = new AbortController();
+    life.current = c;
+    return () => c.abort();
+  }, []);
 
   const flash = useCallback((text: string) => {
     setMessage(text);
@@ -4124,12 +5055,15 @@ export function useGame(sessionId: string | null, onLost: () => void) {
       onConnected: setConnected,
       onLost,
       onEvent: (ev) => {
+        if ((ev.type === 'engine.thinking' || ev.type === 'error') && ev.gameId !== gameRef.current) return;
         setRetry((r) => needsRetry(r, ev));
         switch (ev.type) {
           case 'session.game':
+            gameRef.current = ev.gameId;
             setGameId(ev.gameId);
             break;
           case 'state.updated':
+            gameRef.current = ev.state.id;
             setState(ev.state);
             setGameId(ev.state.id);
             setThinking(false);
@@ -4159,49 +5093,70 @@ export function useGame(sessionId: string | null, onLost: () => void) {
     stream.current?.reopen();
   }, []);
 
-  const guard = useCallback((): string | null => {
-    if (!gameId || !state) return 'партии ещё нет';
-    if (state.status === 'finished') return 'партия окончена';
-    return null;
-  }, [gameId, state]);
-
   // Ход человека — место того, чей черёд, у человека (в партии двух людей — всегда, D-0005).
   const humanTurn = Boolean(state && state.status === 'playing' && state.seats[state.toPlay].controller === 'human' && !state.pendingEngineMove);
 
-  const act = useCallback(
-    async (fn: () => Promise<unknown>, needTurn: boolean) => {
-      const g = guard();
-      if (g) return flash(g);
-      if (needTurn && !humanTurn) return flash(state && hasEngine(state) ? 'сейчас ход Гоко' : 'сейчас не твой ход');
+  // Общая обёртка запроса: пауза после rate_limited, signal жизни компонента, текст ошибки через describeError
+  // (таймаут клиента — «сервер не отвечает», потеря сети — «нет связи с сервером», коды — humanText).
+  const request = useCallback(
+    async (fn: (o: CallOptions) => Promise<unknown>) => {
+      if (Date.now() < blockedUntil.current) return flash(humanText('rate_limited'));
+      const signal = life.current?.signal;
       try {
-        await fn();
+        await fn({ signal });
       } catch (e) {
+        if (signal?.aborted) return;
+        const wait = retryDelayMs(e);
+        if (wait > 0) blockedUntil.current = Date.now() + wait;
         flash(describeError(e));
       }
     },
-    [guard, humanTurn, state, flash],
+    [flash],
   );
 
-  const play = useCallback(
-    (coord: string) => act(() => client.play(gameId!, { coord, via: 'tap', expectedRevision: state!.revision, waitForReply: false }), true),
-    [act, gameId, state],
+  // Действие над текущей партией. Без партии или после её конца — фраза без запроса; иначе fn получает
+  // id партии и состояние уже проверенными, и действиям не нужны gameId! и state!.
+  const act = useCallback(
+    async (fn: (id: string, g: GameState, o: CallOptions) => Promise<unknown>, needTurn: boolean) => {
+      if (!gameId || !state) return flash('партии ещё нет');
+      if (state.status === 'finished') return flash('партия окончена');
+      if (needTurn && !humanTurn) return flash(hasEngine(state) ? 'сейчас ход Гоко' : 'сейчас не твой ход');
+      await request((o) => fn(gameId, state, o));
+    },
+    [gameId, state, humanTurn, flash, request],
   );
-  const pass = useCallback(() => act(() => client.pass(gameId!, { via: 'tap', expectedRevision: state!.revision, waitForReply: false }), true), [act, gameId, state]);
-  const undo = useCallback(() => act(() => client.undo(gameId!, { via: 'tap' }), false), [act, gameId]);
-  const resign = useCallback(() => act(() => client.resign(gameId!, { color: humanColorOf(state!), via: 'tap' }), false), [act, gameId, state]);
+
+  // Ход и пас тапом. Таймаут клиента не значит, что ход не записан: запрос не повторяется, партия перечитывается
+  // и рисуется как есть (sendTapMove); та же ревизия — ещё и фраза «ход пока не записан». Перечитанное состояние
+  // не затирает более новое из потока и не рисуется, если текущая партия сессии уже другая.
+  const tapMove = useCallback(
+    (send: (id: string, revision: number, o: CallOptions) => Promise<unknown>) =>
+      act(async (id, before, o) => {
+        const reread = await sendTapMove(client, before, (opts) => send(id, before.revision, opts), o);
+        if (!reread || gameRef.current !== reread.state.id) return;
+        const actual = reread.state;
+        setState((s) => (s && s.id === actual.id && s.revision > actual.revision ? s : actual));
+        if (reread.text) flash(reread.text);
+      }, true),
+    [act, flash],
+  );
+  const play = useCallback(
+    (coord: string) => tapMove((id, revision, o) => client.play(id, { coord, via: 'tap', expectedRevision: revision, waitForReply: false }, o)),
+    [tapMove],
+  );
+  const pass = useCallback(() => tapMove((id, revision, o) => client.pass(id, { via: 'tap', expectedRevision: revision, waitForReply: false }, o)), [tapMove]);
+  const undo = useCallback(() => act((id, _g, o) => client.undo(id, { via: 'tap' }, o), false), [act]);
+  const resign = useCallback(() => act((id, g, o) => client.resign(id, { color: humanColorOf(g), via: 'tap' }, o), false), [act]);
 
   // «Новая партия» — цвет и ранг из выбора на экране (prefs), размер доски и коми от текущей партии.
   // Ответ движка ждать не надо: придёт событием, а Гоко прокомментирует новую партию сам.
+  // Партии создаются только внутри сессии (D-0012): POST /api/games в prod выключен (задача 9).
   const newGame = useCallback(
     async (prefs: Prefs) => {
       if (!sessionId) return;
-      try {
-        await client.newGame(sessionId, newGameRequest(prefs, state));
-      } catch (e) {
-        flash(describeError(e));
-      }
+      await request((o) => client.newGame(sessionId, newGameRequest(prefs, state), o));
     },
-    [sessionId, state, flash],
+    [sessionId, state, request],
   );
 
   return { state, gameId, thinking, connected, retry, message, play, pass, undo, resign, newGame, reopen };
@@ -4225,7 +5180,8 @@ git commit -m "web: клиент протокола, useSession (комната,
 ### Task 8: `web` — компоненты, страница, стили, проверка в браузере
 
 **Files:**
-- Create: `apps/web/src/components/Board.tsx`, `apps/web/src/components/Transcript.tsx`, `apps/web/src/components/StatusBar.tsx`, `apps/web/src/components/Controls.tsx`, `apps/web/src/components/ModeSwitch.tsx`, `apps/web/src/components/NewGame.tsx`, `apps/web/src/components/ChatInput.tsx`, `apps/web/src/App.tsx`, `apps/web/src/main.tsx`, `apps/web/src/styles.css`
+- Create: `apps/web/src/components/Board.tsx`, `apps/web/src/components/Transcript.tsx`, `apps/web/src/components/StatusBar.tsx`, `apps/web/src/components/Controls.tsx`, `apps/web/src/components/ModeSwitch.tsx`, `apps/web/src/components/NewGame.tsx`, `apps/web/src/components/ChatInput.tsx`, `apps/web/src/App.tsx`, `apps/web/src/styles.css`
+- Modify: `apps/web/src/main.tsx` (заглушка задачи 6, шаг 11, заменяется целиком)
 
 **Interfaces:**
 - Consumes: `geometry.ts`, `transcript.ts`, `text.ts`, `prefs.ts` (`Mode`, `Prefs`, `ColorChoice`, `stepRank`), `chat.ts` (`CHAT_MAX_CHARS`), хуки Task 7; `COLUMN_LETTERS`, `parseCoord` из `@goko/go-core`; `GameState` из `@goko/protocol`.
@@ -4604,6 +5560,8 @@ export function App() {
 }
 ```
 
+`apps/web/src/main.tsx` — заменить заглушку задачи 6 целиком:
+
 ```tsx
 // main.tsx
 import { StrictMode } from 'react';
@@ -4611,7 +5569,9 @@ import { createRoot } from 'react-dom/client';
 import { App } from './App.tsx';
 import './styles.css';
 
-createRoot(document.getElementById('root')!).render(
+const root = document.getElementById('root');
+if (!root) throw new Error('web: нет #root');
+createRoot(root).render(
   <StrictMode>
     <App />
   </StrictMode>,
@@ -4695,12 +5655,12 @@ body { background: var(--bg); color: var(--fg); font: 16px/1.4 system-ui, -apple
 
 - [ ] **Step 4: Typecheck и сборка**
 
-Run: `npm run typecheck && npm run build:web`
-Expected: без ошибок; `apps/web/dist/index.html` и `apps/web/dist/assets/*.js` созданы. `dist/` уже в `.gitignore`.
+Run: `npm run typecheck && npm run build:web`, затем три проверки бандла из задачи 6, шаг 11 (те же команды `grep`; импорт пакетов проверяется `grep -rn` по рабочему дереву — новые компоненты ещё не в индексе).
+Expected: без ошибок; `apps/web/dist/index.html` и `apps/web/dist/assets/*.js` созданы. `dist/` уже в `.gitignore`. Проверки бандла снова `[OK]`: страница с `livekit-client` и хуками по-прежнему не тянет `@goko/protocol/testing` и `@goko/go-core/testing`.
 
-- [ ] **Step 5: Проверка в браузере на ПК без агента** (бесплатно: без voice-agent и без Realtime)
+- [ ] **Step 5: Проверка в браузере на ПК без агента** (бесплатно: без voice-agent и без Realtime; нужны LiveKit на VPS и `LIVEKIT_*` в `.env`)
 
-По D-0001 `POST /api/sessions` создаёт комнату на сервере LiveKit, поэтому `.env` должен содержать `APP_KEY` и рабочие `LIVEKIT_*` (сервер LiveKit на VPS); с фиктивными значениями сессия не создаётся (`internal`), и страница без сессии не играет. `npm run dev` здесь не подходит: он запускает и voice-agent `goko-dev`, который по первому касанию откроет платную сессию Realtime. Поэтому два процесса вручную, в двух терминалах Git Bash, без `cmd.exe`; `--env-file` не перекрывает переменные, заданные в команде, значения не печатаются:
+По D-0001 `POST /api/sessions` создаёт комнату на сервере LiveKit, поэтому `.env` должен содержать `APP_KEY` и рабочие `LIVEKIT_*` (сервер LiveKit на VPS); с фиктивными значениями сессия не создаётся (`internal`), и страница без сессии не играет. Без LiveKit на VPS и `LIVEKIT_*` в `.env` шаг не выполняется: записать его `[TODO founder]` в `docs/NOW.md` (задача 11, шаг 5) и идти дальше. `npm run dev` здесь не подходит: он запускает и voice-agent `goko-dev`, который по первому касанию откроет платную сессию Realtime. Поэтому два процесса вручную, в двух терминалах Git Bash, без `cmd.exe`; `--env-file` не перекрывает переменные, заданные в команде, значения не печатаются:
 
 Run:
 ```bash
@@ -4715,16 +5675,17 @@ Expected, по шагам:
 2. Первое касание страницы → браузер спрашивает микрофон (разрешить) → «Микрофон включён». В DevTools → Application → Local Storage ключ `goko.prefs` уже записан с умолчаниями.
 3. «Новая партия» → панель: «Ты играешь» с нажатыми «Чёрные», «Уровень Гоко» 10k. «+» → 9k, «−» → 10k, «+» → 9k. «Начать» → статус «Ход 1, твой ход (чёрные)», подпись «Гоко 9k · Пленные: чёрные 0, белые 0».
 4. Тап на D4 → чёрный камень на D4 с меткой, через долю секунды белый ответ фейкового движка, статус «Ход 3, твой ход (чёрные)». Тап в занятый пункт → «точка занята» на 3 с; тап сразу после своего хода, пока думает движок, → «сейчас ход Гоко».
-5. «Отменить» → оба камня исчезают. «Пас», затем ещё «Пас» (фейковый движок пасует в ответ) → статус «Победа …: +N», на доске заливка территории.
+5. «Отменить» → оба камня исчезают. «Пас» → Гоко пасует в ответ (у фейкового движка `passAfterPass` по умолчанию), два паса подряд — автосчёт → статус «Победа …: +N». Второй «Пас» не нужен: партия уже окончена. Фейковый движок территорию не размечает (собственность только на камнях), заливки пустых пунктов нет, мёртвых камней нет.
 6. «Новая партия» → «Белые» → «Начать» → движок ходит первым, статус «Ход 2, твой ход (белые)». «Сдаться» → «Точно?» → второе касание → «Победа Гоко: сдача».
 7. «Чат» → кнопка «Микрофон» исчезает, внизу поле «Гоко подключается…» и выключенная «Отправить» (агента нет, `lk.agent.state` никто не выставил); доска и кнопки работают тапами. В консоли нет `[!] web: не удалось выставить goko.mode` — токен несёт `canUpdateOwnMetadata` (задача 5, шаг 1).
 8. Перезагрузка страницы → та же сессия (sessionStorage), состояние партии пришло первым событием; режим «Чат», «Белые» и 9k сохранились (localStorage).
 9. DevTools → Application → Local Storage → запретить или очистить хранилище сайта и перезагрузить → страница открывается с умолчаниями («Голос», «Чёрные», 10k), без ошибок в консоли.
-10. Остановить game-server (Ctrl+C) → статус-подпись «нет связи, переподключаюсь»; запустить снова → через 1–5 с новая сессия: SSE ответил `not_found`, страница создала сессию заново.
+10. Остановить game-server (Ctrl+C) → статус-подпись «нет связи, переподключаюсь»; запустить снова → не позже 15 с (паузы 1, 2, 4, 8, 15 с) новая сессия: SSE ответил `not_found`, страница создала сессию заново.
+Лимит партий на клиента (D-0012) здесь не проверяется: его добавляет задача 9, ручная проверка страницей — её шаг 10.
 
-«Повторить» здесь не проверяется: фейковый движок не исчерпывает повторы; механизм покрыт тестами `stream.test.ts`. В консоли браузера — без ошибок, кроме отказов на шаге 10. На телефоне у доски проверяет founder после деплоя (Task 10).
+«Повторить» здесь не проверяется: фейковый движок не исчерпывает повторы; механизм покрыт тестами `stream.test.ts`. Пауза до `Retry-After` тоже не проверяется руками: 60 запросов в минуту с одной страницы не набрать, поведение покрыто тестами `stream.test.ts` и `text.test.ts`. В консоли браузера — без ошибок, кроме отказов на шаге 10. На телефоне у доски проверяет founder после деплоя (задача 11).
 
-- [ ] **Step 6: Проверка режимов с агентом** (платно: Realtime; только по явной просьбе founder'а в текущей сессии, правило 5 `CLAUDE.md`)
+- [ ] **Step 6: Проверка режимов с агентом** (платно: Realtime; только по явной просьбе founder'а в текущей сессии, правило 5 `CLAUDE.md`; платный прогон 4 из 5, пункты 1–3 — одна сессия, одна вкладка)
 
 Run: `npm run dev` (запускает voice-agent `goko-dev`), открыть `http://127.0.0.1:5173`.
 Expected:
@@ -4741,16 +5702,970 @@ git commit -m "web: доска SVG, лента, статус с «Повтори
 
 ---
 
-### Task 9: Контейнеры game-server, go-engine, voice-agent; сервисы compose; деплой статики
+### Task 9: `game-server` — прежняя партия сессии брошена при смене, не больше трёх незавершённых партий на клиента, партии без сессии только по флагу (R9, D-0012)
+
+Блокер публичного деплоя (широкое ревью, R9). `APP_KEY` публичный (лежит в бандле), поэтому один адрес мог занять весь общий лимит 20 незавершённых партий, а `POST /api/games` создавал партии мимо `MAX_SESSIONS`. Отдельная задача, а не шаг задачи 5: правка затрагивает `packages/protocol`, сервис, хранилище снапшотов, приложение, запуск сервера, `smoke`, `dev`, D-0012 и разделы 5 и 7 спеки; у неё свой ревью и свой коммит, и она обязана лечь раньше compose (задача 10), где флаг выключен в prod. Задача 5 трогает `game-server` только правом токена — другая тема. Веб (задача 7), voice-agent (задача 2) и `scripts/chat.mjs` (задача 5) создают партии только через `POST /api/sessions/:sid/games` (`client.newGame`); `createGame` в коде плана не вызывается — проверка на шаге 9.
+
+**Files:**
+- Modify: `packages/protocol/src/human-text.ts`, `packages/protocol/src/human-text.test.ts`
+- Modify: `apps/game-server/src/service.ts`, `apps/game-server/src/service.test.ts`
+- Modify: `apps/game-server/src/store.ts`, `apps/game-server/src/store.test.ts`, `apps/game-server/src/test-helpers.ts`
+- Modify: `apps/game-server/src/app.ts`, `apps/game-server/src/app.test.ts`
+- Modify: `apps/game-server/src/start-server.ts`, `apps/game-server/src/start-server.test.ts`
+- Modify: `scripts/smoke.mjs`, `scripts/smoke.test.ts`, `scripts/dev.mjs`, `scripts/dev.test.ts`
+- Modify: `infra/.env.example`, `docs/decisions/0012-limits-rate-games-retention.md`, `docs/superpowers/specs/2026-09-07-goko-voice-go-opponent-design.md` (разделы 5 и 7)
+
+**Interfaces:**
+- Consumes: `clientKey(c, trustProxy)` из `app.ts` (ключ лимитера частоты: IPv4 целиком, IPv6 /64, IPv4-mapped → IPv4; `TRUST_PROXY=1` — последний адрес `X-Forwarded-For`); `GameService.create`, `init`, `resume`, `humanAction`, `close`, `isStale`, `pendingCreates`, `currentGameBySession`, `switchSessionGame`, `checkActiveLimit`, `log`; `errorDetail`; `GameStore` (`dir`, `fs`, `checkId`, `syncDir`), `memoryStore`; `ApiError`; `humanText`.
+- Produces: `GameStore.loadAbandoned(): Promise<string[]>`, `markAbandoned(id)`, `clearAbandoned(id)` (пустой файл `<dir>/<id>.abandoned`); `type AbandonMarks = Pick<GameStore, 'loadAbandoned' | 'markAbandoned' | 'clearAbandoned'>`; `GameServiceDeps.marks?: AbandonMarks` (без него отметка только в памяти); `memoryMarks(): MemoryMarks` в `test-helpers.ts` (`AbandonMarks & { ids: Set<string> }`); `MAX_GAMES_PER_CLIENT = 3`; `GameServiceDeps.maxGamesPerClient?: number`; `GameService.create(req, opts: { sessionId?: string; clientKey?: string })`; ошибка `429 too_many_games` с `details: { max, scope: 'client' }`; `AppDeps.sessionlessGames?: boolean`; `POST /api/games` без флага — `400 bad_request` с `details.reason: 'sessionless_disabled'`; env `ALLOW_SESSIONLESS_GAMES` (включает только `1`, пробелы по краям не мешают); `BadRequestReasonCode = 'not_your_seat' | 'sessionless_disabled'`; `TooManyGamesScope = 'client'`, `TOO_MANY_GAMES_SCOPE_TEXT`. Тексты: «партии создаются только внутри сессии», «у тебя слишком много незаконченных партий, новую можно начать позже».
+
+Брошенная партия. Незавершённая партия брошена в двух случаях: у неё нет активности дольше `STALE_GAME_MS` (как было) или в её сессии началась новая партия. Во втором случае сервис ставит отметку сразу, в памяти и на диске: пустой файл `<id>.abandoned` рядом со снапшотом. `load` его не читает (не `.json`), поэтому формат снапшота и протокол не меняются, а отметка переживает рестарт. Брошенная партия не считается ни в общем лимите 20, ни в лимите на клиента, и `init` не ставит ей задачу. Возврат человека снимает отметку: открытие потока партии (`resume`) или любое действие в ней (`humanAction`). Лимит при возврате не проверяется, потому что возврат партию не создаёт. Отметки пишутся по одной в порядке вызовов, `close` дожидается последней. Отказ записи даёт строку `[!]`, а отметка в памяти всё равно действует.
+
+Правила счёта (одинаковые у общего лимита 20 и лимита на клиента):
+- создаваемая партия уже в счёте;
+- завершённая и брошенная партия не в счёте;
+- к брошенной вернулись — она снова в счёте;
+- текущая партия сессии не мешает create в той же сессии: новая партия её заменит, и та станет брошенной.
+
+Так через сессии в счёте не больше `MAX_SESSIONS` партий, если не возвращаться к старым. Лимит 3 на клиента нужен режиму без сессий (dev, smoke) и держит возврат к брошенным партиям: иначе один адрес по кругу «новая партия → открыть поток старой» занял бы весь общий лимит 20. Партия сессии идёт в счёт владельца сессии — адреса, создавшего её через `POST /api/sessions`, а не адреса запроса: партии за телефон создаёт voice-agent из сети compose, и без этого все сессии делили бы один счёт контейнера. Общий лимит проверяется первым. Код не новый: `too_many_games` и `bad_request` уже в протоколе, различие — в `details`.
+
+- [ ] **Step 1: Тесты `humanText`**
+
+`packages/protocol/src/human-text.test.ts` — строку импорта заменить:
+
+```ts
+import { BAD_REQUEST_REASON_TEXT, CLIENT_ERROR_TEXT, ERROR_TEXT, ILLEGAL_REASON_TEXT, TOO_MANY_GAMES_SCOPE_TEXT, humanText } from './human-text.ts';
+```
+
+строку `expect(BAD_REQUEST_REASON_TEXT).toEqual({ not_your_seat: 'это не твой цвет' });` заменить:
+
+```ts
+    expect(BAD_REQUEST_REASON_TEXT).toEqual({ not_your_seat: 'это не твой цвет', sessionless_disabled: 'партии создаются только внутри сессии' });
+    expect(humanText('bad_request', { reason: 'sessionless_disabled' })).toBe('партии создаются только внутри сессии');
+```
+
+тест `'лимиты: частые запросы и слишком много партий'` заменить целиком:
+
+```ts
+  it('лимиты: частые запросы и слишком много партий; лимит на клиента — свой текст по details.scope', () => {
+    expect(humanText('rate_limited')).toBe('слишком много запросов, подожди немного');
+    expect(humanText('too_many_games')).toBe('сейчас идёт слишком много партий, попробуй позже');
+    expect(humanText('too_many_games', { max: 20 })).toBe(ERROR_TEXT.too_many_games);
+    expect(TOO_MANY_GAMES_SCOPE_TEXT).toEqual({ client: 'у тебя слишком много незаконченных партий, новую можно начать позже' });
+    expect(humanText('too_many_games', { max: 3, scope: 'client' })).toBe('у тебя слишком много незаконченных партий, новую можно начать позже');
+    // Своё свойство, а не прототип; scope у другого кода ничего не меняет.
+    expect(humanText('too_many_games', { scope: 'constructor' })).toBe(ERROR_TEXT.too_many_games);
+    expect(humanText('rate_limited', { scope: 'client' })).toBe(ERROR_TEXT.rate_limited);
+    expect(protocol.TOO_MANY_GAMES_SCOPE_TEXT).toBe(TOO_MANY_GAMES_SCOPE_TEXT);
+  });
+```
+
+- [ ] **Step 2: Тесты сервиса, хранилища и помощник отметок**
+
+`apps/game-server/src/service.test.ts` — в импорт из `./service.ts` добавить `MAX_GAMES_PER_CLIENT` (по алфавиту, после `MAX_ACTIVE_GAMES`); строку `import { type GuardedService, type MemoryStore, closeWithin, guardService, memoryStore, track } from './test-helpers.ts';` заменить на `import { type GuardedService, type MemoryStore, closeWithin, guardService, memoryMarks, memoryStore, track } from './test-helpers.ts';`. В `describe('GameService: лимит партий и старые снапшоты (B5)', ...)` сразу после теста `'незавершённая партия без активности дольше STALE_GAME_MS в лимите не считается; порог — последняя активность в момент create'` вставить:
+
+```ts
+  it('не больше MAX_GAMES_PER_CLIENT незавершённых партий на клиента: лишняя — too_many_games со scope client; другой клиент и create без клиента не в счёте; сдача освобождает место', async () => {
+    expect(MAX_GAMES_PER_CLIENT).toBe(3);
+    const { service } = await make(createFakeEngine());
+    const mine = { clientKey: '203.0.113.7' };
+    const first = await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, mine);
+    await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, mine);
+    await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, mine);
+    const refused = await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, { ...mine, sessionId: 's1' }).catch((e: unknown) => e);
+    expect(refused).toBeInstanceOf(ApiError);
+    expect(refused).toMatchObject({ code: 'too_many_games', status: 429, message: 'limit of 3 unfinished games per client reached', details: { max: 3, scope: 'client' } });
+    expect(service.list()).toHaveLength(3);
+    // Отказ не привязал партию к сессии и не сделал её текущей: её не было.
+    expect(service.internalSizes()).toMatchObject({ sessionsByGame: 0, currentGames: 0 });
+    await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, { clientKey: '203.0.113.8' });
+    await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false });
+    await service.resign(first.state.id, { color: 'B', via: 'api' });
+    await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, mine);
+    expect(service.list()).toHaveLength(6);
+  });
+
+  it('общий лимит проверяется раньше лимита на клиента: без scope', async () => {
+    const { service } = await make(createFakeEngine(), { maxActiveGames: 1, maxGamesPerClient: 1 });
+    await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, { clientKey: 'c1' });
+    const refused = await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, { clientKey: 'c1' }).catch((e: unknown) => e);
+    expect(refused).toMatchObject({ code: 'too_many_games', details: { max: 1 } });
+    expect((refused as ApiError).details).not.toHaveProperty('scope');
+  });
+
+  it('create клиента, ещё не записавший снапшот, уже в его счёте; отказ записи место освобождает', async () => {
+    const real = memoryStore();
+    let release: (() => void) | undefined;
+    let gated = 1;
+    const store = {
+      load: () => real.load(),
+      save: async (state: GameState) => {
+        if (gated-- > 0) {
+          await new Promise<void>((r) => (release = r));
+          throw new Error('disk full');
+        }
+        return real.save(state);
+      },
+    } as unknown as GameStore;
+    const { service } = await make(createFakeEngine(), { store, maxGamesPerClient: 1 });
+    const first = service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, { clientKey: 'c1' });
+    const firstFails = expect(first).rejects.toThrow('disk full');
+    await untilTick(() => release !== undefined);
+    await expect(service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, { clientKey: 'c1' })).rejects.toMatchObject({ code: 'too_many_games', details: { max: 1, scope: 'client' } });
+    // Другой клиент в это время создаёт: пишущийся create занимает место только своего клиента.
+    await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, { clientKey: 'c2' });
+    release?.();
+    await firstFails;
+    await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, { clientKey: 'c1' });
+    expect(service.list()).toHaveLength(2);
+  });
+
+  it('брошенная партия клиента в его счёте не идёт; ход в ней возвращает её в счёт', async () => {
+    let clock = NOW.getTime();
+    const { service } = await make(createFakeEngine(), { now: () => new Date(clock), maxGamesPerClient: 2 });
+    const old = await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, { clientKey: 'c1' });
+    await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, { clientKey: 'c1' });
+    await expect(service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, { clientKey: 'c1' })).rejects.toMatchObject({ code: 'too_many_games' });
+    clock += STALE_GAME_MS + 1;
+    await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, { clientKey: 'c1' });
+    await service.play(old.state.id, { coord: 'D4', waitForReply: true, via: 'api' });
+    await expect(service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, { clientKey: 'c1' })).rejects.toMatchObject({ code: 'too_many_games', details: { scope: 'client' } });
+    expect(service.list()).toHaveLength(3);
+  });
+
+  it('новая партия в сессии бросает прежнюю незавершённую: в общем лимите её нет, а текущая партия сессии не мешает своей замене', async () => {
+    const { service } = await make(createFakeEngine(), { maxActiveGames: 2 });
+    for (let i = 0; i < 4; i++) await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, { sessionId: 's1' });
+    await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false });
+    // В счёте текущая партия s1 и партия без сессии: лимит полон, в новой сессии партия не создаётся.
+    await expect(service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, { sessionId: 's2' })).rejects.toMatchObject({ code: 'too_many_games', details: { max: 2 } });
+    // Новая партия s1 заменит текущую, и та станет брошенной: create проходит и при полном лимите.
+    await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, { sessionId: 's1' });
+    expect(service.list()).toHaveLength(6);
+  });
+
+  it('брошенная сменой партия не в счёте клиента; текущие партии других сессий того же клиента — в счёте', async () => {
+    const { service } = await make(createFakeEngine(), { maxGamesPerClient: 2 });
+    for (let i = 0; i < 3; i++) await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, { sessionId: 's1', clientKey: 'c1' });
+    await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, { sessionId: 's2', clientKey: 'c1' });
+    await expect(service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, { sessionId: 's3', clientKey: 'c1' })).rejects.toMatchObject({ code: 'too_many_games', details: { max: 2, scope: 'client' } });
+    await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, { sessionId: 's2', clientKey: 'c1' });
+    expect(service.list()).toHaveLength(5);
+  });
+
+  it('возврат к брошенной сменой партии — ход в ней или открытие её потока (resume) — возвращает её в счёт без проверки лимита', async () => {
+    const { service } = await make(createFakeEngine(), { maxActiveGames: 2 });
+    const create = () => service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false });
+    const a = (await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, { sessionId: 's1' })).state.id;
+    const b = (await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, { sessionId: 's1' })).state.id;
+    await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, { sessionId: 's1' });
+    // a и b брошены, в счёте одна текущая. Ход в a возвращает её: с текущей лимит 2 полон.
+    await service.play(a, { coord: 'D4', waitForReply: false, via: 'api' });
+    await expect(create()).rejects.toMatchObject({ code: 'too_many_games', details: { max: 2 } });
+    // Поток b возвращает и её, лимит при этом не проверяется: в счёте три при лимите 2.
+    service.resume(b);
+    await service.resign(a, { color: 'B', via: 'api' });
+    await expect(create()).rejects.toMatchObject({ code: 'too_many_games' });
+    await service.resign(b, { color: 'B', via: 'api' });
+    await create();
+    expect(service.list()).toHaveLength(4);
+  });
+
+  it('отметка брошенной сменой партии переживает рестарт: после init партия не в лимите и без задачи; возврат снимает отметку, ставит задачу и возвращает партию в счёт', async () => {
+    const store = memoryStore();
+    const marks = memoryMarks();
+    // Первый запуск: движок не отвечает, пока задачу не отменят.
+    const silent: Engine = {
+      ...createFakeEngine(),
+      genmove: (_req, signal) => new Promise<never>((_, reject) => signal?.addEventListener('abort', () => reject(new Error('aborted')), { once: true })),
+    };
+    const first = await make(silent, { store, marks });
+    const a = (await first.service.create({ ...HUMAN_BLACK, ...S9, waitForReply: false }, { sessionId: 's1' })).state.id;
+    await first.service.play(a, { coord: 'D4', waitForReply: false, via: 'voice' });
+    // Сданная партия при смене не отмечается: она завершена, а не брошена.
+    const done = (await first.service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, { sessionId: 's2' })).state.id;
+    await first.service.resign(done, { color: 'B', via: 'api' });
+    await first.service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, { sessionId: 's2' });
+    // Новая партия s1: раздумье в a отменено, a брошена.
+    await first.service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, { sessionId: 's1' });
+    await first.service.close();
+    expect([...marks.ids]).toEqual([a]);
+
+    const engine = createFakeEngine({ script: ['E5'] });
+    const second = await make(engine, { store, marks, maxActiveGames: 3 });
+    const create = () => second.service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false });
+    await tick(20);
+    expect(engine.calls).toMatchObject({ genmove: 0 });
+    expect(second.service.get(a)).toMatchObject({ status: 'playing', pendingEngineMove: true });
+    // В счёте две текущие партии сессий; будь a в счёте, лимит 3 был бы уже полон.
+    const extra = await create();
+    second.service.resume(a);
+    await untilTick(() => second.service.get(a).moves.length === 2);
+    await untilTick(() => marks.ids.size === 0);
+    await second.service.resign(extra.state.id, { color: 'B', via: 'api' });
+    // a снова в счёте: с двумя текущими партиями сессий лимит 3 полон.
+    await expect(create()).rejects.toMatchObject({ code: 'too_many_games', details: { max: 3 } });
+  });
+
+  it('отказ записи отметки — строка [!] в лог; в памяти партия всё равно брошена', async () => {
+    const logs: string[] = [];
+    const marks = {
+      ...memoryMarks(),
+      markAbandoned: async () => {
+        throw new Error('disk full');
+      },
+    };
+    const { service } = await make(createFakeEngine(), { marks, maxActiveGames: 2, log: (line: string) => logs.push(line) });
+    const a = (await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, { sessionId: 's1' })).state.id;
+    await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, { sessionId: 's1' });
+    await untilTick(() => logs.length > 0);
+    expect(logs).toEqual([`[!] could not mark game ${a} as abandoned: disk full`]);
+    // a не в счёте: в новой сессии место есть.
+    await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false }, { sessionId: 's2' });
+    expect(service.list()).toHaveLength(3);
+  });
+```
+
+`apps/game-server/src/store.test.ts` — в `describe('GameStore', ...)` после теста `'файлы не .json игнорируются'` вставить:
+
+```ts
+  it('отметки брошенных партий: пустой <id>.abandoned рядом со снапшотом; load их не читает; повтор и снятие отсутствующей — не ошибка; id проверяется', async () => {
+    const store = new GameStore(dir);
+    await store.init();
+    await store.save(state());
+    await store.markAbandoned('g1');
+    await store.markAbandoned('g1');
+    expect((await readdir(dir)).sort()).toEqual(['g1.abandoned', 'g1.json']);
+    expect(await readFile(path.join(dir, 'g1.abandoned'), 'utf8')).toBe('');
+    // Имя не по форме id — не отметка.
+    await writeFile(path.join(dir, 'NOT-SAFE.abandoned'), '', 'utf8');
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    expect((await store.load()).map((g) => g.id)).toEqual(['g1']);
+    expect(console.error).not.toHaveBeenCalled();
+    expect(await new GameStore(dir).loadAbandoned()).toEqual(['g1']);
+    await store.clearAbandoned('g1');
+    await store.clearAbandoned('g1');
+    expect(await store.loadAbandoned()).toEqual([]);
+    await expect(store.markAbandoned('../x')).rejects.toMatchObject({ code: 'bad_request' });
+    await expect(store.clearAbandoned('../x')).rejects.toMatchObject({ code: 'bad_request' });
+    expect(await new GameStore(path.join(dir, 'fresh')).loadAbandoned()).toEqual([]);
+  });
+```
+
+`apps/game-server/src/test-helpers.ts` — строку `import type { SnapshotStore } from './store.ts';` заменить на `import type { AbandonMarks, SnapshotStore } from './store.ts';`; после функции `memoryStore` добавить:
+
+```ts
+// Отметки брошенных партий в памяти вместо файлов <id>.abandoned: ids — отмеченные сейчас, их увидит init
+// следующего сервиса на тех же отметках (рестарт).
+export type MemoryMarks = AbandonMarks & { ids: Set<string> };
+
+export function memoryMarks(): MemoryMarks {
+  const ids = new Set<string>();
+  return {
+    ids,
+    loadAbandoned: async () => [...ids].sort(),
+    markAbandoned: async (id: string) => {
+      ids.add(id);
+    },
+    clearAbandoned: async (id: string) => {
+      ids.delete(id);
+    },
+  };
+}
+```
+
+Прежние тесты сервиса проходят и после шага 7: отметка меняет только счёт лимитов и задачи `init`, а тесты смены партии в сессии (B2) лимитов не касаются, и их возврат через `resume` отметку снимает.
+
+- [ ] **Step 3: Тесты приложения**
+
+`apps/game-server/src/app.test.ts` — в `type MakeOptions` после `trustProxy?: boolean;` добавить:
+
+```ts
+  maxGamesPerClient?: number;
+  sessionlessGames?: boolean;
+```
+
+в `make` строку `const service = new GameService({ store, engine: opts.engine ?? engine, bus, replyTimeoutMs: 500 });` заменить:
+
+```ts
+  // Лимит на клиента по умолчанию высокий, а партии без сессии включены: прежние тесты создают партии
+  // клиентом протокола без адреса сокета (общий ключ unknown) и через POST /api/games. Новые тесты задают оба явно.
+  const service = new GameService({ store, engine: opts.engine ?? engine, bus, replyTimeoutMs: 500, maxGamesPerClient: opts.maxGamesPerClient ?? 1000 });
+```
+
+в вызове `createApp` после `trustProxy: opts.trustProxy,` добавить `sessionlessGames: opts.sessionlessGames ?? true,`.
+
+В конец файла:
+
+```ts
+describe('createApp: партии только в сессии и не больше трёх незавершённых на клиента (D-0012)', () => {
+  const H = { 'x-app-key': KEY, 'content-type': 'application/json' };
+  const from = (remoteAddress: string) => ({ incoming: { socket: { remoteAddress } } });
+  type App = Awaited<ReturnType<typeof make>>['app'];
+  type ErrorJson = { error: { code: string; message: string; details?: Record<string, unknown> } };
+  const post = (app: App, path: string, address: string, body?: unknown) =>
+    app.request(path, { method: 'POST', headers: H, ...(body ? { body: JSON.stringify(body) } : {}) }, from(address));
+  const sessionOf = async (app: App, address: string): Promise<string> => {
+    const res = await post(app, '/api/sessions', address);
+    expect(res.status).toBe(200);
+    return ((await res.json()) as { session: { id: string } }).session.id;
+  };
+  const gameIn = async (app: App, sid: string, address: string): Promise<string> => {
+    const res = await post(app, `/api/sessions/${sid}/games`, address, HUMAN_ONLY);
+    expect(res.status).toBe(200);
+    return ((await res.json()) as { state: { id: string } }).state.id;
+  };
+
+  it('новая партия в сессии бросает прежнюю: «Новая партия» подряд не упирается в лимит; ходы в брошенных возвращают их в счёт, и лишний create — 429 со scope client и своим текстом; сдача освобождает место', async () => {
+    const { app } = await make({ maxGamesPerClient: 2, ttlMs: 60 * MIN });
+    const sid = await sessionOf(app, '203.0.113.7');
+    const ids: string[] = [];
+    for (let i = 0; i < 4; i++) ids.push(await gameIn(app, sid, '203.0.113.7'));
+    // Возврат к брошенной партии лимит не проверяет: обе в счёте вместе с текущей, это три при лимите 2.
+    expect((await post(app, `/api/games/${ids[0]}/play`, '203.0.113.7', { coord: 'D4' })).status).toBe(200);
+    expect((await post(app, `/api/games/${ids[1]}/play`, '203.0.113.7', { coord: 'D4' })).status).toBe(200);
+    const refused = await post(app, `/api/sessions/${sid}/games`, '203.0.113.7', HUMAN_ONLY);
+    expect(refused.status).toBe(429);
+    const body = (await refused.json()) as ErrorJson;
+    expect(body.error).toEqual({ code: 'too_many_games', message: 'limit of 2 unfinished games per client reached', details: { max: 2, scope: 'client' } });
+    expect(humanText(body.error.code, body.error.details)).toBe('у тебя слишком много незаконченных партий, новую можно начать позже');
+    const other = await sessionOf(app, '203.0.113.8');
+    await gameIn(app, other, '203.0.113.8');
+    expect((await post(app, `/api/games/${ids[0]}/resign`, '203.0.113.7', { color: 'B' })).status).toBe(200);
+    await gameIn(app, sid, '203.0.113.7');
+  });
+
+  it('партии сессии идут в счёт владельца сессии, даже когда их создаёт voice-agent со своего адреса', async () => {
+    const { app } = await make({ maxGamesPerClient: 1, ttlMs: 60 * MIN });
+    const agent = '172.18.0.5'; // адрес контейнера voice-agent в сети compose: мимо Caddy, без X-Forwarded-For
+    const sid = await sessionOf(app, '198.51.100.20');
+    const first = await gameIn(app, sid, agent);
+    // Замена текущей партии сессии проходит и при лимите 1.
+    await gameIn(app, sid, '198.51.100.20');
+    // Ход агента в первой партии возвращает её в счёт владельца.
+    expect((await post(app, `/api/games/${first}/play`, agent, { coord: 'D4' })).status).toBe(200);
+    const refused = await post(app, `/api/sessions/${sid}/games`, agent, HUMAN_ONLY);
+    expect(refused.status).toBe(429);
+    expect(((await refused.json()) as ErrorJson).error.details).toEqual({ max: 1, scope: 'client' });
+    // Сессия другого телефона — свой счёт, хотя партии создаёт тот же агент.
+    const other = await sessionOf(app, '198.51.100.21');
+    await gameIn(app, other, agent);
+  });
+
+  it('владелец сессии за Caddy — последний адрес X-Forwarded-For при её создании', async () => {
+    const { app } = await make({ trustProxy: true, maxGamesPerClient: 1, ttlMs: 60 * MIN });
+    const viaProxy = (path: string, xff: string, body?: unknown) =>
+      app.request(path, { method: 'POST', headers: { ...H, 'x-forwarded-for': xff }, ...(body ? { body: JSON.stringify(body) } : {}) }, from('127.0.0.1'));
+    const a = ((await (await viaProxy('/api/sessions', '6.6.6.6, 203.0.113.60')).json()) as { session: { id: string } }).session.id;
+    const b = ((await (await viaProxy('/api/sessions', '6.6.6.6, 203.0.113.61')).json()) as { session: { id: string } }).session.id;
+    const g1 = await gameIn(app, a, '172.18.0.5');
+    await gameIn(app, a, '172.18.0.5');
+    expect((await post(app, `/api/games/${g1}/play`, '172.18.0.5', { coord: 'D4' })).status).toBe(200);
+    expect((await post(app, `/api/sessions/${a}/games`, '172.18.0.5', HUMAN_ONLY)).status).toBe(429);
+    // Владелец b — 203.0.113.61; по первому адресу X-Forwarded-For обе сессии делили бы счёт 6.6.6.6.
+    await gameIn(app, b, '172.18.0.5');
+  });
+
+  it('без sessionlessGames POST /api/games — 400 bad_request с reason sessionless_disabled до разбора тела; партия в сессии и чтение списка работают', async () => {
+    const { app, service } = await make({ sessionlessGames: false });
+    const res = await post(app, '/api/games', '192.0.2.40', HUMAN_ONLY);
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as ErrorJson;
+    expect(body).toEqual({ error: { code: 'bad_request', message: 'games are created only inside a session', details: { reason: 'sessionless_disabled' } } });
+    expect(humanText(body.error.code, body.error.details)).toBe('партии создаются только внутри сессии');
+    // Тело не разбирается: мусор получает тот же ответ, а не ошибку схемы.
+    expect(await (await app.request('/api/games', { method: 'POST', headers: H, body: 'not json' }, from('192.0.2.40'))).json()).toEqual(body);
+    expect(service.list()).toHaveLength(0);
+    const sid = await sessionOf(app, '192.0.2.40');
+    expect((await post(app, `/api/sessions/${sid}/games`, '192.0.2.40', HUMAN_ONLY)).status).toBe(200);
+    expect((await app.request('/api/games', { headers: H }, from('192.0.2.40'))).status).toBe(200);
+  });
+
+  it('с sessionlessGames POST /api/games создаёт партию, и она в счёте адреса; IPv6 одной /64 — один клиент', async () => {
+    const { app } = await make({ sessionlessGames: true, maxGamesPerClient: 1 });
+    expect((await post(app, '/api/games', '192.0.2.41', HUMAN_ONLY)).status).toBe(200);
+    expect((await post(app, '/api/games', '192.0.2.41', HUMAN_ONLY)).status).toBe(429);
+    expect((await post(app, '/api/games', '192.0.2.42', HUMAN_ONLY)).status).toBe(200);
+    expect((await post(app, '/api/games', '2001:db8:5:6::1', HUMAN_ONLY)).status).toBe(200);
+    expect((await post(app, '/api/games', '2001:db8:5:6::2', HUMAN_ONLY)).status).toBe(429);
+  });
+});
+```
+
+- [ ] **Step 4: Тест запуска сервера**
+
+`apps/game-server/src/start-server.test.ts` — в `harness` строку `env: { ...BASE_ENV, DATA_DIR: dir },` заменить на `env: { ...BASE_ENV, DATA_DIR: dir, ALLOW_SESSIONLESS_GAMES: '1' },` (тесты остановки создают партии через `POST /api/games`). Перед тестом `'FAKE_ENGINE=1: фейковый движок, ENGINE_KEY не нужен, строка [!]; иначе клиент go-engine с ENGINE_URL и ENGINE_KEY'` вставить:
+
+```ts
+  it('ALLOW_SESSIONLESS_GAMES=1 (и 1 с пробелами) разрешает POST /api/games; без него, пустой, из пробелов или другой — 400 sessionless_disabled; партия в сессии создаётся всегда', async () => {
+    say();
+    const headers = { 'x-app-key': BASE_ENV.APP_KEY, 'content-type': 'application/json' };
+    const body = JSON.stringify({ black: { controller: 'human' }, white: { controller: 'human' }, settings: { boardSize: 9 } });
+    for (const [value, allowed] of [['1', true], [' 1 ', true], [undefined, false], ['', false], ['   ', false], ['0', false], ['true', false], ['11', false]] as const) {
+      const { deps } = harness();
+      const started = await startServer({ ...deps, env: { ...deps.env, ALLOW_SESSIONLESS_GAMES: value } });
+      if (!started) throw new Error('сервер не запустился');
+      const res = await started.app.request('/api/games', { method: 'POST', headers, body });
+      expect(res.status, `ALLOW_SESSIONLESS_GAMES=${value}`).toBe(allowed ? 200 : 400);
+      if (!allowed) expect(((await res.json()) as { error: { details?: unknown } }).error.details).toEqual({ reason: 'sessionless_disabled' });
+      const created = await started.app.request('/api/sessions', { method: 'POST', headers });
+      const { session } = (await created.json()) as { session: { id: string } };
+      expect((await started.app.request(`/api/sessions/${session.id}/games`, { method: 'POST', headers, body })).status).toBe(200);
+    }
+  });
+```
+
+в тесте `'значения из env: порт, хост, агент, каталог данных, лимит; сессии истекают по SESSION_TTL_MS'` после строки `expect(rec.serviceDeps[0]?.store.dir).toBe(dir);` добавить:
+
+```ts
+    // Отметки брошенных партий лежат в том же каталоге, что и снапшоты (D-0012).
+    expect(rec.serviceDeps[0]?.marks).toBe(rec.serviceDeps[0]?.store);
+```
+
+- [ ] **Step 5: Тесты `smoke` и `dev`**
+
+`scripts/smoke.test.ts` — в тесте `'свои ключ, порт, каталог и фейковый движок; чужие пределы сессий не протекают'` строку `expect(env).toMatchObject({ APP_KEY: SMOKE_APP_KEY, PORT: '18787', HOST: '127.0.0.1', DATA_DIR: '/tmp/x', FAKE_ENGINE: '1' });` заменить:
+
+```ts
+    expect(env).toMatchObject({ APP_KEY: SMOKE_APP_KEY, PORT: '18787', HOST: '127.0.0.1', DATA_DIR: '/tmp/x', FAKE_ENGINE: '1', ALLOW_SESSIONLESS_GAMES: '1' });
+    // smoke создаёт партии через POST /api/games: флаг свой, значение родителя не протекает.
+    expect(gameServerEnv({ ALLOW_SESSIONLESS_GAMES: '0' }, { port: 1, dataDir: '/tmp/x', real: true }).ALLOW_SESSIONLESS_GAMES).toBe('1');
+```
+
+`scripts/dev.test.ts` — в первом тесте `toMatchObject({ FAKE_ENGINE: '1', AGENT_NAME: DEV_AGENT_NAME, LIVEKIT_URL: 'wss://secret-livekit' })` дополнить полем `ALLOW_SESSIONLESS_GAMES: '1'`; во втором `toMatchObject({ ENGINE_KEY: 'one-time', ENGINE_URL: 'http://127.0.0.1:8788', AGENT_NAME: DEV_AGENT_NAME })` — тоже `ALLOW_SESSIONLESS_GAMES: '1'`.
+
+- [ ] **Step 6: Запустить тесты, убедиться, что падают**
+
+Run: `npx vitest run packages/protocol/src/human-text.test.ts apps/game-server/src/service.test.ts apps/game-server/src/store.test.ts apps/game-server/src/app.test.ts apps/game-server/src/start-server.test.ts scripts/smoke.test.ts scripts/dev.test.ts`
+Expected: FAIL — нет `TOO_MANY_GAMES_SCOPE_TEXT`, `MAX_GAMES_PER_CLIENT` и `GameStore.loadAbandoned`; новые тесты лимита на клиента и флага падают (лишняя партия создаётся, `POST /api/games` отвечает 200); тесты смены партии, возврата и рестарта падают (брошенная сменой партия в счёте, отметок нет, `marks` не передан в сервис); `ALLOW_SESSIONLESS_GAMES` нет в окружении `smoke` и `dev`. Прежние тесты `app.test.ts`, `store.test.ts` и `start-server.test.ts` проходят.
+
+- [ ] **Step 7: Код**
+
+`packages/protocol/src/human-text.ts` — блок от `export type BadRequestReasonCode = 'not_your_seat';` до конца `BAD_REQUEST_REASON_TEXT` заменить:
+
+```ts
+export type BadRequestReasonCode = 'not_your_seat' | 'sessionless_disabled';
+
+// Причины bad_request, у которых есть своя фраза: сдача за цвет, которым человек не управляет, и партия
+// без сессии там, где такие выключены (D-0012).
+export const BAD_REQUEST_REASON_TEXT: Record<BadRequestReasonCode, string> = {
+  not_your_seat: 'это не твой цвет',
+  sessionless_disabled: 'партии создаются только внутри сессии',
+};
+
+export type TooManyGamesScope = 'client';
+
+// too_many_games без scope — общий лимит сервера; scope client — лимит незавершённых партий на адрес (D-0012).
+// Старые партии с телефона не открыть, поэтому текст не зовёт их доигрывать.
+export const TOO_MANY_GAMES_SCOPE_TEXT: Record<TooManyGamesScope, string> = {
+  client: 'у тебя слишком много незаконченных партий, новую можно начать позже',
+};
+```
+
+в `humanText` после строки с `BAD_REQUEST_REASON_TEXT` добавить:
+
+```ts
+  if (code === 'too_many_games' && own(TOO_MANY_GAMES_SCOPE_TEXT, details?.scope)) return TOO_MANY_GAMES_SCOPE_TEXT[details.scope];
+```
+
+`apps/game-server/src/store.ts`:
+
+после функции `checkId` добавить:
+
+```ts
+// Отметка брошенной сменой партии (D-0012): пустой файл рядом со снапшотом. load его не читает (не .json),
+// поэтому формат снапшота не меняется, а отметка переживает рестарт.
+const ABANDONED_SUFFIX = '.abandoned';
+```
+
+строку `export type SnapshotStore = Pick<GameStore, 'dir' | 'init' | 'load' | 'save' | 'remove'>;` заменить:
+
+```ts
+export type SnapshotStore = Pick<GameStore, 'dir' | 'init' | 'load' | 'save' | 'remove'>;
+// Отметки брошенных партий: отдельный необязательный шов сервиса, подделка в памяти — memoryMarks.
+export type AbandonMarks = Pick<GameStore, 'loadAbandoned' | 'markAbandoned' | 'clearAbandoned'>;
+```
+
+после метода `remove` добавить:
+
+```ts
+  // id партий с отметкой <id>.abandoned; имя не по форме id пропускается, как чужой файл.
+  async loadAbandoned(): Promise<string[]> {
+    await this.init();
+    return (await readdir(this.dir))
+      .filter((name) => name.endsWith(ABANDONED_SUFFIX))
+      .map((name) => name.slice(0, -ABANDONED_SUFFIX.length))
+      .filter(isSafeId)
+      .sort();
+  }
+
+  // Пустой файл долговечно, как снапшот: sync файла и каталога. Повтор — не ошибка.
+  async markAbandoned(id: string): Promise<void> {
+    checkId(id);
+    const handle = await this.fs.open(path.join(this.dir, `${id}${ABANDONED_SUFFIX}`), 'w');
+    try {
+      await handle.sync();
+    } catch (e) {
+      await handle.close().catch(() => undefined);
+      throw e;
+    }
+    await handle.close();
+    await this.syncDir();
+  }
+
+  // Снятие отметки: к партии вернулись или она уже не идёт. Отсутствующий файл — не ошибка.
+  async clearAbandoned(id: string): Promise<void> {
+    checkId(id);
+    try {
+      await this.fs.unlink(path.join(this.dir, `${id}${ABANDONED_SUFFIX}`));
+    } catch (e) {
+      if ((e as { code?: unknown }).code !== 'ENOENT') throw e;
+      return;
+    }
+    await this.syncDir();
+  }
+```
+
+`apps/game-server/src/service.ts`:
+
+строку `import type { SnapshotStore } from './store.ts';` заменить на `import type { AbandonMarks, SnapshotStore } from './store.ts';`.
+
+в `GameServiceDeps` после `store: SnapshotStore;` добавить:
+
+```ts
+  // Отметки брошенных сменой партий на диске (D-0012); без них отметка живёт только в памяти.
+  marks?: AbandonMarks;
+```
+
+после поля `gaveUp` добавить:
+
+```ts
+  // Партии, брошенные сменой партии в сессии (D-0012): не в лимитах и без задачи init, как устаревшие.
+  // Возврат человека (resume, humanAction) снимает отметку. Записи на диск идут цепочкой, close её ждёт.
+  private readonly abandoned = new Set<string>();
+  private marksWrite: Promise<void> = Promise.resolve();
+```
+
+в `init` строки
+
+```ts
+    // Устаревшей партии задача не ставится (D-0012): после рестарта движок не доигрывает брошенные партии.
+    // Она отмечена, как отменённая, и её снова запустит действие человека или открытие потока (resume).
+```
+
+заменить:
+
+```ts
+    // Отметка идущей партии действует; отметка завершённой или удалённой партии — остаток, её снимаем.
+    for (const id of (await this.deps.marks?.loadAbandoned()) ?? []) {
+      if (this.games.get(id)?.status === 'playing') this.abandoned.add(id);
+      else this.persistMark(id, false);
+    }
+    // Устаревшей или брошенной сменой партии задача не ставится (D-0012): после рестарта движок не доигрывает
+    // брошенные партии. Она отмечена, как отменённая, и её снова запустит действие человека или открытие потока (resume).
+```
+
+в `close` после строки `await Promise.allSettled([...this.engineTasks.values(), ...this.scoringTasks.values()]);` добавить `await this.marksWrite;`.
+
+в `resume` перед строкой `if (!this.gaveUp.delete(id)) return;` добавить `this.reactivate(id);`; в `humanAction` перед строкой `const resumed = human && this.gaveUp.delete(id);` добавить `if (human) this.reactivate(id);`.
+
+строку `if (this.sessionsByGame.get(previous) === sessionId) this.sessionsByGame.delete(previous);` в `switchSessionGame` оставить, а после `this.cancelBackground(previous);` добавить `this.abandon(previous);`.
+
+метод `isStale` заменить:
+
+```ts
+  // Не в счёте лимитов и без задачи init: без активности дольше порога или брошена сменой партии (D-0012).
+  private isStale(state: GameState, now: number): boolean {
+    return this.abandoned.has(state.id) || lastActivity(state) < now - (this.deps.staleGameMs ?? STALE_GAME_MS);
+  }
+
+  // Прежняя идущая партия сессии брошена: отметка в памяти сразу, на диск — в очередь записей.
+  private abandon(id: string): void {
+    if (this.games.get(id)?.status !== 'playing' || this.abandoned.has(id)) return;
+    this.abandoned.add(id);
+    this.persistMark(id, true);
+  }
+
+  // Человек вернулся к брошенной партии: она снова в счёте. Лимит не проверяется — партия не создаётся.
+  private reactivate(id: string): void {
+    if (this.abandoned.delete(id)) this.persistMark(id, false);
+  }
+
+  // Отказ записи — строка [!], память уже верна. После рестарта незаписанная отметка значит, что партия
+  // в счёте и получит задачу, как свежая; неснятая — что партия вне счёта до следующего возврата.
+  private persistMark(id: string, abandoned: boolean): void {
+    const marks = this.deps.marks;
+    if (!marks) return;
+    this.marksWrite = this.marksWrite.then(async () => {
+      try {
+        await (abandoned ? marks.markAbandoned(id) : marks.clearAbandoned(id));
+      } catch (e) {
+        this.log(`[!] could not ${abandoned ? 'mark' : 'unmark'} game ${id} as abandoned: ${errorDetail(e)}`);
+      }
+    });
+  }
+```
+
+метод `checkActiveLimit` заменить:
+
+```ts
+  // Лимит незавершённых партий (D-0012). Партия, чей create ещё пишет снапшот, уже занимает место;
+  // устаревшая (без активности дольше порога на момент create) и брошенная сменой — нет. replaced — текущая
+  // партия сессии, в которой идёт create: новая партия её заменит, поэтому своей замене она не мешает.
+  private checkActiveLimit(replaced?: string): void {
+    const max = this.deps.maxActiveGames ?? MAX_ACTIVE_GAMES;
+    const now = (this.deps.now?.() ?? new Date()).getTime();
+    let active = 0;
+    for (const state of this.games.values()) if (state.id !== replaced && state.status !== 'finished' && !this.isStale(state, now)) active++;
+    for (const id of this.pendingCreates) if (!this.games.has(id)) active++;
+    if (active >= max) throw new ApiError('too_many_games', `limit of ${max} unfinished games reached`, { max });
+  }
+```
+
+после `export const MAX_ACTIVE_GAMES = 20;` добавить:
+
+```ts
+// Не больше стольких незавершённых партий на клиента (D-0012): ключ — тот же, что у лимита частоты
+// (IPv4, IPv6 /64); у партии сессии — ключ владельца сессии. Лишний create — too_many_games со scope client.
+export const MAX_GAMES_PER_CLIENT = 3;
+```
+
+в `GameServiceDeps` после `maxActiveGames?: number;` добавить `maxGamesPerClient?: number;`.
+
+после поля `pendingCreates` добавить:
+
+```ts
+  // Клиент, в чей счёт идёт партия (ключ из app.ts). Только память: после рестарта партии, созданные до него,
+  // в счёт клиента не идут, в общем лимите — идут. Записи завершённых партий вычищает checkClientLimit.
+  private readonly clientByGame = new Map<string, string>();
+```
+
+сигнатуру `async create(req: NewGameInput, opts: { sessionId?: string } = {}): Promise<NewGameResponse> {` заменить на `async create(req: NewGameInput, opts: { sessionId?: string; clientKey?: string } = {}): Promise<NewGameResponse> {`; строку `this.checkActiveLimit();` в `create` заменить:
+
+```ts
+    const replaced = opts.sessionId === undefined ? undefined : this.currentGameBySession.get(opts.sessionId);
+    this.checkActiveLimit(replaced);
+    if (opts.clientKey !== undefined) this.checkClientLimit(opts.clientKey, replaced);
+```
+
+строку `this.pendingCreates.add(id);` заменить (проверка и запись — в одном синхронном отрезке: параллельный create того же клиента уже видит эту партию):
+
+```ts
+    this.pendingCreates.add(id);
+    if (opts.clientKey !== undefined) this.clientByGame.set(id, opts.clientKey);
+```
+
+в `catch` этого же `create` после `this.sessionsByGame.delete(id);` добавить `this.clientByGame.delete(id);`.
+
+после метода `checkActiveLimit` добавить:
+
+```ts
+  // Лимит незавершённых партий на клиента (D-0012), счёт как у общего: создаваемая уже в счёте, завершённая,
+  // устаревшая и брошенная сменой — нет, заменяемая текущая партия сессии — тоже нет. Брошенная не вычищается:
+  // возврат к ней вернёт её в счёт.
+  private checkClientLimit(clientKey: string, replaced?: string): void {
+    const max = this.deps.maxGamesPerClient ?? MAX_GAMES_PER_CLIENT;
+    const now = (this.deps.now?.() ?? new Date()).getTime();
+    let active = 0;
+    for (const [id, key] of this.clientByGame) {
+      const state = this.games.get(id);
+      if (state?.status === 'finished') {
+        this.clientByGame.delete(id);
+        continue;
+      }
+      if (key !== clientKey || id === replaced) continue;
+      if (state ? !this.isStale(state, now) : this.pendingCreates.has(id)) active++;
+    }
+    if (active >= max) throw new ApiError('too_many_games', `limit of ${max} unfinished games per client reached`, { max, scope: 'client' });
+  }
+```
+
+`apps/game-server/src/app.ts`:
+
+в `AppDeps` после `trustProxy?: boolean;` добавить:
+
+```ts
+  // ALLOW_SESSIONLESS_GAMES=1: POST /api/games создаёт партию без сессии (dev, smoke). Без флага партии создаются
+  // только внутри сессии (D-0012): публичный APP_KEY иначе давал бы партии мимо MAX_SESSIONS.
+  sessionlessGames?: boolean;
+```
+
+строку `const watchers = new Map<string, () => void>();` заменить:
+
+```ts
+  const watchers = new Map<string, () => void>();
+  // Владелец сессии — ключ адреса, создавшего её (D-0012): партии сессии идут в его счёт, даже когда их
+  // создаёт voice-agent со своего адреса. Запись живёт, пока жив наблюдатель сессии.
+  const sessionOwners = new Map<string, string>();
+```
+
+в `unwatch` после `watchers.delete(sid);` добавить `sessionOwners.delete(sid);`.
+
+в `POST /api/sessions` строку `watch(session.id);` заменить:
+
+```ts
+    sessionOwners.set(session.id, clientKey(c, trustProxy));
+    watch(session.id);
+```
+
+в `POST /api/sessions/:sid/games` строку `return c.json(await service.create(req, { sessionId: sid }));` заменить:
+
+```ts
+    // Сессия, созданная до рестарта или другим путём, владельца не имеет: счёт по адресу запроса.
+    return c.json(await service.create(req, { sessionId: sid, clientKey: sessionOwners.get(sid) ?? clientKey(c, trustProxy) }));
+```
+
+строку `app.post('/api/games', async (c) => c.json(await service.create(await parseBody(c, NewGameRequest))));` заменить:
+
+```ts
+  app.post('/api/games', async (c) => {
+    if (deps.sessionlessGames !== true) throw new ApiError('bad_request', 'games are created only inside a session', { reason: 'sessionless_disabled' });
+    return c.json(await service.create(await parseBody(c, NewGameRequest), { clientKey: clientKey(c, trustProxy) }));
+  });
+```
+
+`apps/game-server/src/start-server.ts`: в `type Config` после `trustProxy: boolean;` добавить `sessionlessGames: boolean;`; в `readConfig` после строки `trustProxy: optional('TRUST_PROXY')?.trim() === '1',` добавить:
+
+```ts
+      // POST /api/games без сессии — только dev и smoke (D-0012); в prod compose переменной нет.
+      sessionlessGames: optional('ALLOW_SESSIONLESS_GAMES')?.trim() === '1',
+```
+
+в вызове `createApp` после `trustProxy: config.trustProxy,` добавить `sessionlessGames: config.sessionlessGames,`. Строки в лог нет: тесты запуска сверяют лог целиком, а выключенный флаг в prod проверяет задача 10 (шаг 8). Строку `const service = createService({ store: new GameStore(config.dataDir), engine, bus, staleGameMs: config.sessionTtlMs, log });` заменить:
+
+```ts
+  // Одно хранилище и для снапшотов, и для отметок брошенных партий (D-0012): отметки лежат рядом с <id>.json.
+  const store = new GameStore(config.dataDir);
+  const service = createService({ store, marks: store, engine, bus, staleGameMs: config.sessionTtlMs, log });
+```
+
+`scripts/smoke.mjs`: в `SERVER_OWNED` добавить `'ALLOW_SESSIONLESS_GAMES'` последним элементом; строку `Object.assign(env, LIVEKIT_STUB, { APP_KEY: SMOKE_APP_KEY, PORT: String(port), HOST: '127.0.0.1', DATA_DIR: dataDir, AGENT_NAME: 'goko-smoke' });` заменить:
+
+```js
+  // ALLOW_SESSIONLESS_GAMES=1: сценарий smoke создаёт партии через POST /api/games (create_game без сессии, D-0012).
+  Object.assign(env, LIVEKIT_STUB, { APP_KEY: SMOKE_APP_KEY, PORT: String(port), HOST: '127.0.0.1', DATA_DIR: dataDir, AGENT_NAME: 'goko-smoke', ALLOW_SESSIONLESS_GAMES: '1' });
+```
+
+`scripts/dev.mjs`: строку `const serverEnv = { ...env, ENGINE_KEY: /** @type {string} */ (engineKey), ENGINE_URL: \`http://127.0.0.1:${enginePort}\`, AGENT_NAME: DEV_AGENT_NAME };` дополнить полем `ALLOW_SESSIONLESS_GAMES: '1'` в конце объекта; во второй ветке `env: { ...env, FAKE_ENGINE: '1', AGENT_NAME: DEV_AGENT_NAME }` — тоже `ALLOW_SESSIONLESS_GAMES: '1'`. Над первой из строк комментарий: `// dev и smoke разрешают партии без сессии (curl, отладка); в prod compose флага нет (D-0012).`
+
+`infra/.env.example` — после строки `TRUST_PROXY=...` добавить:
+
+```
+ALLOW_SESSIONLESS_GAMES=           # 1 — POST /api/games создаёт партию без сессии; npm run dev и smoke ставят сами; на VPS пусто (D-0012)
+```
+
+- [ ] **Step 8: D-0012 и спека — одной правкой каждого файла**
+
+`docs/decisions/0012-limits-rate-games-retention.md`: в шапке `updated:` — дата правки. В «Последствиях» пункт `- Партия, брошенная сменой партии в сессии, закрытым телефоном или рестартом сервера, остаётся \`playing\` и занимает место в лимите 20 не дольше \`SESSION_TTL_MS\` после последней активности. Её снапшот остаётся на диске: срок хранения есть только у завершённых партий.` (четыре строки) заменить:
+
+```markdown
+- Партия, брошенная закрытым телефоном или рестартом сервера, остаётся
+  `playing` и занимает место в лимите 20 не дольше `SESSION_TTL_MS` после
+  последней активности. Брошенная сменой партии в сессии места не занимает
+  сразу (дополнение ниже). Снапшот остаётся на диске: срок хранения есть
+  только у завершённых партий.
+```
+
+пункт `- После деплоя движок не доигрывает партии, брошенные больше \`SESSION_TTL_MS\` назад: …: отмена в снапшот не пишется.` (четыре строки) заменить:
+
+```markdown
+- После деплоя движок не доигрывает партии, брошенные больше
+  `SESSION_TTL_MS` назад или сменой партии в сессии: KataGo не получает
+  пачку `genmove` сразу после старта. Смена партии помнится отметкой рядом
+  со снапшотом (дополнение ниже).
+```
+
+В конец файла:
+
+```markdown
+
+## Дополнение: брошенная сменой партия, лимит партий на клиента и партии без сессии
+
+- Дата: день исполнения задачи 9 плана голоса и веба; пункт R9 широкого ревью (блокер публичного деплоя)
+
+Решение:
+
+- Новая партия в сессии бросает прежнюю незавершённую сразу, не дожидаясь
+  `SESSION_TTL_MS`. Отметка — в памяти и пустым файлом
+  `data/games/<id>.abandoned` рядом со снапшотом; формат снапшота и протокол
+  не меняются, отметка переживает рестарт. Отказ записи отметки — строка
+  `[!]`, в памяти отметка действует.
+- Брошенная сменой партия не считается ни в общем лимите 20, ни в лимите на
+  клиента, и при старте сервера ей не ставится фоновая задача.
+- Возврат человека — открытие потока этой партии или любое действие в ней —
+  снимает отметку, и партия снова в счёте. Лимит при возврате не
+  проверяется: возврат партию не создаёт.
+- Текущая партия сессии не мешает созданию новой партии в той же сессии:
+  новая её заменит.
+- Не больше 3 незавершённых партий на клиента, считая создаваемые, по тем же
+  правилам счёта. Ключ клиента — тот же, что у лимита частоты (IPv4 целиком,
+  IPv6 /64, с `TRUST_PROXY=1` — последний адрес `X-Forwarded-For`). Партия
+  сессии идёт в счёт владельца сессии — адреса, создавшего её
+  (`POST /api/sessions`), даже когда её создаёт voice-agent со своего адреса.
+  Сессия без записанного владельца (создана до рестарта) — счёт по адресу
+  запроса.
+- Лишняя — `429 too_many_games` с `details: { max: 3, scope: 'client' }`,
+  `humanText` — «у тебя слишком много незаконченных партий, новую можно
+  начать позже». Общий лимит 20 проверяется раньше и отвечает без `scope`.
+- Партия без сессии (`POST /api/games`, `create_game`) создаётся только при
+  `ALLOW_SESSIONLESS_GAMES=1` (включает только `1`, пробелы по краям не
+  мешают): так запускают `npm run dev` и `npm run smoke`. В prod compose
+  переменной нет, и маршрут отвечает `400 bad_request` с
+  `details.reason: 'sessionless_disabled'` («партии создаются только внутри
+  сессии») до разбора тела. Новых кодов ошибок нет.
+- Веб, voice-agent и `scripts/chat.mjs` создают партии только внутри сессии.
+
+Последствия:
+
+- Через сессии в счёте не больше `MAX_SESSIONS` партий, пока никто не
+  возвращается к брошенным: «Новая партия» подряд в лимит не упирается.
+- Лимит 3 на клиента нужен режиму без сессий (dev, smoke) и возврату к
+  брошенным: без него один адрес по кругу «новая партия → открыть поток
+  старой» занял бы весь лимит 20.
+- Счёт на клиента и владельцы сессий живут в памяти: рестарт их обнуляет,
+  общий лимит 20 после рестарта считает все незавершённые партии без
+  отметки. Текущие партии сессий до рестарта отметки не получают: сессии
+  рестарт не переживают, и такие партии в счёте до порога `SESSION_TTL_MS`.
+- Отметки незавершённых партий с диска сами не уходят: снапшот идущей
+  партии срока хранения не имеет. Отметку завершённой или удалённой партии
+  снимает старт сервера. Ручная уборка — runbook VPS.
+- Разные адреса (другая сеть, другая /64) обходят лимит на клиента, но не
+  общий лимит 20 и не `MAX_SESSIONS`.
+- `create_game` для MCP (стадия 2) потребует сессии или включения флага
+  вместе с отдельной защитой — решение стадии 2.
+```
+
+Спека, раздел 5: в абзаце о потоке сессии фрагмент `поток; задачу снова ставит действие человека на этой партии или открытие её
+потока. После рестарта сервера отмена не помнится: задачу получает каждая
+незавершённая партия с активностью за последние \`SESSION_TTL_MS\`, а более
+старая ждёт того же действия человека или открытия потока (раздел 7, D-0012).` заменить на `поток. Прежняя незавершённая партия становится брошенной: она не в счёте
+лимитов, отметка переживает рестарт, и при старте задача ей не ставится. Задачу
+и место в счёте ей возвращает действие человека на этой партии или открытие её
+потока (раздел 7, D-0012). После рестарта задачу получает каждая незавершённая
+партия без отметки с активностью за последние \`SESSION_TTL_MS\`.`. Строку таблицы `| \`create_game\` | \`POST /api/games\` | то же | то же (без сессии, для MCP) |` заменить на `| \`create_game\` | \`POST /api/games\` | то же | то же (без сессии, для MCP); только при \`ALLOW_SESSIONLESS_GAMES=1\` (dev, smoke), иначе \`400 bad_request\` с \`details.reason: 'sessionless_disabled'\` (D-0012) |`. В перечне кодов фрагмент `сдача за место \`engine\` —
+\`details.reason: 'not_your_seat'\`), \`limit_reached\`` заменить на `сдача за место \`engine\` —
+\`details.reason: 'not_your_seat'\`; партия без сессии при выключенном флаге — \`details.reason: 'sessionless_disabled'\`), \`limit_reached\``; фрагмент `\`too_many_games\` (превышен лимит незавершённых партий, D-0012)` — на `\`too_many_games\` (превышен лимит незавершённых партий на сервере или на клиента, D-0012)`. В «Язык и санитизация ошибок»: `\`BAD_REQUEST_REASON_TEXT\` для \`not_your_seat\`)` → `\`BAD_REQUEST_REASON_TEXT\` для \`not_your_seat | sessionless_disabled\`, \`TOO_MANY_GAMES_SCOPE_TEXT\` для \`scope: 'client'\`)`; `\`limit_reached\` и
+  \`too_many_games\` — \`details.max\`` → `\`limit_reached\` и
+  \`too_many_games\` — \`details.max\` (у лимита на клиента ещё \`details.scope: 'client'\`)`; конец того же пункта `место \`engine\` — \`details.reason: 'not_your_seat'\`.` → `место \`engine\` — \`details.reason: 'not_your_seat'\`, \`bad_request\` партии без сессии — \`details.reason: 'sessionless_disabled'\`.`. Других мест раздела 5 и раздела 8 правка не касается.
+
+Спека, раздел 7: в первом пункте фрагмент `(по умолчанию 2 ч), считается брошенной: при старте фоновая задача (ход
+  движка, автосчёт) ей не ставится, её ставит действие человека на партии или
+  открытие её потока, как после отмены сменой партии (раздел 5).` заменить на `(по умолчанию 2 ч), считается брошенной; брошенной сразу становится и
+  прежняя незавершённая партия сессии, в которой началась новая, — отметкой
+  \`data/games/<id>.abandoned\` рядом со снапшотом. Брошенной партии при старте
+  фоновая задача (ход движка, автосчёт) не ставится, её ставит действие
+  человека на партии или открытие её потока (раздел 5).`. Пункт `- Не больше 20 незавершённых партий на сервере, …` (три строки) заменить:
+
+```markdown
+- Не больше 20 незавершённых партий на сервере, считая создаваемые; лишняя —
+  `429 too_many_games` (D-0012). Брошенные партии (последний ход или создание
+  старше `SESSION_TTL_MS` на момент создания новой, или брошенные сменой
+  партии) в счёт не идут, к брошенной вернулись — снова в счёте. Текущая
+  партия сессии не мешает созданию новой в той же сессии.
+- Не больше 3 незавершённых партий на клиента (ключ лимита частоты; у партии
+  сессии — владелец сессии, создавший её), те же правила счёта; лишняя —
+  `429 too_many_games` с `details.scope: 'client'`. `POST /api/games` — только
+  при `ALLOW_SESSIONLESS_GAMES=1` (dev, smoke), иначе `400 bad_request` с
+  `details.reason: 'sessionless_disabled'` (D-0012).
+```
+
+- [ ] **Step 9: Тесты зелёные, smoke, проверка вызовов**
+
+Run:
+```bash
+npm run check
+npm run smoke
+git grep -n "createGame\|'/api/games'" -- apps/voice-agent apps/web scripts/chat.mjs || echo "[OK] партии создаются только через сессию"
+```
+Expected: `check` зелёный (typecheck и все unit, в том числе прежние тесты лимитов частоты; тесты задач 2 и 6 на `too_many_games` и `bad_request` сравнивают с `humanText(...)` и проходят до и после этой задачи); `smoke` — прежние `[OK]` с фейковым движком, сценарий идёт через `POST /api/games` с флагом из `gameServerEnv`; `git grep` печатает только `[OK]` (задачи 2, 5 и 7 уже выполнены к этому моменту, если порядок задач сохранён; если нет — повторить `git grep` в задаче 10, шаг 8).
+
+- [ ] **Step 10: Проверка страницей на ПК без агента** (бесплатно: без voice-agent и без Realtime; веб задач 6–8 уже есть; нужны LiveKit на VPS и `LIVEKIT_*` в `.env`)
+
+Сессию страница создаёт через LiveKit на VPS (D-0001), поэтому без LiveKit и `LIVEKIT_*` в `.env` шаг не выполняется: записать его `[TODO founder]` в `docs/NOW.md` (задача 11, шаг 5) и идти дальше.
+
+Run — как в задаче 8, шаг 5; game-server без `ALLOW_SESSIONLESS_GAMES`, то есть как в prod:
+```bash
+FAKE_ENGINE=1 AGENT_NAME=goko-dev node --env-file=.env apps/game-server/src/main.ts
+node node_modules/vite/bin/vite.js apps/web --host 127.0.0.1 --port 5173 --strictPort
+```
+
+Открыть `http://127.0.0.1:5173`. Expected:
+1. «Новая партия» → «Начать» — партия началась: веб создаёт партии только в сессии, флаг ему не нужен.
+2. Ещё четыре раза «Новая партия» → «Начать», не доигрывая. Каждое «Начать» начинает партию, текста о слишком многих партиях нет: прежняя партия сессии брошена и не в счёте.
+3. В другом терминале: `ls data/games/*.abandoned | wc -l` печатает `4` — по отметке на каждую заменённую незавершённую партию.
+4. «Сдаться» → «Точно?» → «Начать» → новая партия началась; `ls data/games/*.abandoned | wc -l` по-прежнему `4`: сданная партия завершена, а не брошена.
+5. Остановить game-server (Ctrl+C) и запустить той же командой. `ls data/games/*.abandoned | wc -l` — `4`: отметки пережили рестарт; в логе game-server нет строк `[!] could not mark`.
+
+Незаконченные партии этой проверки и их отметки остаются в `data/games`; удалить их можно вместе: `rm -i data/games/<id>.json data/games/<id>.abandoned`. Создания проверки (1 сессия и 6 запросов партии) укладываются в предел 10 за 10 минут на адрес. Если вместо новой партии пришло «слишком много запросов, подожди немного», это предел частоты: повторить после паузы из `Retry-After` (DevTools → Network).
+
+- [ ] **Step 11: Commit**
+
+```bash
+git add packages/protocol/src/human-text.ts packages/protocol/src/human-text.test.ts apps/game-server/src/service.ts apps/game-server/src/service.test.ts apps/game-server/src/store.ts apps/game-server/src/store.test.ts apps/game-server/src/test-helpers.ts apps/game-server/src/app.ts apps/game-server/src/app.test.ts apps/game-server/src/start-server.ts apps/game-server/src/start-server.test.ts scripts/smoke.mjs scripts/smoke.test.ts scripts/dev.mjs scripts/dev.test.ts infra/.env.example docs/decisions/0012-limits-rate-games-retention.md docs/superpowers/specs/2026-09-07-goko-voice-go-opponent-design.md
+git commit -m "game-server: прежняя партия сессии брошена при смене, не больше трёх незавершённых партий на клиента, партии без сессии только с ALLOW_SESSIONLESS_GAMES (D-0012)"
+```
+
+---
+
+### Task 10: Контейнеры game-server, go-engine, voice-agent; сервисы compose; деплой статики
 
 **Files:**
 - Create: `apps/game-server/Dockerfile`, `apps/voice-agent/Dockerfile`, `.dockerignore`
-- Modify: `apps/go-engine/Dockerfile` (добавить стадию `engine`), `infra/docker-compose.yml` (три сервиса; `stop_grace_period` и `healthcheck` у `game-server` и `go-engine`), `infra/.env.example` (`ENGINE_CPUS`, `KATAGO_ASSET`), `infra/scripts/deploy.sh` (`--build-web`, исключение `apps/go-engine/bin`)
-- Без изменений: `infra/Caddyfile` (`flush_interval -1` на `/api/*` уже есть)
+- Modify: `apps/go-engine/Dockerfile` (стадия `katago` берёт `analysis.cfg` из контекста корня и открывает `/opt/katago` на чтение всем; добавить стадию `engine`), `infra/docker-compose.yml` (три сервиса; `stop_grace_period`, `init`, `healthcheck`; том логов KataGo; `KATAGO_ASSET` и `KATAGO_SHA256` в `args`), `infra/.env.example` (`ENGINE_CPUS`, `KATAGO_ASSET`, `KATAGO_SHA256`), `infra/scripts/deploy.sh` (`--build-web`, каталог снапшотов на VPS)
+- Без изменений: `infra/Caddyfile` (`flush_interval -1` на `/api/*` уже есть; `reverse_proxy` сам добавляет `X-Forwarded-For` с адресом клиента)
 
 **Interfaces:**
-- Consumes: `infra/docker-compose.yml`, `infra/Caddyfile` (`API_UPSTREAM`), `infra/scripts/deploy.sh [--host goko] [--web-dir DIR]` из плана стадии 0; переменные `main.ts` game-server (`APP_KEY`, `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`, `AGENT_NAME`, `ENGINE_URL`, `ENGINE_KEY`, `DATA_DIR`, `MAX_SESSIONS`, `SESSION_TTL_MS`, `PORT`, `HOST`) и go-engine (`KATAGO_BIN`, `KATAGO_MODEL`, `KATAGO_HUMAN_MODEL`, `KATAGO_CONFIG`, `ENGINE_KEY`, `ENGINE_PORT`, `ENGINE_HOST`) из плана ядра; voice-agent (`LIVEKIT_*`, `OPENAI_API_KEY`, `APP_KEY`, `API_BASE`, `AGENT_NAME`, `VOICE_MODE`) из Task 4; `apps/web/dist` из Task 8.
-- Produces: образы `goko-game-server`, `goko-go-engine`, `goko-voice-agent` (Node 22 запускает `.ts` напрямую, без сборки); сервисы compose `game-server` (порт `127.0.0.1:8787`, снапшоты в `/opt/goko/data`), `go-engine` (внутренняя сеть, `cpus`), `voice-agent`; `deploy.sh [--host goko] [--web-dir DIR] [--build-web]`.
+- Consumes: `infra/docker-compose.yml`, `infra/Caddyfile` (`API_UPSTREAM`), `infra/scripts/deploy.sh [--host goko] [--web-dir DIR]` на HEAD (`trap` на ошибку, проверка `/opt/goko/.env` на VPS, `SYNC` rsync или tar, общий массив `EXCLUDES`); `ARG KATAGO_ASSET`, `ARG KATAGO_SHA256` в `apps/go-engine/Dockerfile` из плана стадии 0; переменные `main.ts` game-server (`APP_KEY`, `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`, `AGENT_NAME`, `ENGINE_URL`, `ENGINE_KEY`, `DATA_DIR`, `MAX_SESSIONS`, `SESSION_TTL_MS`, `PORT`, `HOST`, `TRUST_PROXY`) из плана ядра и `ALLOW_SESSIONLESS_GAMES` из задачи 9; go-engine (`KATAGO_BIN`, `KATAGO_MODEL`, `KATAGO_HUMAN_MODEL`, `KATAGO_CONFIG`, `ENGINE_KEY`, `ENGINE_PORT`, `ENGINE_HOST`) из плана ядра; `logDir = analysis_logs` (относительный путь) в `apps/go-engine/config/analysis.cfg`; voice-agent (`LIVEKIT_*`, `OPENAI_API_KEY`, `APP_KEY`, `API_BASE`, `AGENT_NAME`, `VOICE_MODE`) и `DRAIN_TIMEOUT_MS` 5 с, `SHUTDOWN_PROCESS_TIMEOUT_MS` 20 с из задачи 4 (шаг 7); `API_RATE` 60 в минуту и `CREATE_RATE` 10 за 10 минут на адрес из `apps/game-server/src/rate-limit.ts`; `apps/web/dist` из задачи 8.
+- Produces: образы `goko-game-server`, `goko-go-engine`, `goko-voice-agent` (Node 22 запускает `.ts` напрямую, без сборки); сервисы compose `game-server` (порт `127.0.0.1:8787`, `TRUST_PROXY=1`, без `ALLOW_SESSIONLESS_GAMES`, снапшоты в `/opt/goko/data/games`), `go-engine` (без опубликованных портов, `cpus`, логи KataGo в томе `engine_logs`), `voice-agent`; `deploy.sh [--host goko] [--web-dir DIR] [--build-web]`.
+
+Решения по контейнерам (пункт 7 брифа второго прохода):
+
+- **Порты.** Docker публикует порты через свои правила iptables раньше цепочек ufw, поэтому `ufw deny` их не закрывает. Публикуется только `game-server` и только на `127.0.0.1:8787` — туда ходит Caddy (`network_mode: host`). `go-engine` портов не публикует вовсе (`EXPOSE` в образе — лишь пометка), `game-server` ходит к нему по имени сервиса.
+- **`TRUST_PROXY=1` у `game-server`.** Запросы телефона приходят от Caddy, и без флага лимиты частоты и лимит партий на клиента (D-0012) видели бы один адрес на всех. С флагом ключ — последний адрес `X-Forwarded-For`, который пишет Caddy. Подделать заголовок извне нельзя: порт слушает только `127.0.0.1`, а Caddy дописывает настоящий адрес последним. Запрос без заголовка (voice-agent из сети compose) считается по адресу сокета.
+- **`ALLOW_SESSIONLESS_GAMES` в compose не задан**, то есть `POST /api/games` выключен (задача 9). Шаг 8 проверяет отсутствие переменной, не печатая значений.
+- **PID 1 и остановка.** `CMD` — `node` напрямую в exec-форме, без `npm` и `sh`, и SIGTERM доходит до процесса Node. Плюс `init: true` у всех трёх сервисов: `go-engine` порождает KataGo через `sh`-обёртку, `voice-agent` — процессы заданий и инференса, а Node в роли PID 1 не собирает осиротевших потомков. `tini` пересылает сигнал и собирает их.
+- **`stop_grace_period`.**
+  - `game-server` и `go-engine` — `30s`: запас над `SHUTDOWN_MS` 25 с (D-0010).
+  - `voice-agent` — `60s`. По `@livekit/agents` 1.8.0 остановка идёт так: `drain` ждёт идущие задания не дольше `drainTimeout` (задача 4: 5 с), затем `close` даёт процессу задания `shutdownProcessTimeout` (20 с) на shutdown-колбэки и убивает его, процесс инференса закрывается до 5 с (внутренний `closeTimeout`). В сумме около 30 с; удвоено на медленный диск и сеть при деплое. Меньше 30 с нельзя: SIGKILL обрежет shutdown-колбэки, и сессия Realtime закроется без `close`.
+- **Переменные по сервисам** — только `environment` с подстановкой из `/opt/goko/.env`, без `env_file` (он передал бы контейнеру весь `.env`):
+  - `go-engine` — только `ENGINE_KEY`;
+  - `game-server` — без `OPENAI_API_KEY`;
+  - `voice-agent` — `LIVEKIT_*`, `OPENAI_API_KEY`, `APP_KEY`, без `ENGINE_KEY`.
+  - Пути KataGo (`KATAGO_BIN`, `KATAGO_MODEL`, `KATAGO_HUMAN_MODEL`, `KATAGO_CONFIG`) заданы явно в образе, `.env` на VPS их не задаёт.
+- **Данные.** Снапшоты — bind-mount `/opt/goko/data` → `/data`, партии в `/data/games` (`DATA_DIR` в образе). Путь на хосте известен, поэтому runbook (задача 11) чистит брошенные партии без `docker cp`. Каталог принадлежит uid 1000 (`node` в образе).
+  - Логи KataGo: `logDir = analysis_logs` в `analysis.cfg` относительный (долг стадии 0 в `docs/research/stage0-results.md`), процесс KataGo наследует рабочий каталог `/app`, а `/app` принадлежит root.
+  - Образ создаёт `/app/analysis_logs` с владельцем `node`, compose монтирует туда именованный том `engine_logs`: новый том наследует владельца каталога образа, логи переживают пересборку, а место под них видно в `docker system df -v`.
+  - `logAllRequests` и `logSearchInfo` выключены: один файл на запуск KataGo, килобайты. Правка `analysis.cfg` не нужна.
+
+**Серверная квота voice-agent — отдельного ключа нет (R2, серверная часть).** voice-agent ходит в `game-server` по сети compose мимо Caddy и без `X-Forwarded-For`, поэтому все его запросы — один ключ, адрес контейнера. На этот ключ действуют общие правила: `API_RATE` 60 запросов в минуту и `CREATE_RATE` 10 созданий за 10 минут. Расчёт на `MAX_SESSIONS` = 3.
+
+Запросы агента за одну сессию:
+- `play_move`, `correct_last_move`, `pass`, `undo` — 1 запрос;
+- `get_position`, `get_assessment` — 2 (`getGame` вместе с `ascii` или `analyze`);
+- `set_rank`, `resign` — 2 (`getGame` для цвета, затем сама операция);
+- `start_game` — 1 создание;
+- открытие потока — 1 запрос за соединение, события в счёт не идут.
+
+Реплика в разговоре занимает не меньше 4 с: речь человека, ответ модели, инструмент и речь Гоко. Отсюда:
+- обычная минута партии — 8 ходов и 1 вопрос о позиции, 10 запросов;
+- пиковая — 15 реплик по 1 запросу, 15 запросов;
+- конец партии — `score` в бюджете 20 с и не больше 8 опросов `getGame` раз в 2,5 с (задача 2), до 9 запросов раз за партию;
+- потеря связи — переподключения потока 1, 2, 4, 8, 15 с, не больше 5 открытий в первую минуту.
+
+На три сессии:
+- обычный режим — 30 запросов в минуту;
+- все три на пике и одна при этом заканчивает партию — 45 + 9 = 54 < 60.
+
+Созданий за 10 минут: партия 13×13 длится дольше 10 минут, поэтому три сессии дают 3–6 созданий, меньше 10. Зацикленную на `new_game` модель остановит предел 10 созданий за 10 минут на адрес voice-agent (общий для всех сессий), а не лимит 3 партий на клиента: заменённая партия сессии брошена и в счёт не идёт (задача 9).
+
+За предел выходит только теоретический случай — три сессии каждые 4 с целую минуту задают вопросы на 2 запроса (90 в минуту). Тогда агент получает `rate_limited`, ждёт `Retry-After` (`blockedUntil`, задача 2) и говорит «слишком много запросов, подожди немного»: деградация, а не отказ.
+
+Отдельный ключ (`X-Agent-Key` с секретом `AGENT_KEY`) не нужен:
+- он не отделил бы зациклившуюся сессию от соседних, у всех сессий агента он общий;
+- утёкший, он снял бы лимиты с любого клиента;
+- это ещё один секрет и ещё код.
+
+`[!]` При `MAX_SESSIONS` больше 3 пересчитать: 4 × 15 = 60, пик упирается в предел. Тогда решать между ключом агента и лимитом по сессии.
 
 - [ ] **Step 1: `.dockerignore` в корне** (контекст сборки — корень репозитория)
 
@@ -4773,7 +6688,8 @@ spike
 
 ```dockerfile
 # game-server: Node 22 запускает TypeScript напрямую (type stripping), сборка не нужна.
-# npm ci по workspace'у ставит только его зависимости; package.json всех workspace'ов нужны для lock-файла.
+# npm ci по workspace'у ставит только его зависимости; package.json workspace'ов нужны для lock-файла
+# (spike/ исключён .dockerignore — если npm ci на это ругается, см. шаг 8).
 FROM node:22-slim
 ENV NODE_ENV=production
 WORKDIR /app
@@ -4822,15 +6738,30 @@ CMD ["node", "apps/voice-agent/src/main.ts", "start"]
 
 - [ ] **Step 4: `apps/go-engine/Dockerfile` — стадия `engine`**
 
-Стадию `katago` из плана стадии 0 оставить как есть (заменить только последнюю строку `CMD` — она больше не нужна). После неё дописать:
+Контекст сборки теперь корень репозитория (compose: `context: ..`), а не `apps/go-engine`: стадии `engine` нужны `packages/*`. В стадии `katago` из плана стадии 0 две правки:
+- строку `COPY config/analysis.cfg /opt/katago/analysis.cfg` заменить на `COPY apps/go-engine/config/analysis.cfg /opt/katago/analysis.cfg`;
+- последнюю строку `CMD` и комментарий над ней удалить;
+- на их место, последней строкой стадии `katago`, дописать:
+
+```dockerfile
+# Сервис engine работает под node: бинарник, обёртка и сети должны читаться всеми,
+# даже если релизный zip кладёт файлы с правами 600.
+RUN chmod -R a+rX /opt/katago
+```
+
+`apps/go-engine/.dockerignore` при контексте корня не читается; его работу (не тащить `models/` и `bin/`) делает корневой `.dockerignore` из шага 1. Замер стадии 0 теперь собирается из корня: `docker build -f apps/go-engine/Dockerfile --target katago .`. После стадии `katago` дописать:
 
 ```dockerfile
 # Стадия engine: Node 22 с обёрткой поверх бинарника и сетей из стадии katago.
 FROM node:22-slim AS engine
 ENV NODE_ENV=production
-RUN apt-get update && apt-get install -y --no-install-recommends libzip4 && rm -rf /var/lib/apt/lists/*
+# libzip4 — имя пакета в Debian bookworm (в Ubuntu noble — libzip4t64); libgomp1 нужен eigen-сборке KataGo (OpenMP).
+RUN apt-get update && apt-get install -y --no-install-recommends libzip4 libgomp1 && rm -rf /var/lib/apt/lists/*
 COPY --from=katago /opt/katago /opt/katago
 WORKDIR /app
+# logDir = analysis_logs в analysis.cfg относительный: KataGo пишет в рабочий каталог /app/analysis_logs.
+# Каталог принадлежит node, compose монтирует сюда том engine_logs (новый том наследует владельца).
+RUN mkdir analysis_logs && chown node:node analysis_logs
 COPY package.json package-lock.json ./
 COPY packages/go-core/package.json packages/go-core/
 COPY packages/protocol/package.json packages/protocol/
@@ -4853,7 +6784,10 @@ USER node
 CMD ["node", "apps/go-engine/src/main.ts"]
 ```
 
-Проверить, что в стадии `katago` бинарник и сети доступны на чтение всем (`chmod -R a+rX /opt/katago` перед `CMD`, если релизный zip кладёт файлы с правами `600`): сервис работает под `node`.
+Стадия `engine` (`node:22-slim`, Debian bookworm, `libzip4`) поверх бинарника из `ubuntu:24.04` до деплоя не собиралась. Если на ПК есть Docker (нужна сеть, бесплатно):
+
+Run: `docker build -f apps/go-engine/Dockerfile --target engine -t goko-go-engine . && docker run --rm --entrypoint /opt/katago/katago goko-go-engine version`
+Expected: образ собран, `version` печатает версию KataGo 1.18.1 под пользователем `node`. Без Docker на ПК проверка переносится на VPS: первая сборка в `deploy.sh`.
 
 - [ ] **Step 5: `infra/docker-compose.yml` — три сервиса** (после `livekit`, перед `volumes:`)
 
@@ -4863,6 +6797,8 @@ CMD ["node", "apps/go-engine/src/main.ts"]
       context: ..
       dockerfile: apps/game-server/Dockerfile
     restart: unless-stopped
+    # tini PID 1: пересылает SIGTERM node и собирает осиротевших потомков.
+    init: true
     # Остановка game-server укладывается в SHUTDOWN_MS 25 с (D-0010); docker stop по умолчанию ждёт 10 с и шлёт SIGKILL.
     stop_grace_period: 30s
     healthcheck:
@@ -4871,8 +6807,11 @@ CMD ["node", "apps/go-engine/src/main.ts"]
       timeout: 5s
       retries: 3
       start_period: 20s
+    # Только 127.0.0.1: порты Docker обходят ufw. Сюда ходит Caddy (network_mode: host).
     ports:
       - "127.0.0.1:8787:8787"
+    # Переменные по одной, без env_file: контейнер не видит OPENAI_API_KEY и прочее из .env.
+    # ALLOW_SESSIONLESS_GAMES не задан намеренно: POST /api/games в prod выключен (D-0012).
     environment:
       APP_KEY: ${APP_KEY}
       LIVEKIT_URL: ${LIVEKIT_URL}
@@ -4883,6 +6822,9 @@ CMD ["node", "apps/go-engine/src/main.ts"]
       ENGINE_KEY: ${ENGINE_KEY}
       MAX_SESSIONS: ${MAX_SESSIONS:-3}
       SESSION_TTL_MS: ${SESSION_TTL_MS:-7200000}
+      # За Caddy: ключ лимитов — последний адрес X-Forwarded-For; voice-agent без заголовка — по адресу сокета.
+      TRUST_PROXY: "1"
+    # Снапшоты партий: /opt/goko/data/games на хосте (DATA_DIR=/data/games в образе), владелец uid 1000.
     volumes:
       - /opt/goko/data:/data
     depends_on:
@@ -4892,11 +6834,17 @@ CMD ["node", "apps/go-engine/src/main.ts"]
     build:
       context: ..
       dockerfile: apps/go-engine/Dockerfile
+      # Сумма идёт в паре со сборкой: Dockerfile проверяет zip через sha256sum -c.
+      # Пустые или незаданные переменные — сборка eigenavx2 и её сумма из Dockerfile стадии 0.
       args:
         KATAGO_ASSET: ${KATAGO_ASSET:-katago-v1.18.1-eigenavx2-linux-x64.zip}
+        KATAGO_SHA256: ${KATAGO_SHA256:-33e79780dbe3bf6ee859e16f64952cdfc90f7210c8f71ad978ffcba85ad20d79}
     restart: unless-stopped
+    # KataGo запускается через sh-обёртку: tini собирает потомков, которых Node в роли PID 1 не соберёт.
+    init: true
     # Остановка KataGo: SIGTERM -> stop() движка; запас над 25 с, как у game-server (D-0010).
     stop_grace_period: 30s
+    # Портов нет: go-engine доступен только game-server по имени сервиса в сети compose.
     # Порт открывается только после прогрева KataGo (до 300 с, D-0010): start_period с запасом,
     # неудачи в нём не считаются, первая удачная проверка сразу делает сервис healthy.
     healthcheck:
@@ -4906,14 +6854,21 @@ CMD ["node", "apps/go-engine/src/main.ts"]
       retries: 3
       start_period: 320s
     cpus: ${ENGINE_CPUS:-1.5}
+    # Только ключ движка: пути KataGo заданы в образе, LIVEKIT_* и OPENAI_API_KEY движку не нужны.
     environment:
       ENGINE_KEY: ${ENGINE_KEY}
+    # Логи KataGo (logDir = analysis_logs относительно /app): один файл на запуск, в томе, а не в слое контейнера.
+    volumes:
+      - engine_logs:/app/analysis_logs
 
   voice-agent:
     build:
       context: ..
       dockerfile: apps/voice-agent/Dockerfile
     restart: unless-stopped
+    init: true
+    # drain 5 с + shutdownProcessTimeout 20 с + закрытие инференса до 5 с ≈ 30 с (задача 4, main.ts); запас вдвое.
+    stop_grace_period: 60s
     environment:
       LIVEKIT_URL: ${LIVEKIT_URL}
       LIVEKIT_API_KEY: ${LIVEKIT_API_KEY}
@@ -4926,9 +6881,11 @@ CMD ["node", "apps/go-engine/src/main.ts"]
       - game-server
 ```
 
+В корневой секции `volumes:` после `caddy_config:` добавить строку `  engine_logs:`.
+
 Почему так: `caddy` и `livekit` в `network_mode: host`, поэтому `API_UPSTREAM=127.0.0.1:8787` из плана стадии 0 попадает в опубликованный порт `game-server`; `go-engine` наружу не публикуется, `game-server` ходит к нему по имени сервиса; `voice-agent` ходит в LiveKit по публичному `LIVEKIT_URL` (`wss://<LK_HOST>`, тот же адрес, что у телефона) и в `game-server` по имени сервиса (`API_BASE` задан в образе). Секретов в файле нет — только подстановки из `/opt/goko/.env`.
 
-`game-server` зависит от `go-engine` без `condition: service_healthy` намеренно: иначе страница и сессии ждали бы прогрева KataGo до 5 минут, а до готовности движка ходы и так получают `engine_unavailable` с повторами сервера (D-0006). `/health` у обоих сервисов не требует ключа, поэтому секретов в проверке нет. `[!]` Закрыть `[TODO]` из `docs/NOW.md` про `stop_grace_period` game-server — в Task 10.
+`game-server` зависит от `go-engine` без `condition: service_healthy` намеренно: иначе страница и сессии ждали бы прогрева KataGo до 5 минут, а до готовности движка ходы и так получают `engine_unavailable` с повторами сервера (D-0006). `/health` у обоих сервисов не требует ключа, поэтому секретов в проверке нет. `[!]` Закрыть `[TODO]` из `docs/NOW.md` про `stop_grace_period` game-server — в задаче 11.
 
 SSE за Caddy: `infra/Caddyfile` уже содержит нужное, правка не нужна. Синтаксис Caddy 2 — субдиректива `flush_interval` внутри блока `reverse_proxy`, отрицательное значение отключает буфер и сбрасывает ответ после каждой записи (документация `reverse_proxy`, раздел Streaming):
 
@@ -4943,59 +6900,92 @@ SSE за Caddy: `infra/Caddyfile` уже содержит нужное, прав
 }
 ```
 
-Живая проверка потока — Task 10, раздел runbook «Проверки после деплоя».
+Живая проверка потока и адреса за Caddy — задача 11, раздел runbook «Проверки после деплоя».
 
 - [ ] **Step 6: `infra/.env.example`** (в конец)
 
 ```
 ENGINE_CPUS=1.5                    # лимит CPU контейнера go-engine, чтобы LiveKit и Caddy не голодали во время analyze
 KATAGO_ASSET=katago-v1.18.1-eigenavx2-linux-x64.zip   # без AVX2 на VPS: katago-v1.18.1-eigen-linux-x64.zip
+KATAGO_SHA256=                     # при смене KATAGO_ASSET — sha256 скачанного zip этой сборки; пусто — сумма eigenavx2 из Dockerfile
 ```
 
 - [ ] **Step 7: `infra/scripts/deploy.sh`**
 
-Заменить разбор аргументов и rsync на:
+Правка — дифф к версии на HEAD, файл целиком не заменять. На HEAD уже есть `trap` на ошибку, проверка `/opt/goko/.env` на VPS, выбор `SYNC` (rsync или tar по ssh для Git Bash без rsync), общий массив `EXCLUDES` (в нём `apps/go-engine/bin`, `dist build coverage`, `.superpowers`, `spike/log.jsonl`, `spike/last-url.txt`) и блок статики по `WEB_DIR` через `$SYNC`. Всё это остаётся как есть.
+
+1. Строку использования (`# Использование: infra/scripts/deploy.sh [--host goko] [--web-dir apps/web/dist]`) заменить на две:
 
 ```bash
 # Использование: infra/scripts/deploy.sh [--host goko] [--web-dir apps/web/dist] [--build-web]
 #   --build-web: собрать apps/web (npm run build:web) и выложить apps/web/dist как статику
-set -euo pipefail
-HOST=goko
-WEB_DIR=""
-BUILD_WEB=0
-while [ $# -gt 0 ]; do
-  case "$1" in
-    --host) HOST="$2"; shift 2;;
-    --web-dir) WEB_DIR="$2"; shift 2;;
+```
+
+2. После `WEB_DIR=""` добавить строку `BUILD_WEB=0`; в `case` после ветки `--web-dir` добавить ветку:
+
+```bash
     --build-web) BUILD_WEB=1; shift;;
-    *) echo "unknown arg $1"; exit 2;;
-  esac
-done
-ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+```
+
+3. Сразу после строки `ROOT="$(cd "$(dirname "$0")/../.." && pwd)"` добавить:
+
+```bash
 
 if [ "$BUILD_WEB" = 1 ]; then
   (cd "$ROOT" && npm run build:web)
   WEB_DIR="apps/web/dist"
 fi
-
-rsync -az --delete \
-  --exclude .git --exclude node_modules --exclude data --exclude '.env' --exclude '.env.*' \
-  --exclude 'apps/go-engine/models' --exclude 'apps/go-engine/bin' --exclude 'apps/web/dist' \
-  "$ROOT/" "$HOST:/opt/goko/src/"
 ```
 
-Остальное (статика по `WEB_DIR`, удалённый блок с `docker compose up -d --build`) без изменений. `APP_KEY` в бандл берётся из `.env` на ПК: он должен совпадать с `APP_KEY` в `/opt/goko/.env`, иначе телефон получит `401 unauthorized`.
+4. `EXCLUDES`, ветки rsync и tar и блок статики не трогать: шаблон `dist` уже закрывает `apps/web/dist` при синхронизации репозитория, а статика уезжает отдельно по `WEB_DIR`.
+
+5. В удалённом блоке (`REMOTE`) перед строкой `cd /opt/goko/src/infra` добавить:
+
+```bash
+# Снапшоты партий пишет node (uid 1000) в контейнере game-server; bootstrap создал /opt/goko/data от root.
+install -d -o 1000 -g 1000 /opt/goko/data/games
+```
+
+`docker compose up -d --build` и итоговая строка `[OK] deploy` без изменений. `APP_KEY` в бандл берётся из `.env` на ПК: он должен совпадать с `APP_KEY` в `/opt/goko/.env`, иначе телефон получит `401 unauthorized`.
 
 - [ ] **Step 8: Проверка на ПК**
 
-Run: `cd infra && WEB_HOST=goko.example.org LK_HOST=goko-lk.example.org LIVEKIT_API_KEY=k LIVEKIT_API_SECRET=s APP_KEY=a ENGINE_KEY=e OPENAI_API_KEY=o LIVEKIT_URL=wss://goko-lk.example.org docker compose config >/dev/null && echo "[OK] compose"`
-Expected: `[OK] compose` (значения подстановок в вывод не печатать: `config` их раскрывает, поэтому `>/dev/null`). Фиктивные значения в этой команде — только для проверки синтаксиса, не настоящие ключи. Проверить без раскрытия значений, что лимиты на месте: `cd infra && WEB_HOST=x LK_HOST=x LIVEKIT_API_KEY=x LIVEKIT_API_SECRET=x APP_KEY=x ENGINE_KEY=x OPENAI_API_KEY=x LIVEKIT_URL=wss://x docker compose config --format json | node -e "const c=JSON.parse(require('fs').readFileSync(0,'utf8')).services; for (const s of ['game-server','go-engine']) console.log(s, c[s].stop_grace_period, c[s].healthcheck.start_period)"` → `game-server 30s 20s` и `go-engine 30s 5m20s` (compose может нормализовать длительности).
+Проверки `docker compose config` и `docker build` ниже — если на ПК есть Docker; иначе они переносятся на VPS перед деплоем (там же, из `/opt/goko/src/infra`, с теми же фиктивными значениями и без печати настоящих).
 
-Run (если на ПК есть Docker; go-engine собирать не нужно — образ тянет KataGo и сети): `docker build -f apps/game-server/Dockerfile -t goko-game-server . && docker build -f apps/voice-agent/Dockerfile -t goko-voice-agent .`
-Expected: оба образа собираются; `docker run --rm goko-game-server` завершается с `[X] game-server: нужна переменная APP_KEY` и кодом 2 (переменные не заданы — это ожидаемо и подтверждает, что `.ts` запускается).
+Run: `cd infra && WEB_HOST=goko.example.org LK_HOST=goko-lk.example.org LIVEKIT_API_KEY=k LIVEKIT_API_SECRET=s APP_KEY=a ENGINE_KEY=e OPENAI_API_KEY=o LIVEKIT_URL=wss://goko-lk.example.org docker compose config >/dev/null && echo "[OK] compose"`
+Expected: `[OK] compose` (значения подстановок в вывод не печатать: `config` их раскрывает, поэтому `>/dev/null`). Фиктивные значения в этой команде — только для проверки синтаксиса, не настоящие ключи. Проверить без раскрытия значений (печатаются только имена переменных, длительности и порты), что остановка, порты и переменные по сервисам на месте:
+
+```bash
+cd infra && WEB_HOST=x LK_HOST=x LIVEKIT_API_KEY=x LIVEKIT_API_SECRET=x APP_KEY=x ENGINE_KEY=x OPENAI_API_KEY=x LIVEKIT_URL=wss://x docker compose config --format json | node -e "
+const c = JSON.parse(require('fs').readFileSync(0, 'utf8')).services;
+for (const s of ['game-server', 'go-engine', 'voice-agent']) {
+  const env = Object.keys(c[s].environment ?? {}).sort().join(',');
+  const ports = (c[s].ports ?? []).map((p) => (p.host_ip ?? '*') + ':' + p.published).join(',') || '-';
+  console.log(s, c[s].stop_grace_period, 'init=' + c[s].init, 'ports=' + ports, 'env=' + env);
+}
+const ok = c['game-server'].environment.TRUST_PROXY === '1' && !('ALLOW_SESSIONLESS_GAMES' in c['game-server'].environment)
+  && !('OPENAI_API_KEY' in c['game-server'].environment) && Object.keys(c['go-engine'].environment).join() === 'ENGINE_KEY'
+  && !c['go-engine'].ports && c['game-server'].ports.every((p) => p.host_ip === '127.0.0.1');
+console.log(ok ? '[OK] compose: TRUST_PROXY, без партий вне сессии, порты и переменные по сервисам' : '[X] compose: см. строки выше');
+process.exit(ok ? 0 : 1);
+"
+```
+
+Expected: строки `game-server 30s init=true ports=127.0.0.1:8787 env=AGENT_NAME,APP_KEY,ENGINE_KEY,ENGINE_URL,LIVEKIT_API_KEY,LIVEKIT_API_SECRET,LIVEKIT_URL,MAX_SESSIONS,SESSION_TTL_MS,TRUST_PROXY`, `go-engine 30s init=true ports=- env=ENGINE_KEY`, `voice-agent 1m0s init=true ports=- env=AGENT_NAME,APP_KEY,LIVEKIT_API_KEY,LIVEKIT_API_SECRET,LIVEKIT_URL,OPENAI_API_KEY,VOICE_MODE` и `[OK] compose: ...` (compose может нормализовать длительности: `1m0s` = `60s`; `published` бывает строкой). `TRUST_PROXY` сравнивается внутри скрипта и не печатается; остальные значения не выводятся.
+
+Run: `git grep -n "createGame\|'/api/games'" -- apps/voice-agent apps/web scripts/chat.mjs || echo "[OK] партии создаются только через сессию"`
+Expected: только `[OK]` — с выключенным `POST /api/games` агент, веб и консоль работают.
+
+Run (если на ПК есть Docker; go-engine здесь не собирать — его проверка с загрузкой KataGo и сетей в шаге 4): `docker build -f apps/game-server/Dockerfile -t goko-game-server . && docker build -f apps/voice-agent/Dockerfile -t goko-voice-agent .`
+Expected: оба образа собираются; `docker run --rm goko-game-server` печатает пять строк `[X] game-server: нужна переменная …` (`APP_KEY`, `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`, `ENGINE_KEY`), первая — `[X] game-server: нужна переменная APP_KEY (см. infra/.env.example)`, и завершается с кодом 2 (переменные не заданы — это ожидаемо и подтверждает, что `.ts` запускается).
+
+Корневые workspaces включают `spike` (`package.json`, `package-lock.json`), а Dockerfile копируют `package.json` без `spike/`, и `.dockerignore` исключает `spike`. `npm ci --workspace` лишнюю запись lock, скорее всего, терпит, но до деплоя это проверяет только сборка выше. Если `npm ci` в сборке падает на отсутствующем `spike` — во все три Dockerfile после строки `COPY apps/web/package.json apps/web/` добавить `COPY spike/package.json spike/`, в `.dockerignore` после строки `spike` — строку `!spike/package.json`; убрать обе правки вместе с удалением `spike/` (задача 8 стадии 0). Без Docker на ПК это проверит первая сборка на VPS.
 
 Run: `bash -n infra/scripts/deploy.sh && echo "[OK] deploy.sh"`
-Expected: `[OK] deploy.sh`. Сам деплой не запускать: только по явной просьбе founder'а (правило 5 `CLAUDE.md`).
+Expected: `[OK] deploy.sh`.
+
+Run (исключения HEAD не потеряны при правке): `grep -c "spike/log.jsonl\|.superpowers" infra/scripts/deploy.sh`
+Expected: число не меньше 1, не `0`. `bash -n` проверяет только синтаксис и потерю исключений или ветки tar не заметит. Сам деплой не запускать: только по явной просьбе founder'а (правило 5 `CLAUDE.md`).
 
 - [ ] **Step 9: Commit**
 
@@ -5006,16 +6996,16 @@ git commit -m "infra: контейнеры game-server, go-engine, voice-agent; 
 
 ---
 
-### Task 10: Runbook VPS, доки, `NOW.md`, финальная проверка
+### Task 11: Runbook VPS, доки, `NOW.md`, финальная проверка
 
 **Files:**
 - Create: `docs/runbooks/vps.md`
-- Modify: `docs/README.md` (строка `runbooks/`), `CLAUDE.md` (строка стадии, раздел команд), `README.md` (статус, раздел «Запуск»), `docs/NOW.md`
-- Modify только при проблеме на шаге 6: `scripts/dev.mjs` (web без `cmd.exe`), `scripts/dev.test.ts`
+- Modify: `docs/README.md` (строка `runbooks/`), `CLAUDE.md` (строка стадии, раздел команд), `README.md` (статус, раздел «Запуск»), `docs/NOW.md`, `infra/.env.example` (комментарий `SESSION_TTL_MS`)
+- Modify только при проблеме на шаге 7: `scripts/dev.mjs` (web без `cmd.exe`), `scripts/dev.test.ts`
 
 **Interfaces:**
-- Consumes: команды из Task 5 (`npm run chat`), Task 8 (`npm run build:web`, запуск web через `node node_modules/vite/bin/vite.js`), Task 9 (`deploy.sh --build-web`, сервисы compose, `stop_grace_period`, `healthcheck`); `infra/README.md` из плана стадии 0 (первичная настройка); `devPlan(parentEnv, exists, makeKey?)` из `scripts/dev.mjs` плана ядра.
-- Produces: `docs/runbooks/vps.md` — эксплуатация после деплоя с живыми проверками SSE за Caddy и `empty_timeout` (D-0001); доки со статусом «стадия 1 готова»; результат проверки Ctrl+C `npm run dev` на Windows.
+- Consumes: команды из задачи 5 (`npm run chat`), задачи 8 (`npm run build:web`, запуск web через `node node_modules/vite/bin/vite.js`), задачи 10 (`deploy.sh --build-web`, сервисы compose, `stop_grace_period`, `init`, `healthcheck`, `TRUST_PROXY=1`, `/opt/goko/data/games`, том `engine_logs`); задачи 9 (`ALLOW_SESSIONLESS_GAMES`, `too_many_games` со `scope: 'client'`, отметка брошенной сменой партии — пустой `data/games/<id>.abandoned`); `STALE_GAME_MS = SESSION_TTL_MS` и `FINISHED_RETENTION_MS` 30 дней из `apps/game-server/src/service.ts` (завершённые снапшоты удаляются сами, незавершённые — никогда); снапшот `data/games/<id>.json` с `status`, `createdAt`, `moves[].at` из `apps/game-server/src/store.ts`; `API_RATE` 60 в минуту на адрес; `infra/README.md` из плана стадии 0 (первичная настройка); `devPlan(parentEnv, exists, makeKey?)` из `scripts/dev.mjs` плана ядра.
+- Produces: `docs/runbooks/vps.md` — эксплуатация после деплоя с живыми проверками SSE за Caddy, `empty_timeout` (D-0001), адреса клиента за Caddy и выключенных партий без сессии; ручная чистка брошенных незавершённых партий; комментарий `SESSION_TTL_MS` в `infra/.env.example`; доки со статусом «стадия 1 готова»; результат проверки Ctrl+C `npm run dev` с web на Windows.
 
 - [ ] **Step 1: `docs/runbooks/vps.md`**
 
@@ -5038,12 +7028,16 @@ updated: <дата выполнения>
 | Сервис | Что | Порт |
 |---|---|---|
 | `caddy` | TLS, статика `<WEB_HOST>` из `/opt/goko/web`, `/api/*` → `API_UPSTREAM`, `<LK_HOST>` → LiveKit | 80, 443 (host) |
-| `livekit` | комнаты, TURN | 7880, 7881/tcp, 3478/udp, 50000–60000/udp (host) |
+| `livekit` | комнаты, TURN | 7880, 7881/tcp, 3478/udp, 30000–40000/udp, 50000–60000/udp (host) |
 | `game-server` | сессии, партии, SSE, токены | `127.0.0.1:8787` |
-| `go-engine` | KataGo: genmove / analyze / score | внутренняя сеть, `go-engine:8788` |
+| `go-engine` | KataGo: genmove / analyze / score | не публикуется; внутренняя сеть, `go-engine:8788` |
 | `voice-agent` | воркер LiveKit Agents `goko` | портов нет |
 
-Снапшоты партий — `/opt/goko/data/games` (bind-mount в `game-server`).
+Снапшоты партий — `/opt/goko/data/games` (bind-mount в `game-server`,
+владелец uid 1000, каталог создаёт `deploy.sh`). Логи KataGo — том
+`engine_logs` (`/app/analysis_logs` в `go-engine`), один файл на запуск.
+Порты Docker обходят ufw: наружу не публиковать ничего, кроме того, что в
+таблице.
 
 ## Деплой (с ПК, по явной просьбе founder'а)
 
@@ -5073,7 +7067,7 @@ curl -s http://127.0.0.1:8787/health                 # {"ok":true,"games":N,"ses
 dc exec go-engine node -e "fetch('http://127.0.0.1:8788/health').then(r=>r.text()).then(console.log)"
 curl -sI https://<WEB_HOST>/ | head -1               # HTTP/2 200
 curl -s https://<LK_HOST>/                          # OK
-dc logs --tail=20 voice-agent | grep -c "registered worker"   # 1 — воркер зарегистрирован
+dc logs voice-agent | grep -c "registered worker"   # не 0 — воркер зарегистрирован (без --tail: после регистрации бывает много строк заданий)
 dc ps --format '{{.Service}} {{.Status}}'           # game-server и go-engine: (healthy); go-engine до 5 мин после старта — (health: starting), идёт прогрев KataGo
 ```
 
@@ -5087,7 +7081,7 @@ dc ps --format '{{.Service}} {{.Status}}'           # game-server и go-engine: 
 содержит токен LiveKit, поэтому из него вырезается только id сессии.
 
 ```bash
-# 1. Сессия и поток SSE через Caddy: строки должны приходить сразу, со своими метками времени,
+# 1. Сессия и поток SSE через Caddy: строки должны приходить по одной, со своими метками времени,
 #    а не пачкой при закрытии (flush_interval -1 на /api/*). Выход — Ctrl+C.
 ( set -a; . /opt/goko/.env; set +a
   SID=$(curl -s -X POST -H "X-App-Key: $APP_KEY" -H 'content-type: application/json' -d '{}' "https://$WEB_HOST/api/sessions" \
@@ -5097,14 +7091,17 @@ dc ps --format '{{.Service}} {{.Status}}'           # game-server и go-engine: 
     | while IFS= read -r line; do echo "$(date +%T) $line"; done )
 ```
 
-Ожидание: сразу после запуска строка `event: session.game` или комментарий
-пульса с меткой текущей секунды, дальше пульс каждые 15 с (`DEFAULT_HEARTBEAT_MS`). Если строки
-приходят пачкой при закрытии — буферизует прокси: проверить `infra/Caddyfile`
-на VPS и `dc up -d caddy`.
+Ожидание: `[OK] сессия …`, затем тишина около 15 с — у только что созданной
+сессии партии нет, начальных событий поток не шлёт. Первая строка `: ping`
+примерно через 15 с после запуска, дальше каждые 15 с (`DEFAULT_HEARTBEAT_MS`),
+у каждой своя метка времени с шагом 15 с. Если строк нет до Ctrl+C и потом они
+приходят пачкой — буферизует прокси: проверить `infra/Caddyfile` на VPS и
+`dc up -d caddy`.
 
 ```bash
 # 2. D-0001: комната с одним агентом (телефон не вошёл) закрывается по empty_timeout 300 с.
-#    SID — из проверки 1; засечь время создания сессии.
+#    SID задан в подоболочке проверки 1 и здесь пуст: взять id из её строки [OK]; засечь время создания сессии.
+SID=<id из строки [OK] проверки 1>
 dc logs -f --since 10m livekit | grep --line-buffered "goko-$SID"
 dc logs -f --since 10m voice-agent | grep --line-buffered -i "job\|goko-$SID"
 ```
@@ -5114,6 +7111,82 @@ dc logs -f --since 10m voice-agent | grep --line-buffered -i "job\|goko-$SID"
 воркера — завершение задания. Если комната живёт дольше 10 минут, агент
 удерживает её от `empty_timeout`: записать `[!]` в `docs/NOW.md` с временем и
 строками лога (без значений `.env`) и вынести в D-0001 на решение founder'а.
+
+```bash
+# 3. D-0012: за Caddy лимит частоты считает адрес клиента, а не адрес Caddy (TRUST_PROXY=1).
+#    На VPS: 61 чтение через публичный адрес — последнее получает 429 (60 в минуту на адрес).
+#    Не раньше чем через минуту после проверок 1–2 (их запросы с VPS тоже в счёте).
+( set -a; . /opt/goko/.env; set +a
+  for i in $(seq 61); do curl -s -o /dev/null -w '%{http_code}\n' -H "X-App-Key: $APP_KEY" "https://$WEB_HOST/api/games"; done \
+    | sort | uniq -c )
+```
+
+Ожидание: `60 200` и `1 429`. Сразу после этого, в ту же минуту, с ПК (другая
+сеть; `.env` на ПК, значение не печатается):
+
+```bash
+( set -a; . ./.env; set +a; read -r -p "WEB_HOST: " H
+  curl -s -o /dev/null -w '%{http_code}\n' -H "X-App-Key: $APP_KEY" "https://$H/api/games" )
+```
+
+Ожидание: `200` — у ПК свой счёт. `429` значит, что game-server видит всех
+клиентов одним адресом: проверить `TRUST_PROXY` у сервиса без печати значения
+(`dc exec game-server node -e "console.log(process.env.TRUST_PROXY === '1')"` →
+`true`). Страницу на телефоне для этой проверки не открывать: она создаёт
+сессию, агент входит в Realtime, и это платный прогон. Телефон ходит через тот
+же Caddy, что и ПК, поэтому ответ ПК подтверждает и адрес телефона.
+
+```bash
+# 4. D-0012: партия без сессии в prod выключена, партия в сессии создаётся.
+#    Не раньше чем через минуту после проверки 3: она исчерпала API_RATE адреса VPS в 60-секундном окне,
+#    лимитер стоит раньше маршрута, и в ту же минуту ответ был бы 429 rate_limited, а не bad_request.
+( set -a; . /opt/goko/.env; set +a
+  curl -s -X POST -H "X-App-Key: $APP_KEY" -H 'content-type: application/json' \
+    -d '{"black":{"controller":"human"},"white":{"controller":"human"}}' "https://$WEB_HOST/api/games" )
+```
+
+Ожидание: `{"error":{"code":"bad_request","message":"games are created only inside a session","details":{"reason":"sessionless_disabled"}}}`.
+Токена в ответе нет, печатать можно. Партию в сессии проверяет приёмка у доски.
+
+## Брошенные незавершённые партии
+
+Завершённые снапшоты `game-server` удаляет сам через 30 дней. Незавершённые
+не удаляет никогда. Брошенной считается партия без хода дольше
+`SESSION_TTL_MS` (по умолчанию 2 часа) и партия, заменённая новой в своей
+сессии: у второй рядом со снапшотом лежит пустой файл `<id>.abandoned`
+(D-0012). Брошенная в лимиты (20 на сервер, 3 на клиента) не идёт, пока к ней
+не вернулись, но файлы остаются и загружаются в память при каждом старте.
+Чистить руками, когда `games` в `/health` заметно растёт, или раз в месяц.
+
+```bash
+# Список: незавершённые партии без активности дольше DAYS дней. Печатает только имя файла,
+# время последнего хода и число ходов — ни ключей, ни окружения. go-engine не поднимается (--no-deps).
+DAYS=7
+dc run --rm --no-deps -T -e DAYS=$DAYS game-server node -e '
+const fs = require("fs");
+const dir = "/data/games";
+const cutoff = Date.now() - Number(process.env.DAYS) * 86400000;
+for (const name of fs.readdirSync(dir).filter((n) => n.endsWith(".json")).sort()) {
+  let g;
+  try { g = JSON.parse(fs.readFileSync(dir + "/" + name, "utf8")); } catch { console.log("[!] не читается:", name); continue; }
+  const last = Date.parse(g.moves.at(-1)?.at ?? g.createdAt);
+  const mark = fs.existsSync(dir + "/" + name.slice(0, -".json".length) + ".abandoned") ? "отметка смены" : "";
+  if (g.status === "playing" && last < cutoff) console.log(name, new Date(last).toISOString(), "ходов:", g.moves.length, mark);
+}'
+```
+
+Удаление — только файлов из списка, просмотренного глазами, и при
+остановленном `game-server`: работающий сервер держит партии в памяти и
+перепишет удалённый файл следующим ходом.
+
+```bash
+dc stop game-server                     # до 30 с; сессии и комнаты теряются
+cd /opt/goko/data/games && rm -i <id>.json <id>.abandoned   # имена из списка, отметку вместе со снапшотом (её может не быть); *.tmp — остатки оборванной записи, их тоже можно
+cd /opt/goko/src/infra && dc start game-server
+```
+
+Логи KataGo в томе `engine_logs` растут на файл за запуск движка; место —
+`docker system df -v`, очистка — `dc exec go-engine sh -c 'find /app/analysis_logs -type f -mtime +30 -delete'`.
 
 ## Перезапуск и обновление одного сервиса
 
@@ -5147,11 +7220,17 @@ dc up -d caddy                          # перечитать API_UPSTREAM
 в комнаты dev-сессий не диспетчеризуется (game-server на ПК выпускает токены с
 `goko-dev`).
 
+`[!]` `npm run dev` запускает game-server с `ALLOW_SESSIONLESS_GAMES=1` и без
+`TRUST_PROXY`: пока Caddy смотрит на ПК, `POST /api/games` открыт всем, у кого
+есть `APP_KEY` из бандла, а лимиты частоты и партий считают всех клиентов
+одним адресом Caddy. Держать dev-режим только на время отладки и возвращать
+prod тем же `dc up -d caddy`.
+
 ## Откат
 
 ```bash
 # на ПК: вернуть рабочий коммит и задеплоить его
-git checkout <commit> && infra/scripts/deploy.sh --build-web && git checkout main
+git checkout <commit> && infra/scripts/deploy.sh --build-web && git checkout -   # вернуться на ветку, с которой ушли
 # на VPS: остановить всё
 dc down
 ```
@@ -5222,6 +7301,8 @@ web, контейнеры, runbook. Открыта приёмка founder'ом �
 тапы) и замер стоимости партии в realtime.
 ```
 
+В списке планов строку `` `voice-agent`, `scripts/chat.mjs`, `web`, контейнеры, runbook (10 задач). `` заменить на ту же с «(11 задач)».
+
 `## Следующий шаг` заменить на:
 
 ```
@@ -5237,15 +7318,30 @@ web, контейнеры, runbook. Открыта приёмка founder'ом �
 
 В `## Открыто`:
 
-- пункт `[TODO]` про `stop_grace_period` game-server — удалить: сделано в Task 9 (`30s` у `game-server` и `go-engine`);
+- пункт `[TODO]` про `stop_grace_period` game-server — удалить: сделано в задаче 10 (`30s` у `game-server` и `go-engine`, `60s` у `voice-agent`);
 - пункт `[TODO]` про `flush_interval -1` — оставить до живой проверки 1 раздела runbook «Проверки после деплоя», после неё заменить результатом;
 - пункт `[TODO]` про `empty_timeout` — дописать «порядок — `docs/runbooks/vps.md`, проверка 2»; после прогона заменить результатом;
-- пункт `[TODO]` про Ctrl+C для `web` через `cmd.exe` — вернуться к нему после шага 6 и заменить результатом (`[OK]` или `[FIX]` с описанием правки `dev.mjs`);
+- пункт `[TODO]` про Ctrl+C для `web` через `cmd.exe` — вернуться к нему после шага 7 и заменить результатом (`[OK]` или `[FIX]` с описанием правки `dev.mjs`);
+- пункт `[X]` «Блокер публичного деплоя (широкое ревью, R9)» заменить на `[OK]`: лимит незавершённых партий на клиента и партии в prod только внутри сессии — задача 9 этого плана, D-0012;
+- пункт `[TODO]` «План голоса и веба (широкое ревью, R2)» заменить на `[OK]`: опрос `get_game` не чаще раза в 2,5 с и `blockedUntil` по `Retry-After` — задача 2; растущая пауза, `Retry-After` и выход на `not_found` в `watchSession` — задача 3; серверная квота агента — расчёт в задаче 10, отдельного ключа нет;
+- пункт `[TODO]` «Снапшоты брошенных незавершённых партий с диска не удаляются…» заменить на: чистка руками — `docs/runbooks/vps.md`, раздел «Брошенные незавершённые партии»; комментарий к `SESSION_TTL_MS` в `infra/.env.example` дописан в шаге 6;
+- если проверка страницей (задача 8, шаг 5; задача 9, шаг 10) не выполнялась без LiveKit на VPS и `LIVEKIT_*` — добавить `[TODO founder]` с номерами этих шагов;
+- добавить `[TODO]` Живые проверки 3 и 4 runbook (адрес клиента за Caddy, `POST /api/games` в prod → `sessionless_disabled`) — после первого деплоя, результат сюда;
 - добавить `[!]` Токен LiveKit живёт TTL сессии от её создания (D-0008): продлённая сессия может пережить токен, тогда вход в комнату не удастся; страница забывает сессию, и перезагрузка создаёт новую (Task 7). Если на приёмке это мешает — выпуск нового токена на живую сессию, отдельное решение.
 
-- [ ] **Step 6: Ctrl+C `npm run dev` на Windows** (на ПК, бесплатно: воркер `goko-dev` стартует, но пока в комнату не вошёл телефон, Realtime не открывается)
+- [ ] **Step 6: `infra/.env.example` — комментарий `SESSION_TTL_MS`**
 
-Run: в Windows Terminal (PowerShell) `npm run dev`, дождаться `[OK] dev: запущено game-server, web, voice-agent`, **не открывая страницу**, нажать Ctrl+C один раз.
+`SESSION_TTL_MS` задаёт не только жизнь сессии, но и порог брошенной партии (`STALE_GAME_MS = SESSION_TTL_MS`, D-0012). Строку `SESSION_TTL_MS=7200000             # 2 часа без событий — сессия закрывается` заменить на:
+
+```
+SESSION_TTL_MS=7200000             # 2 часа без событий — сессия закрывается; тот же порог: незавершённая партия без хода дольше него брошена и в лимиты не идёт (D-0012)
+```
+
+Run: `git diff --stat infra/.env.example` → одна строка изменена; значений `.env` в диффе нет (файл — заготовка).
+
+- [ ] **Step 7: Ctrl+C `npm run dev` на Windows** (на ПК, бесплатно: воркер `goko-dev` стартует, но пока в комнату не вошёл телефон, Realtime не открывается)
+
+Run: в Windows Terminal (PowerShell) `npm run dev`, дождаться строки, начинающейся с `[OK] dev: запущено` (в ней ещё список процессов — при `KATAGO_BIN` и `go-engine` — и имя диспетчеризации), **не открывая страницу**, нажать Ctrl+C один раз. Воркер `goko-dev` подключается к LiveKit на VPS (нужна сеть и `LIVEKIT_*` в `.env`); без них он пишет ошибку подключения — Ctrl+C проверять всё равно.
 Expected: вопроса «Завершить выполнение пакетного файла [Y(да)/N(нет)]?» нет; `dev` печатает остановку и выходит; порты свободны:
 
 ```powershell
@@ -5274,14 +7370,14 @@ Run: `npx vitest run scripts/dev.test.ts` → FAIL (у web `cmd: 'npm'`). В `sc
 
 Run: `npx vitest run scripts/dev.test.ts` → PASS; повторить ручную проверку Ctrl+C → вопроса нет, порты свободны.
 
-- [ ] **Step 7: Полная проверка**
+- [ ] **Step 8: Полная проверка**
 
 Run: `npm run check && npm run smoke`
 Expected: typecheck (корень и `apps/web`), все unit-тесты (`go-core`, `protocol`, `go-engine`, `game-server`, `voice-agent`, `web`, `scripts`) и smoke — `[OK]`, код 0. `agent.eval.test.ts` — `skipped` без `RUN_AGENT_EVALS`.
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 9: Commit**
 
-Только если шаг 6 потребовал правки — сначала отдельный коммит:
+Только если шаг 7 потребовал правки — сначала отдельный коммит:
 
 ```bash
 git add scripts/dev.mjs scripts/dev.test.ts
@@ -5291,8 +7387,8 @@ git commit -m "scripts: dev запускает web через node без cmd.ex
 Затем всегда:
 
 ```bash
-git add docs/runbooks/vps.md docs/README.md CLAUDE.md README.md docs/NOW.md
-git commit -m "docs: runbook VPS с проверками после деплоя, команды и статус стадии 1, NOW"
+git add docs/runbooks/vps.md docs/README.md CLAUDE.md README.md docs/NOW.md infra/.env.example
+git commit -m "docs: runbook VPS с проверками после деплоя и чисткой брошенных партий, команды и статус стадии 1, NOW"
 ```
 
 Живые проверки runbook («Проверки после деплоя») и деплой исполнитель не запускает: только по явной просьбе founder'а (правило 5 `CLAUDE.md`); их результаты вносит в `docs/NOW.md` тот, кто их выполнил.
@@ -5301,10 +7397,55 @@ git commit -m "docs: runbook VPS с проверками после деплоя
 
 ## Самопроверка плана
 
-Обновлена 14.09 после сверки с кодом ядра (`packages/protocol`, `apps/game-server`) и решениями D-0001…D-0011.
+Обновлена 14.09 после сверки с кодом ядра на HEAD (`packages/protocol`, `apps/game-server`, `scripts/smoke.mjs`, `scripts/dev.mjs`) и решениями D-0001…D-0012; второй проход — после широкого ревью ядра (протокол финальный, R2, R9); правки после второго прохода — брошенная сменой партия вне лимитов (задача 9) и перечитывание партии после таймаута хода у агента и веба (задачи 2, 6, 7); правки по предполётной сверке — общие `hasEngine`, `humanColorOf`, `retryAfterMs`, `RETRY_MS`, `STABLE_CONNECTION_MS` в `@goko/protocol` (задача 1), «Продолжаем партию» после `session.game` (задача 3), `RunResult.wait()` и LLM-судья в eval (задача 4), `deploy.sh` дифф к HEAD (задача 10), runbook и `NOW.md` (задача 11).
 
-- **Покрытие спеки.** Раздел 3 (поток хода: голос → инструмент → game-server → событие → реплика; тап → `via: 'tap'` → событие → реплика) — Task 2 (инструменты), Task 3 (`handleEvent`: тап при `pendingEngineMove` копится в `lastTap` и озвучивается вместе с ответом движка), Task 7 (`useGame.play`). Раздел 5 (события `session.game`, `state.updated` с `cause/by/via/humanFallback`, `engine.thinking`, `game.finished`, `error`) — Task 3 и Task 7 читают все пять типов; `not_found` на SSE → новая сессия (Task 6 `streamEvents`, Task 7 `useSession.reset`). Раздел 9: таблица инструментов один в один — Task 2 (`createTools`); результаты для модели с `myMoveSpoken`, `note` при таймауте ответа, `finished/result` — Task 2; `get_assessment` без лучшего хода в тексте — правило в `INSTRUCTIONS` (Task 4) и eval; озвучивание событий — Task 3; промпт с произношением координат, правилом D-0004 и режимом «Чат» — Task 4; `realtime`/`pipeline` по `VOICE_MODE`, серверный VAD, транскрипция входа `ru` — Task 4 `voice.ts`; приветствие — `generateReply` после `session.start` и применения режима, `onEnter` с `greet: false` — Task 4 `main.ts`, `agent.ts`; `sessionId` из метаданных диспетчеризации — Task 4 `metadata.ts`. Раздел 10: одна страница, SVG-доска, тап = ближайший пункт, «сейчас ход Гоко» без запроса, лента-диалог из `lk.transcription`, вход в комнату и микрофон по первому касанию со `startAudio`, кнопки ≥ 44 px, темы, статус, результат с территорией и мёртвыми камнями, работа без агента — Task 6–8; сессия в `sessionStorage` — Task 7. Раздел 11: контейнеры `game-server`, `go-engine` (`cpus`, `stop_grace_period`, `healthcheck`), `voice-agent`; порты только на `127.0.0.1`; `API_UPSTREAM` prod/dev и `docker compose up -d caddy`; `flush_interval -1` на `/api/*` (уже в `infra/Caddyfile`); `AGENT_NAME` `goko`/`goko-dev`; деплой статики — Task 9, runbook с живыми проверками — Task 10. Раздел 12: замоканный клиент и замоканный сеанс для `voice-agent` (Task 2, 3, 4), evals по флагу без новых (Task 4), unit для веб-геометрии, ленты, потока, текстов, настроек и чата (Task 6), `chat.mjs` (Task 5), ручная приёмка у доски — `NOW.md` (Task 10). Раздел 18: все проверки — командами с кодом возврата; секреты — только через `.env`.
-- **Решения.** D-0001: комнату создаёт game-server, веб и `chat.mjs` только входят по токену, без `roomConfig`; агент ждёт `waitForParticipant()` до Realtime (Task 4); живая проверка `empty_timeout` — runbook, Task 10. D-0004: ход за человека только по прямой просьбе и вслух — промпт Task 4. D-0005: партия двух людей разрешена — `hasEngine`/`humanColorOf` и тексты в Task 2, 3, 6; фейковый клиент не запрещает её (Task 2). D-0006: `retries_exhausted` → агент переоткрывает поток на первой реплике человека (`watchSession().humanSpoke`, Task 3, `main.ts` Task 4), веб — «Повторить» (`StreamHandle.reopen`, `needsRetry`, Task 6–8), обещания без механизма нет. D-0007: человеку и модели — только `humanText(code, details)`, `message` — в логи; `humanFallback` из `state.updated` хода движка → `fallbackMove` и строка в `get_position` (Task 2, 3). D-0008: токен живёт TTL сессии от создания — поведение веба при отказе входа (Task 7), `[!]` в `NOW.md` (Task 10). D-0009: id — непрозрачные строки, план их формат не разбирает (кроме `grep` id в runbook по алфавиту `[0-9a-z]`). D-0010: `FINISH_WAIT_MS` из бюджетов `score` и повторов (Task 2), `stop_grace_period: 30s` над `SHUTDOWN_MS` 25 с и `start_period` над прогревом 300 с (Task 9). D-0011: переключатель «Голос / Чат» (`prefs.ts`, `ModeSwitch`), атрибут `goko.mode` (веб `setAttributes`, `chat.mjs` `CHAT_ATTRIBUTES`), право `canUpdateOwnMetadata` в токене (Task 5, шаг 1), агент — `followMode` + `session.output/input.setAudioEnabled` (Task 4), запасной путь — отписка веба от аудио агента (Task 7), выбор цвета и ранга только полями `NewGameRequest` (Task 6, 8), тапы в любом режиме.
-- **Заглушек нет.** Все файлы приведены целиком; условные ветки — только на отсутствие VPS/ключей (`chat` и evals пропускаются с пометкой в `NOW.md`), на имена в установленной `livekit-client` (Task 7, примечание к шагу 2), на флаг `npm ci` (Task 9, Step 2) и на результат ручной проверки Ctrl+C (Task 10, Step 6, правка `dev.mjs` с тестом приведена целиком).
-- **Типы.** `ToolClient` (Task 2) — `Pick<GokoClient, 'newGame' | 'play' | 'correct' | 'pass' | 'resign' | 'undo' | 'getGame' | 'ascii' | 'analyze' | 'setRank'>` по именам `createClient` из `packages/protocol/src/client.ts`; поток событий — отдельный `Pick<GokoClient, 'events'>` в `watchSession` (Task 3) и `streamEvents` (Task 6) с `events(target: EventsTarget, signal?)`. `seatColor` объявлена в Task 1 и используется в Task 2, 3, 6. `AgentState` (Task 1) — поля, которые читают Task 2 и 3: `gameId`, `humanColor: Color | null`, `rank`, `komi`, `toolGames`, `announcedFinish`, `awaitingReply`, `lastTap`, `lastErrorAt`, `retriesExhausted`, `fallbackMove`, `startingGame`. `hasEngine`/`humanColorOf` (Task 2) — в `events.ts` (Task 3); одноимённые функции веба (Task 6) повторяют ту же семантику над `GameState` и живут в `text.ts`. `handleEvent(ev, state, now?)` и `watchSession(opts): WatchHandle` (Task 3) вызываются из `main.ts` (Task 4); `modeOf/applyMode/followMode` (Task 4 `mode.ts`) — в `main.ts` с `RoomEvent.ParticipantAttributesChanged` и `ParticipantConnected` из `@livekit/rtc-node`; `GokoAgent(tools, { greet })` (Task 4) — в `main.ts` и eval. `describeEvent`, `CHAT_ATTRIBUTES` (Task 5) — в тесте и `chat.mjs`. `layout/x/y/pointAt/coordAt/hoshi/stones/indexOf` (Task 6) — в `Board.tsx` (Task 8); `upsertLine/whoOf/lineId/acceptLine` (Task 6) — в `useSession` (Task 7); `streamEvents(...): StreamHandle` и `needsRetry` (Task 6) — в `useGame` (Task 7), `reopen` → `StatusBar.onRetry` (Task 8); `describeError/hasEngine/humanColorOf/resultText/statusText/capturesText/rankText` (Task 6) — в Task 7 и 8; `loadPrefs/savePrefs/modeAttributes/newGameRequest/stepRank`, `Mode`, `Prefs`, `ColorChoice` (Task 6) — в `useSession`, `useGame` (Task 7), `ModeSwitch`, `NewGame`, `Controls`, `Transcript` (Task 8); `sendChat/agentReady/CHAT_MAX_CHARS` (Task 6) — в `useSession` (Task 7) и `ChatInput` (Task 8); `MicState` (Task 7) — в `Controls.tsx`; `useSession().reset` передаётся в `useGame(sessionId, onLost)`, `useSession().prefs` — в `useGame().newGame(prefs)` (Task 8 `App.tsx`). Импорты протокола сверены с `packages/protocol/src/index.ts`: `ApiError`, `humanText`, `createClient`, `GokoClient`, `EventsTarget`, `GameEvent`, `GameState`, `CreateSessionResponse`, `NewGameRequest`, `Color`, `Rank`, `RANKS`, `Result`, `Seat`, `Controller` существуют; `seatColor` добавляет Task 1. Переменные окружения контейнеров (Task 9) — по спискам `main.ts` плана ядра и Task 4.
-- **Известные границы.** Форы в `NewGameRequest` нет — выбор только цвета и ранга. Отключить генерацию аудио в Realtime на лету нельзя (`modalities` только в конструкторе `RealtimeModel`): в «Чате» платим за аудио-токены, это цена D-0011. Изменения протокола после 13.09 (`gameId` в `engine.thinking` и `error`, таймауты клиента, коды лимитов, полуцелое коми) план ещё не отражает в литералах событий тестов — отдельный проход.
+- **Покрытие спеки.** Раздел 3 (поток хода: голос → инструмент → game-server → событие → реплика; тап → `via: 'tap'` → событие → реплика) — Task 2 (инструменты), Task 3 (`handleEvent`: тап при `pendingEngineMove` копится в `lastTap` и озвучивается вместе с ответом движка), Task 7 (`useGame.play`). Раздел 5 (события `session.game`, `state.updated` с `cause/by/via/humanFallback`, `engine.thinking`, `game.finished`, `error`) — Task 3 и Task 7 читают все пять типов; `not_found` на SSE → новая сессия (Task 6 `streamEvents`, Task 7 `useSession.reset`). Раздел 9: таблица инструментов один в один — Task 2 (`createTools`); результаты для модели с `myMoveSpoken`, `note` при таймауте ответа, `finished/result` — Task 2; `get_assessment` без лучшего хода в тексте — правило в `INSTRUCTIONS` (Task 4) и eval; озвучивание событий — Task 3; промпт с произношением координат, правилом D-0004 и режимом «Чат» — Task 4; `realtime`/`pipeline` по `VOICE_MODE`, серверный VAD, транскрипция входа `ru` — Task 4 `voice.ts`; приветствие — `generateReply` после `session.start` и применения режима, `onEnter` с `greet: false` — Task 4 `main.ts`, `agent.ts`; `sessionId` из метаданных диспетчеризации — Task 4 `metadata.ts`. Раздел 10: одна страница, SVG-доска, тап = ближайший пункт, «сейчас ход Гоко» без запроса, лента-диалог из `lk.transcription`, вход в комнату и микрофон по первому касанию со `startAudio`, кнопки ≥ 44 px, темы, статус, результат с территорией и мёртвыми камнями, работа без агента — Task 6–8; сессия в `sessionStorage` — Task 7. Раздел 11: контейнеры `game-server` (`TRUST_PROXY=1`, без `ALLOW_SESSIONLESS_GAMES`), `go-engine` (`cpus`, без опубликованных портов, логи KataGo в томе), `voice-agent` (`stop_grace_period` 60 с по drain и shutdown), у всех `init: true`; порт публикует только `game-server` и только на `127.0.0.1`; `API_UPSTREAM` prod/dev и `docker compose up -d caddy`; `flush_interval -1` на `/api/*` (уже в `infra/Caddyfile`); `AGENT_NAME` `goko`/`goko-dev`; деплой статики — Task 10, runbook с живыми проверками — Task 11. Раздел 12: замоканный клиент и замоканный сеанс для `voice-agent` (Task 2, 3, 4), evals по флагу без новых (Task 4), unit для веб-геометрии, ленты, потока, текстов, настроек и чата (Task 6), `chat.mjs` (Task 5), ручная приёмка у доски — `NOW.md` (Task 11). Раздел 18: все проверки — командами с кодом возврата; секреты — только через `.env`.
+- **Решения.** D-0001: комнату создаёт game-server, веб и `chat.mjs` только входят по токену, без `roomConfig`; агент ждёт `waitForParticipant()` до Realtime (Task 4); живая проверка `empty_timeout` — runbook, Task 11. D-0004: ход за человека только по прямой просьбе и вслух — промпт Task 4. D-0005: партия двух людей разрешена — `hasEngine`/`humanColorOf` в `@goko/protocol` (Task 1), тексты в Task 2, 3, 6; фейковый клиент не запрещает её (Task 2). D-0006: `retries_exhausted` → агент переоткрывает поток на первой реплике человека (`watchSession().humanSpoke`, Task 3, `main.ts` Task 4), веб — «Повторить» (`StreamHandle.reopen`, `needsRetry`, Task 6–8), обещания без механизма нет. D-0007: человеку и модели — только `humanText(code, details)`, `message` — в логи; `humanFallback` из `state.updated` хода движка → `fallbackMove` и строка в `get_position` (Task 2, 3). D-0008: токен живёт TTL сессии от создания — поведение веба при отказе входа (Task 7), `[!]` в `NOW.md` (Task 11). D-0009: id — непрозрачные строки, план их формат не разбирает (кроме `grep` id в runbook по алфавиту `[0-9a-z]`). D-0010: `FINISH_WAIT_MS` 22 с — выше серверного `SCORE_BUDGET_MS` 20 с и ниже клиентского `score` 25 с, опрос `getGame` не чаще раза в 2,5 с (Task 2), `stop_grace_period: 30s` над `SHUTDOWN_MS` 25 с и `start_period` над прогревом 300 с (Task 10). D-0011: переключатель «Голос / Чат» (`prefs.ts`, `ModeSwitch`), атрибут `goko.mode` (веб `setAttributes`, `chat.mjs` `CHAT_ATTRIBUTES`), право `canUpdateOwnMetadata` в токене (Task 5, шаг 1), агент — `followMode` + `session.output/input.setAudioEnabled` (Task 4), запасной путь — отписка веба от аудио агента (Task 7), выбор цвета и ранга только полями `NewGameRequest` (Task 6, 8), тапы в любом режиме. D-0012: `rate_limited` — ожидание `Retry-After` у агента (`state.blockedUntil`, `retryAfterMs` из `@goko/protocol` — Task 1, Task 2, опрос итога и поток — Task 3) и у веба (`retryDelayMs`, пауза потока — Task 6, `blockedUntil` в `useGame` — Task 7); `too_many_games` и `bad_request` с `reason` — только `humanText` (Task 2, 5, 6); прежняя партия сессии брошена при смене (отметка `<id>.abandoned` переживает рестарт, не в лимитах и без задачи при старте, возврат без проверки лимита), лимит 3 незавершённых партий на клиента и `ALLOW_SESSIONLESS_GAMES` с правкой D-0012 и спеки — Task 9; `TRUST_PROXY=1` и отсутствие флага в compose — Task 10; квота voice-agent без отдельного ключа — расчёт в Task 10; чистка брошенных партий и живые проверки адреса за Caddy — Task 11.
+- **Заглушек нет.** Все файлы приведены целиком; условные ветки — только на отсутствие VPS/ключей (`chat`, evals и проверки страницей без LiveKit пропускаются с пометкой в `NOW.md`), на Docker на ПК (Task 10: `compose config`, сборки, `npm ci` при `spike` в workspaces), на `ETARGET` при `npm install` (Task 1, 6), на имена в установленной `livekit-client` (Task 7, примечание к шагу 2), на флаг `npm ci` (Task 10, Step 2) и на результат ручной проверки Ctrl+C (Task 11, Step 7, правка `dev.mjs` с тестом приведена целиком).
+- **Типы.** `ToolClient` (Task 2) — `Pick<GokoClient, 'newGame' | 'play' | 'correct' | 'pass' | 'resign' | 'undo' | 'getGame' | 'ascii' | 'analyze' | 'setRank'>` по именам `createClient` из `packages/protocol/src/client.ts`; поток событий — отдельный `Pick<GokoClient, 'events'>` в `watchSession` (Task 3) и `streamEvents` (Task 6) с `events(target: EventsTarget, signal?)`. `seatColor` объявлена в Task 1 и используется в Task 2, 3, 6. `AgentState` (Task 1) — поля, которые читают Task 2 и 3: `gameId`, `humanColor: Color | null`, `rank`, `komi`, `toolGames`, `announcedFinish`, `awaitingReply`, `lastTap`, `lastErrorAt`, `retriesExhausted`, `announceSync`, `fallbackMove`, `startingGame`. `hasEngine`/`humanColorOf` над `Pick<GameState, …>` и `RETRY_MS`, `STABLE_CONNECTION_MS`, `retryAfterMs` объявлены в `@goko/protocol` (Task 1) и импортируются в `tools.ts` (Task 2), `events.ts` (Task 3), `stream.ts` и `text.ts` (Task 6), `useGame` (Task 7); своих копий нет. `handleEvent(ev, state, now?)` и `watchSession(opts): WatchHandle` (Task 3) вызываются из `main.ts` (Task 4); `modeOf/applyMode/followMode` (Task 4 `mode.ts`) — в `main.ts` с `RoomEvent.ParticipantAttributesChanged` и `ParticipantConnected` из `@livekit/rtc-node`; `GokoAgent(tools, { greet })` (Task 4) — в `main.ts` и eval. `describeEvent`, `CHAT_ATTRIBUTES` (Task 5) — в тесте и `chat.mjs`. `layout/x/y/pointAt/coordAt/hoshi/stones/indexOf` (Task 6) — в `Board.tsx` (Task 8); `upsertLine/whoOf/lineId/acceptLine` (Task 6) — в `useSession` (Task 7); `streamEvents(...): StreamHandle` и `needsRetry` (Task 6) — в `useGame` (Task 7), `reopen` → `StatusBar.onRetry` (Task 8); `describeError/resultText/statusText/capturesText/rankText` (Task 6) — в Task 7 и 8; `loadPrefs/savePrefs/modeAttributes/newGameRequest/stepRank`, `Mode`, `Prefs`, `ColorChoice` (Task 6) — в `useSession`, `useGame` (Task 7), `ModeSwitch`, `NewGame`, `Controls`, `Transcript` (Task 8); `sendChat/agentReady/CHAT_MAX_CHARS` (Task 6) — в `useSession` (Task 7) и `ChatInput` (Task 8); `MicState` (Task 7) — в `Controls.tsx`; `useSession().reset` передаётся в `useGame(sessionId, onLost)`, `useSession().prefs` — в `useGame().newGame(prefs)` (Task 8 `App.tsx`). Импорты протокола сверены с `packages/protocol/src/index.ts`: `ApiError`, `humanText`, `createClient`, `GokoClient`, `EventsTarget`, `GameEvent`, `GameState`, `CreateSessionResponse`, `NewGameRequest`, `Color`, `Rank`, `RANKS`, `Result`, `Seat`, `Controller` существуют; `seatColor`, `hasEngine`, `humanColorOf`, `RETRY_MS`, `STABLE_CONNECTION_MS`, `retryAfterMs` добавляет Task 1. Переменные окружения контейнеров (Task 10) — по спискам `main.ts` плана ядра и Task 4.
+- **Известные границы.** Форы в `NewGameRequest` нет — выбор только цвета и ранга. Отключить генерацию аудио в Realtime на лету нельзя (`modalities` только в конструкторе `RealtimeModel`): в «Чате» платим за аудио-токены, это цена D-0011. Изменения протокола после широкого ревью (`gameId` в `engine.thinking` и `error`, `CLIENT_TIMEOUTS` и `CallOptions`, `ClientTimeoutError`, `rate_limited` и `too_many_games`, `bad_request` с `reason`, полуцелое коми) отражены во втором проходе, в том числе в литералах событий тестов. Счёт на клиента и владельцы сессий живут в памяти `game-server`: рестарт их обнуляет; отметки брошенных сменой партий лежат на диске и рестарт переживают, а текущие партии сессий до рестарта отметки не получают и в общем счёте до `SESSION_TTL_MS`. Разные адреса (другая сеть, другая /64) обходят лимит на клиента, но не общий лимит 20 и не `MAX_SESSIONS`. Отметки идущих партий сами с диска не уходят — ручная чистка вместе со снапшотом (runbook, Task 11). Сверка после таймаута хода у агента опирается на ревизию из ответов инструментов: если после них ревизию сменили тап или ответ Гоко, решает только конец партии: незаписанный пас после прежнего паса человека может сойти за записанный, а записанный ход, за которым уже есть другие ходы, — за незаписанный. Повтора хода нет ни в одном случае. Поправки хода в вебе нет, перечитывание там — у хода и паса. Проверки сборки веба и compose — командами; поведение за Caddy и `empty_timeout` — только живыми проверками runbook после деплоя.
+
+### Пары задач: общие файлы и интерфейсы
+
+| Пара | Общий файл или интерфейс | Что производит первая | Что потребляет вторая | Согласовано? |
+| --- | --- | --- | --- | --- |
+| 1 — 2 | `apps/voice-agent/src/state.ts`; `seatColor`, `hasEngine`, `humanColorOf`, `retryAfterMs` из `@goko/protocol` | `AgentState` с `gameId`, `humanColor`, `blockedUntil`, `awaitingFinish`, `announcedFinish`, `startingGame`; функции мест и `retryAfterMs(details)` в протоколе | инструменты читают и пишут эти поля, цвет человека — через `seatColor`/`humanColorOf`, пауза — `retryAfterMs`; `tools.ts` их не определяет и не реэкспортирует | да: имена полей и типы совпадают, `blockedUntil` — число мс эпохи, `retryAfterMs` возвращает мс |
+| 1 — 3 | `state.ts`; `@goko/protocol` | те же поля и `announceSync`; `hasEngine`, `humanColorOf`, `retryAfterMs`, `RETRY_MS`, `STABLE_CONNECTION_MS` | `handleEvent` и `watchSession` ставят `announcedFinish`, `retriesExhausted`, `announceSync` (ставит `session.game` со сменой партии, снимает любой `state.updated`), сбрасывают `awaitingFinish`; паузы потока — константы протокола | да |
+| 1 — 6 | `seatColor`, `hasEngine`, `humanColorOf`, `retryAfterMs`, `RETRY_MS`, `STABLE_CONNECTION_MS` из `@goko/protocol` | функции и константы, экспорт `retry.ts` в `index.ts` | `text.ts` (`statusText`, `rankText`, `retryDelayMs` над `retryAfterMs`), `stream.ts` (паузы) | да: своих копий в вебе нет |
+| 1 — 7 | `hasEngine`, `humanColorOf` из `@goko/protocol` | функции мест | `useGame`: «сейчас ход Гоко» или «сейчас не твой ход», цвет при сдаче | да |
+| 2 — 3 | `testing/fake-client.ts` | `createFakeClient`, `fakeGame` (с `gameId` у событий) | опрос итога, тесты `events.test.ts` на фейковом клиенте; `retryAfterMs`, `hasEngine`, `humanColorOf` обе задачи берут из протокола (Task 1), а не из `tools.ts` | да |
+| 2 — 4 | `createTools(deps)`, `ToolDeps.signal` | инструменты с долгоживущим `CallOptions.signal` | `main.ts` передаёт сигнал сеанса, eval строит те же инструменты | да |
+| 2 — 5 | тексты `humanText` для `too_many_games`, `bad_request` | инструменты отдают `humanText(code, details)` | `scripts/chat.mjs` строит тексты своих ошибок и событий `error` тем же `humanText` и отдельно называет `ClientTimeoutError` | да |
+| 3 — 4 | `watchSession(opts): WatchHandle`, `SESSION_EXPIRED_INSTRUCTIONS` | цикл потока с паузами 1–15 с и выходом на `not_found` | `main.ts`: `speak`, `signal`, `humanSpoke` | да |
+| 3 — 6 | `STABLE_CONNECTION_MS`, `RETRY_MS` (1, 2, 4, 8, 15 с) | `watchSession` импортирует константы из `@goko/protocol` (Task 1) | `streamEvents` веба импортирует те же константы | да: одна константа протокола, правило пауз не разойдётся |
+| 4 — 5 | атрибут `goko.mode`, право `canUpdateOwnMetadata` | агент читает `goko.mode` (`mode.ts`) | `chat.mjs` выставляет `CHAT_ATTRIBUTES`; токен с правом — шаг 1 задачи 5 | да |
+| 4 — 8 | eval и ручная проверка режимов, бюджет платных прогонов | eval — прогон 1 из 5 (сценарии D-0004 и «Чат» в том же файле) | проверка режимов с агентом — прогон 4 из 5 | да: раскладка в Global Constraints, всего не больше 5 |
+| 4 — 9 | `infra/.env.example` | строки `VOICE_MODE`, `API_BASE` после `AGENT_NAME` | строка `ALLOW_SESSIONLESS_GAMES` после `TRUST_PROXY` | да: разные якоря |
+| 4 — 10 | остановка воркера | `DRAIN_TIMEOUT_MS` 5 с, `SHUTDOWN_PROCESS_TIMEOUT_MS` 20 с | `stop_grace_period: 60s` у `voice-agent` | да: около 30 с остановки, запас вдвое |
+| 5 — 7, 8 | право токена `canUpdateOwnMetadata` | `livekit.ts` выдаёт право | `useSession` вызывает `setAttributes` с `modeAttributes` | да |
+| 5 — 9 | `apps/game-server/src/app.test.ts` | ожидаемые права токена | `MakeOptions`, `make` и новый `describe` лимита | да: разные места файла, тест прав не создаёт партий |
+| 5 — 6 | корневой `package.json` | скрипт `chat`, devDependency `@livekit/rtc-node` | `typecheck` с веб-конфигом, `build:web` | да: разные ключи |
+| 6 — 7 | `stream.ts`, `text.ts`, `prefs.ts`, `chat.ts` | `streamEvents(..., sleep?, now?)`, `needsRetry`, `describeError`, `retryDelayMs`, `sendTapMove`, `newGameRequest`, `modeAttributes`, `sendChat` | `useGame`: `blockedUntil` по `retryDelayMs`, `request` с `CallOptions`, `tapMove` над `sendTapMove`; `useSession` | да: сигнатуры и единицы (мс) совпадают |
+| 6 — 8 | `apps/web/src/main.tsx` | заглушка проверки сборки (шаг 11) | задача 8 заменяет файл целиком и повторяет проверку бандла | да |
+| 7 — 8 | `useSession`, `useGame`, `MicState` | хуки и их поля | `App.tsx`, `Controls`, `StatusBar.onRetry`, `NewGame` | да |
+| 2, 5, 6, 7 — 9 | создание партий только в сессии; тексты `humanText` | агент, `chat.mjs` и веб зовут `newGame(sessionId, …)`, `createGame` нет | задача 9 выключает `POST /api/games` и добавляет `sessionless_disabled` и `scope: 'client'`; `git grep` на шаге 9 | да: тесты задач 2 и 6 сравнивают с `humanText(...)`, проходят до и после задачи 9 |
+| 8 — 9 | ручная проверка страницей | шаг 5 задачи 8 без лимита на клиента | шаг 10 задачи 9 той же страницей: «Новая партия» подряд не упирается в лимит, отметки `<id>.abandoned` на диске и после рестарта | да: проверка лимитов перенесена в задачу 9 |
+| 9 — 10 | `ALLOW_SESSIONLESS_GAMES`, `TRUST_PROXY`, `.env.example` | флаг (включает только `1`), ключ клиента, строка флага | compose без флага, `TRUST_PROXY: "1"`; `ENGINE_CPUS`, `KATAGO_ASSET`, `KATAGO_SHA256` в конец `.env.example` | да: шаг 8 задачи 10 проверяет без печати значений |
+| 9 — 11 | `scripts/dev.mjs`, `scripts/dev.test.ts`, `.env.example`, D-0012 | флаг в двух ветках `serverEnv`, два `toMatchObject`; лимит на клиента; отметки `<id>.abandoned` | шаг 7 меняет только строку запуска web и добавляет тест; шаг 6 — комментарий `SESSION_TTL_MS`; проверка 4 runbook и чистка снапшота вместе с отметкой; пункта `[!]` о лимите в `NOW.md` нет — замена партии в лимит не упирается | да: разные строки файлов |
+| 10 — 11 | сервисы compose, пути, тома | `/opt/goko/data/games` (uid 1000, `deploy.sh`), том `engine_logs`, `stop_grace_period`, `TRUST_PROXY` | runbook: состав, чистка брошенных партий через `dc run --no-deps game-server`, проверки 3–4, пункт `NOW.md` про `stop_grace_period` | да |
+
+### Тесты согласуются с кодом шага
+
+| Задача | Тесты | Согласовано? |
+| --- | --- | --- |
+| 1 | `phrases.test.ts` (в том числе «поставь 3 кю пожалуйста»), `seat.test.ts` (`seatColor`, `hasEngine`, `humanColorOf`), `retry.test.ts` (`RETRY_MS`, `retryAfterMs`) — функции шага | да: 12 тестов в трёх файлах |
+| 2 | `tools.test.ts` на `createFakeClient` без `!` (`gameOf`): `FINISH_WAIT_MS` 22 с, опрос 2,5 с, `blockedUntil` (сам `retryAfterMs` — в `retry.test.ts` задачи 1), слабые группы фейка на `C3, C4` отдельно от `bestMoves`, `client_timeout`, `too_many_games` по `humanText`; таймаут хода, паса и поправки — `failNext(err, 'before' \| 'after')`: перечитывание тем же сигналом, записанный ход с ответом Гоко и без него, пас при прежнем пасе решает ревизия, отказ перечитывания | да: текст незаписанного хода и порядок вызовов совпадают с `sendMove` шага 4 |
+| 3 | `events.test.ts`: события с `gameId`, чужой `gameId` игнорируется, `session.game` → `sync` той же партии — «Продолжаем партию», паузы 1–15 с, `Retry-After`, `not_found` → выход и одна реплика; ожидание реплики — явный промис, без `vi.waitFor` | да |
+| 4 | `metadata`, `voice`, `mode` — unit; `agent.eval.test.ts` — все сценарии файла за один прогон, в том числе два теста D-0004 (прямая просьба и размышление) и режим «Чат» | да |
+| 5 | `livekit.test.ts`, `app.test.ts` (права токена), `chat.test.ts` (`describeEvent` с `gameId`, `CHAT_ATTRIBUTES`) | да |
+| 6 | `geometry` (левый край без `-0`), `transcript`, `stream` (паузы, сброс после 15 с, `Retry-After`; ожидание паузы и первого события — явные промисы, без `vi.waitFor` и `setTimeout`), `text` (`describeError`, `retryDelayMs`, `sendTapMove` на фейковом `getGame`: без чтения при ответе, перечитывание при таймауте, текст только при той же ревизии), `prefs`, `chat`; сборка Vite и проверка бандла — шаг 11 | да |
+| 7 | unit-тестов нет (хуки React); `npm run typecheck` по импортам из задачи 6 | да: всё, что хуки считают, покрыто тестами задачи 6, в том числе перечитывание после таймаута тапа (`sendTapMove`) |
+| 8 | компонентных тестов нет; `npm run build:web`, проверка бандла, ручные шаги 5–6 | да |
+| 9 | `human-text.test.ts`, `service.test.ts` (3 на клиента, создаваемая в счёте, устаревшая не в счёте, общий лимит раньше; смена партии бросает прежнюю в общем лимите и в лимите клиента, возврат ходом и `resume`, рестарт с отметкой без задачи, отказ записи отметки), `store.test.ts` (файл `<id>.abandoned`, `load` его не читает, повтор и снятие, проверка id), `app.test.ts` (замена партий подряд, возврат ходом, владелец сессии, `X-Forwarded-For`, флаг, IPv6 /64), `start-server.test.ts` (значения флага, `marks` — то же хранилище), `smoke.test.ts`, `dev.test.ts` | да: сообщения, `details`, строка `[!]` и статусы в тестах совпадают с кодом шага 7 |
+| 10 | unit-тестов нет; `docker compose config` с проверкой переменных, портов, `init`, `stop_grace_period`; `bash -n deploy.sh` и `grep` исключений HEAD; сборка образов (при Docker на ПК) | да |
+| 11 | тест `dev.test.ts` только при правке шага 7; `npm run check && npm run smoke` | да |

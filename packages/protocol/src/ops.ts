@@ -16,6 +16,7 @@ export const NewGameRequest = z.strictObject({
     .strictObject({ boardSize: BoardSize.optional(), rules: z.literal('chinese').optional(), komi: Komi.optional() })
     .optional(),
   waitForReply: z.boolean().default(true),
+  via: Via.default('api'),
 });
 export type NewGameRequest = z.input<typeof NewGameRequest>;
 
@@ -58,6 +59,12 @@ export type UndoRequest = z.input<typeof UndoRequest>;
 export const UndoResponse = z.object({ state: GameState, removed: z.array(Move) });
 export type UndoResponse = z.infer<typeof UndoResponse>;
 
+export const RedoRequest = UndoRequest;
+export type RedoRequest = z.input<typeof RedoRequest>;
+
+export const RedoResponse = z.object({ state: GameState, restored: z.array(Move) });
+export type RedoResponse = z.infer<typeof RedoResponse>;
+
 export const CorrectRequest = z.strictObject({
   coord: z.string().min(1).max(8),
   waitForReply: z.boolean().default(true),
@@ -68,7 +75,10 @@ export type CorrectRequest = z.input<typeof CorrectRequest>;
 export const SetRankRequest = z.strictObject({ color: Color, rank: Rank });
 export type SetRankRequest = z.input<typeof SetRankRequest>;
 
-export const AnalyzeRequest = z.strictObject({ maxVisits: z.number().int().min(1).max(1000).default(50) });
+export const AnalyzeRequest = z.strictObject({
+  maxVisits: z.number().int().min(1).max(1000).default(50),
+  expectedRevision: z.number().int().nonnegative().optional(),
+});
 export type AnalyzeRequest = z.input<typeof AnalyzeRequest>;
 
 export const GroupInfo = z.object({
@@ -81,6 +91,8 @@ export const GroupInfo = z.object({
 export type GroupInfo = z.infer<typeof GroupInfo>;
 
 export const Analysis = z.object({
+  gameId: z.string(),
+  revision: z.number().int().nonnegative(),
   visits: z.number().int(),
   winrateB: z.number(),
   scoreLeadB: z.number(),
@@ -97,6 +109,9 @@ export const CreateSessionResponse = z.object({
   livekit: z.object({ url: z.string(), token: z.string() }),
 });
 export type CreateSessionResponse = z.infer<typeof CreateSessionResponse>;
+
+export const RestartConversationRequest = z.object({ requestId: z.string().min(1).max(128) }).strict();
+export type RestartConversationRequest = z.infer<typeof RestartConversationRequest>;
 
 export const ListGamesResponse = z.object({ games: z.array(GameSummary) });
 export type ListGamesResponse = z.infer<typeof ListGamesResponse>;

@@ -1,24 +1,58 @@
 #!/usr/bin/env bash
 # Деплой на VPS: синхронизация репозитория, подстановка домена в livekit.yaml, compose up, статика.
-# Использование: infra/scripts/deploy.sh [--host goko] [--web-dir apps/web/dist]
+# Использование: infra/scripts/deploy.sh [--host goko] [--web-dir apps/web/dist] [--build-web]
+#   --build-web: сверить APP_KEY ПК и VPS по хешу, собрать apps/web (npm run build:web) и выложить
+#                apps/web/dist как статику; вместе с --web-dir не указывается
 # Синхронизация идёт через rsync; если rsync нет (Git Bash на Windows) — через tar по ssh.
 set -euo pipefail
 trap 'echo "[X] deploy: ошибка на строке $LINENO" >&2' ERR
 HOST=goko
 WEB_DIR=""
+BUILD_WEB=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --host) HOST="$2"; shift 2;;
     --web-dir) WEB_DIR="$2"; shift 2;;
+    --build-web) BUILD_WEB=1; shift;;
     *) echo "unknown arg $1"; exit 2;;
   esac
 done
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+if [ "$BUILD_WEB" = 1 ] && [ -n "$WEB_DIR" ]; then
+  echo "[X] deploy: --build-web выкладывает apps/web/dist — не указывай вместе с --web-dir" >&2
+  exit 2
+fi
 
 # .env живёт только на VPS: без него деплой обрывался бы уже после синхронизации
 if ! ssh "$HOST" test -r /opt/goko/.env; then
   echo "[X] deploy: на $HOST нет читаемого /opt/goko/.env — запусти bootstrap.sh и заполни файл" >&2
   exit 1
+fi
+
+# APP_KEY вшивается в бандл из .env ПК (vite.config.ts) и должен совпадать с /opt/goko/.env, иначе телефон
+# получит 401 на каждый /api/*. Сравниваются sha256 значений; ни ключи, ни хеши не печатаются.
+# Локально ключ читает тот же loadEnv, что у Vite; на VPS — оболочка, как compose в блоке REMOTE ниже.
+if [ "$BUILD_WEB" = 1 ]; then
+  if ! local_hash="$(cd "$ROOT/apps/web" && node --input-type=module -e "import { loadEnv } from 'vite'; import { createHash } from 'node:crypto'; const k = loadEnv('production', '../..', '').APP_KEY ?? ''; process.stdout.write(k ? createHash('sha256').update(k).digest('hex') : '')")"; then
+    echo "[X] deploy: не удалось прочитать APP_KEY для бандла (нужны npm ci и vite)" >&2
+    exit 1
+  fi
+  remote_hash="$(ssh "$HOST" 'set -a; . /opt/goko/.env; set +a; [ -n "${APP_KEY:-}" ] && printf %s "$APP_KEY" | sha256sum | cut -d" " -f1')" || remote_hash=""
+  if [ -z "$local_hash" ]; then
+    echo "[X] deploy: APP_KEY для бандла пуст — задай его в .env ПК, как в /opt/goko/.env" >&2
+    exit 1
+  fi
+  if [ -z "$remote_hash" ]; then
+    echo "[X] deploy: APP_KEY в /opt/goko/.env на $HOST пуст или не прочитан" >&2
+    exit 1
+  fi
+  if [ "$local_hash" != "$remote_hash" ]; then
+    echo "[X] deploy: APP_KEY в .env ПК не совпадает с /opt/goko/.env — телефон получил бы 401" >&2
+    exit 1
+  fi
+  echo "[OK] deploy: APP_KEY бандла совпадает с /opt/goko/.env"
+  (cd "$ROOT" && npm run build:web)
+  WEB_DIR="apps/web/dist"
 fi
 
 if command -v rsync >/dev/null 2>&1; then
@@ -81,6 +115,8 @@ if [ -z "${ACME_EMAIL:-}" ]; then
   echo "[!]         письма об истечении сертификата уйдут в никуда. Впиши почту в /opt/goko/.env"
 fi
 sed "s/__TURN_DOMAIN__/${LK_HOST}/" /opt/goko/src/infra/livekit.yaml > /opt/goko/livekit.yaml
+# Снапшоты партий пишет node (uid 1000) в контейнере game-server; bootstrap создал /opt/goko/data от root.
+install -d -o 1000 -g 1000 /opt/goko/data/games
 cd /opt/goko/src/infra
 docker compose --env-file /opt/goko/.env up -d --build --remove-orphans
 docker compose --env-file /opt/goko/.env ps

@@ -26,12 +26,30 @@ export const EngineGenmoveResponse = z.object({
   winrateB: z.number(),
   scoreLeadB: z.number(),
   humanPolicyTop: z.array(z.object({ coord: z.string(), prob: z.number() })),
+  searchCandidates: z.array(z.string()).max(5).optional(),
+  rankCandidates: z.array(z.object({ coord: z.string(), prob: z.number() })).max(3).default([]),
+  candidateAnalysis: z.array(z.object({
+    coord: z.string(),
+    winrateB: z.number(),
+    scoreLeadB: z.number(),
+    visits: z.number().int(),
+    pv: z.array(z.string()).max(4),
+  })).max(3).default([]),
   // true — ход взят из поиска, а не из человеческой сети (сеть не ответила или её кандидаты
   // отсеяны). У доски это слышно как «Гоко вдруг заиграл сильнее», поэтому признак идёт наружу.
   humanFallback: z.boolean(),
   ms: z.number(),
 });
 export type EngineGenmoveResponse = z.infer<typeof EngineGenmoveResponse>;
+
+export const EngineDecision = z.object({
+  playerChoice: z.object({ coord: z.string(), intention: z.string().max(200) }).optional(),
+  moveN: z.number().int().positive(),
+  basedOnRevision: z.number().int().nonnegative(),
+  rankCandidates: EngineGenmoveResponse.shape.rankCandidates,
+  candidateAnalysis: EngineGenmoveResponse.shape.candidateAnalysis,
+});
+export type EngineDecision = z.infer<typeof EngineDecision>;
 
 export const EngineAnalyzeRequest = EnginePositionRequest.extend({
   maxVisits: z.number().int().min(1).max(1000).default(50),
@@ -45,6 +63,7 @@ export const EngineMoveInfo = z.object({
   scoreLeadB: z.number(),
   visits: z.number().int(),
   order: z.number().int(),
+  pv: z.array(z.string()).max(4).default([]),
 });
 export type EngineMoveInfo = z.infer<typeof EngineMoveInfo>;
 

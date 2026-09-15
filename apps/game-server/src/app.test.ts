@@ -8,7 +8,7 @@ import { type AppDeps, InFlight, SSE_QUEUE_LIMIT, createApp } from './app.ts';
 import { type Engine, createEngineClient } from './engine-client.ts';
 import { EventBus } from './events.ts';
 import { createFakeEngine } from './fake-engine.ts';
-import type { RoomCreator } from './livekit.ts';
+import type { AgentDispatcher, RoomCreator } from './livekit.ts';
 import { GameService } from './service.ts';
 import { SessionManager } from './sessions.ts';
 import { type GuardedService, closeWithin, guardService, memoryStore, track } from './test-helpers.ts';
@@ -32,9 +32,9 @@ afterEach(async () => {
   }
 });
 
-type RoomCall = { name: string; emptyTimeout: number; agents: RoomAgentDispatch[] };
+type RoomCall = { name: string; emptyTimeout: number; departureTimeout: number; agents: RoomAgentDispatch[] };
 
-function fakeRooms(fail?: Error): RoomCreator & { calls: RoomCall[] } {
+function fakeRooms(fail?: Error): RoomCreator & import('./livekit.ts').AgentDispatcher & { calls: RoomCall[] } {
   const calls: RoomCall[] = [];
   return {
     calls,
@@ -43,6 +43,9 @@ function fakeRooms(fail?: Error): RoomCreator & { calls: RoomCall[] } {
       if (fail) throw fail;
       return {};
     },
+    listDispatch: async () => [],
+    deleteDispatch: async () => {},
+    createDispatch: async () => ({}),
   };
 }
 
@@ -52,7 +55,7 @@ type MakeOptions = {
   ttlMs?: number;
   now?: () => number;
   heartbeatMs?: number | 'default';
-  rooms?: RoomCreator & { calls: RoomCall[] };
+  rooms?: RoomCreator & AgentDispatcher & { calls: RoomCall[] };
   livekit?: Partial<AppDeps['livekit']>;
   closing?: AbortSignal;
   delayMs?: number;
@@ -61,6 +64,9 @@ type MakeOptions = {
   engineKey?: string;
   rateLimits?: AppDeps['rateLimits'];
   trustProxy?: boolean;
+  maxGamesPerClient?: number;
+  // 'default' — не передавать флаг в createApp: проверка умолчания.
+  sessionlessGames?: boolean | 'default';
 };
 
 async function make(opts: MakeOptions = {}) {
@@ -69,7 +75,9 @@ async function make(opts: MakeOptions = {}) {
   // Снапшоты в памяти: тесты ждут фоновый коммит по оборотам очереди, а настоящая запись на диск
   // под нагрузкой не укладывается ни в какое их число.
   const store = memoryStore();
-  const service = new GameService({ store, engine: opts.engine ?? engine, bus, replyTimeoutMs: 500 });
+  // Лимит на клиента по умолчанию высокий, а партии без сессии включены: прежние тесты создают партии
+  // клиентом протокола без адреса сокета (общий ключ unknown) и через POST /api/games. Новые тесты задают оба явно.
+  const service = new GameService({ store, engine: opts.engine ?? engine, bus, replyTimeoutMs: 500, maxGamesPerClient: opts.maxGamesPerClient ?? 1000 });
   opened.push(guardService(service));
   await service.init();
   const sessions = new SessionManager({ max: opts.maxSessions ?? 3, ttlMs: opts.ttlMs ?? 60_000, now: opts.now });
@@ -89,6 +97,7 @@ async function make(opts: MakeOptions = {}) {
     engineKey: opts.engineKey,
     rateLimits: opts.rateLimits,
     trustProxy: opts.trustProxy,
+    sessionlessGames: opts.sessionlessGames === 'default' ? undefined : (opts.sessionlessGames ?? true),
     log: (line) => logs.push(line),
   });
   // Клиент протокола поверх app.request: без сети.
@@ -154,7 +163,7 @@ describe('createApp: маршруты брифа', () => {
     expect(await health.json()).toEqual({ ok: true, games: 0, sessions: 0 });
   });
 
-  it('создание сессии (D-0001): комнату с агентом создаёт сервер, токен только roomJoin; session.game в потоке', async () => {
+  it('создание сессии (D-0001, D-0011): комнату с агентом создаёт сервер, токен — roomJoin и право на свои атрибуты; session.game в потоке', async () => {
     const { client, app, rooms } = await make({ script: ['E5'] });
     vi.useFakeTimers({ toFake: ['Date'] });
     const { session, livekit } = await client.createSession();
@@ -162,7 +171,7 @@ describe('createApp: маршруты брифа', () => {
     // Часы заморожены и на проверке: иначе токен на час мог бы истечь по настоящим часам машины.
     const claims = await new TokenVerifier(LK.apiKey, LK.apiSecret).verify(livekit.token);
     vi.useRealTimers();
-    expect(claims.video).toEqual({ room: session.room, roomJoin: true, canPublish: true, canSubscribe: true, canPublishData: true });
+    expect(claims.video).toEqual({ room: session.room, roomJoin: true, canPublish: true, canSubscribe: true, canPublishData: true, canUpdateOwnMetadata: true });
     expect(claims.roomConfig).toBeUndefined();
     expect(claims.sub).toBe(`phone-${session.id}`);
     expect((claims.exp ?? 0) - (claims.nbf ?? 0)).toBe(LK.tokenTtlSeconds);
@@ -170,6 +179,7 @@ describe('createApp: маршруты брифа', () => {
     expect(rooms.calls).toHaveLength(1);
     expect(rooms.calls[0]?.name).toBe(session.room);
     expect(rooms.calls[0]?.emptyTimeout).toBe(300);
+    expect(rooms.calls[0]?.departureTimeout).toBe(900);
     expect(rooms.calls[0]?.agents).toHaveLength(1);
     expect(rooms.calls[0]?.agents[0]?.agentName).toBe(LK.agentName);
     expect(JSON.parse(rooms.calls[0]?.agents[0]?.metadata ?? '')).toEqual({ sessionId: session.id });
@@ -191,6 +201,75 @@ describe('createApp: маршруты брифа', () => {
     expect(got.map((e) => e.type)).toEqual(['session.game', 'state.updated']);
     expect(got[0]?.gameId).toBe(created.state.id);
     expect(got[1]).toMatchObject({ cause: 'sync', state: { id: created.state.id } });
+  });
+
+  it('restart разговора сохраняет партию, заменяет завершённый dispatch и дедуплицирует requestId', async () => {
+    const rooms = fakeRooms() as ReturnType<typeof fakeRooms> & {
+      dispatches: Array<{ id: string }>;
+      deleted: string[];
+      listDispatch(room: string): Promise<Array<{ id: string }>>;
+      deleteDispatch(id: string, room: string): Promise<void>;
+      createDispatch(room: string, agentName: string, options: { metadata?: string }): Promise<{ id: string }>;
+    };
+    rooms.dispatches = [{ id: 'old' }];
+    rooms.deleted = [];
+    rooms.listDispatch = async () => [...rooms.dispatches];
+    rooms.deleteDispatch = async (id) => { rooms.deleted.push(id); rooms.dispatches = rooms.dispatches.filter((d) => d.id !== id); };
+    rooms.createDispatch = async (_room, _agent, options = {}) => {
+      const dispatch = { id: `new-${rooms.dispatches.length}`, metadata: options.metadata };
+      rooms.dispatches.push(dispatch);
+      return dispatch;
+    };
+    const { client } = await make({ rooms });
+    const created = await client.createSession();
+    const game = await client.newGame(created.session.id, HUMAN_BLACK);
+    const first = await client.restartConversation(created.session.id, { requestId: 'restart-a' });
+    const duplicate = await client.restartConversation(created.session.id, { requestId: 'restart-a' });
+    expect(first.session.currentGameId).toBe(game.state.id);
+    expect(duplicate).toEqual(first);
+    expect(rooms.deleted).toEqual(['old']);
+    expect(rooms.dispatches).toHaveLength(1);
+  });
+
+  it('сериализует разные restart requestId и после гонки оставляет один dispatch', async () => {
+    const rooms = fakeRooms();
+    let dispatches: Array<{ id: string; metadata?: string }> = [];
+    let sequence = 0;
+    rooms.listDispatch = async () => [...dispatches];
+    rooms.deleteDispatch = async (id) => { dispatches = dispatches.filter((item) => item.id !== id); };
+    rooms.createDispatch = async (_room, _agent, options) => {
+      await Promise.resolve();
+      const item = { id: `d${++sequence}`, metadata: options?.metadata };
+      dispatches.push(item);
+      return item;
+    };
+    const { client } = await make({ rooms });
+    const { session } = await client.createSession();
+    await Promise.all([
+      client.restartConversation(session.id, { requestId: 'a' }),
+      client.restartConversation(session.id, { requestId: 'b' }),
+    ]);
+    expect(dispatches).toHaveLength(1);
+    expect(JSON.parse(dispatches[0]?.metadata ?? '{}').conversationRequestId).toBe('b');
+  });
+
+  it('late retry старого requestId не удаляет агента нового поколения', async () => {
+    const rooms = fakeRooms();
+    let dispatches: Array<{ id: string; metadata?: string }> = [];
+    rooms.listDispatch = async () => [...dispatches];
+    rooms.deleteDispatch = async (id) => { dispatches = dispatches.filter((item) => item.id !== id); };
+    rooms.createDispatch = async (_room, _agent, options) => {
+      const item = { id: `d-${Date.now()}-${Math.random()}`, metadata: options?.metadata };
+      dispatches.push(item);
+      return item;
+    };
+    const { client } = await make({ rooms });
+    const { session } = await client.createSession();
+    await client.restartConversation(session.id, { requestId: 'a' });
+    await client.restartConversation(session.id, { requestId: 'b' });
+    await expect(client.restartConversation(session.id, { requestId: 'a' })).rejects.toMatchObject({ code: 'revision_conflict', status: 409 });
+    expect(dispatches).toHaveLength(1);
+    expect(JSON.parse(dispatches[0]?.metadata ?? '{}').conversationRequestId).toBe('b');
   });
 
   it('play по HTTP возвращает ход и ответ; ошибки протокола со статусами', async () => {
@@ -251,6 +330,9 @@ describe('createApp: маршруты брифа', () => {
     const id = state.id;
     await client.play(id, { coord: 'D4' });
     expect((await client.undo(id)).removed).toHaveLength(2);
+    expect((await client.redo(id)).restored.map((m) => m.coord)).toEqual(['D4', 'E5']);
+    await expect(client.redo(id)).rejects.toMatchObject({ code: 'nothing_to_redo', status: 409 });
+    await client.undo(id);
     await client.play(id, { coord: 'C3' });
     expect((await client.correct(id, { coord: 'C4' })).reply?.coord).toBe('pass');
     expect((await client.analyze(id)).groups.length).toBeGreaterThan(0);
@@ -1275,5 +1357,193 @@ describe('createApp: лимиты частоты (D-0012)', () => {
       server.close();
       if ('closeAllConnections' in server) server.closeAllConnections();
     }
+  });
+});
+
+describe('createApp: партии только в сессии и не больше трёх незавершённых на клиента (D-0012)', () => {
+  const H = { 'x-app-key': KEY, 'content-type': 'application/json' };
+  const from = (remoteAddress: string) => ({ incoming: { socket: { remoteAddress } } });
+  type App = Awaited<ReturnType<typeof make>>['app'];
+  type ErrorJson = { error: { code: string; message: string; details?: Record<string, unknown> } };
+  const post = (app: App, path: string, address: string, body?: unknown) =>
+    app.request(path, { method: 'POST', headers: H, ...(body ? { body: JSON.stringify(body) } : {}) }, from(address));
+  const sessionOf = async (app: App, address: string): Promise<string> => {
+    const res = await post(app, '/api/sessions', address);
+    expect(res.status).toBe(200);
+    return ((await res.json()) as { session: { id: string } }).session.id;
+  };
+  const gameIn = async (app: App, sid: string, address: string): Promise<string> => {
+    const res = await post(app, `/api/sessions/${sid}/games`, address, HUMAN_ONLY);
+    expect(res.status).toBe(200);
+    return ((await res.json()) as { state: { id: string } }).state.id;
+  };
+
+  it('новая партия в сессии бросает прежнюю: «Новая партия» подряд не упирается в лимит; возврат к брошенной проходит лимит клиента, лишний — 429 со scope client и своим текстом; сдача освобождает место', async () => {
+    const { app } = await make({ maxGamesPerClient: 2, ttlMs: 60 * MIN });
+    const sid = await sessionOf(app, '203.0.113.7');
+    const ids: string[] = [];
+    for (let i = 0; i < 4; i++) ids.push(await gameIn(app, sid, '203.0.113.7'));
+    // Ход в брошенной возвращает её: с текущей это ровно лимит 2. Ход во второй брошенной — сверх лимита.
+    expect((await post(app, `/api/games/${ids[0]}/play`, '203.0.113.7', { coord: 'D4' })).status).toBe(200);
+    const refused = await post(app, `/api/games/${ids[1]}/play`, '203.0.113.7', { coord: 'D4' });
+    expect(refused.status).toBe(429);
+    const body = (await refused.json()) as ErrorJson;
+    expect(body.error).toEqual({ code: 'too_many_games', message: 'limit of 2 unfinished games per client reached', details: { max: 2, scope: 'client' } });
+    expect(humanText(body.error.code, body.error.details)).toBe('у тебя слишком много незаконченных партий, новую можно начать позже');
+    // Новая сессия того же телефона: счёт полон и для create.
+    const again = await sessionOf(app, '203.0.113.7');
+    expect((await post(app, `/api/sessions/${again}/games`, '203.0.113.7', HUMAN_ONLY)).status).toBe(429);
+    const other = await sessionOf(app, '203.0.113.8');
+    await gameIn(app, other, '203.0.113.8');
+    expect((await post(app, `/api/games/${ids[0]}/resign`, '203.0.113.7', { color: 'B' })).status).toBe(200);
+    expect((await post(app, `/api/games/${ids[1]}/play`, '203.0.113.7', { coord: 'D4' })).status).toBe(200);
+  });
+
+  it('партии сессии идут в счёт владельца сессии, даже когда их создаёт voice-agent со своего адреса', async () => {
+    const { app } = await make({ maxGamesPerClient: 2, ttlMs: 60 * MIN });
+    const agent = '172.18.0.5'; // адрес контейнера voice-agent в сети compose: мимо Caddy, без X-Forwarded-For
+    const sid = await sessionOf(app, '198.51.100.20');
+    const first = await gameIn(app, sid, agent);
+    await gameIn(app, sid, '198.51.100.20');
+    // Ход агента в первой, брошенной, партии возвращает её в счёт владельца: у него две.
+    expect((await post(app, `/api/games/${first}/play`, agent, { coord: 'D4' })).status).toBe(200);
+    const again = await sessionOf(app, '198.51.100.20');
+    const refused = await post(app, `/api/sessions/${again}/games`, agent, HUMAN_ONLY);
+    expect(refused.status).toBe(429);
+    expect(((await refused.json()) as ErrorJson).error.details).toEqual({ max: 2, scope: 'client' });
+    // Сессия другого телефона — свой счёт, хотя партии создаёт тот же агент.
+    const other = await sessionOf(app, '198.51.100.21');
+    await gameIn(app, other, agent);
+  });
+
+  it('владелец сессии за Caddy — последний адрес X-Forwarded-For при её создании', async () => {
+    const { app } = await make({ trustProxy: true, maxGamesPerClient: 1, ttlMs: 60 * MIN });
+    const sessionVia = async (xff: string): Promise<string> => {
+      const res = await app.request('/api/sessions', { method: 'POST', headers: { ...H, 'x-forwarded-for': xff } }, from('127.0.0.1'));
+      return ((await res.json()) as { session: { id: string } }).session.id;
+    };
+    const a = await sessionVia('6.6.6.6, 203.0.113.60');
+    const b = await sessionVia('6.6.6.6, 203.0.113.61');
+    const c = await sessionVia('7.7.7.7, 203.0.113.60');
+    await gameIn(app, a, '172.18.0.5');
+    // c — тот же телефон (последний адрес тот же): его счёт полон.
+    expect((await post(app, `/api/sessions/${c}/games`, '172.18.0.5', HUMAN_ONLY)).status).toBe(429);
+    // Владелец b — 203.0.113.61; по первому адресу X-Forwarded-For обе сессии делили бы счёт 6.6.6.6.
+    await gameIn(app, b, '172.18.0.5');
+  });
+
+  it('возврат к брошенной через HTTP: поток сверх лимита открывается, но партию не возвращает; ход сверх лимита — 429', async () => {
+    const { app } = await make({ maxGamesPerClient: 2, ttlMs: 60 * MIN });
+    const phone = '203.0.113.9';
+    const sid = await sessionOf(app, phone);
+    const g0 = await gameIn(app, sid, phone);
+    const g1 = await gameIn(app, sid, phone);
+    await gameIn(app, sid, phone);
+    const events = (id: string) => app.request(`/api/games/${id}/events`, { headers: { 'x-app-key': KEY } }, from(phone));
+    // Поток g0 возвращает её: с текущей ровно 2. Поток g1 сверх лимита: смотреть можно, в счёт она не идёт.
+    const s0 = await events(g0);
+    expect(s0.status).toBe(200);
+    await s0.body?.cancel();
+    const s1 = await events(g1);
+    expect(s1.status).toBe(200);
+    const r1 = streamOf(s1);
+    expect(await readUntil(r1, (t) => t.includes('"cause":"sync"'))).toContain(g1);
+    await r1.cancel();
+    const refused = await post(app, `/api/games/${g1}/play`, phone, { coord: 'D4' });
+    expect(refused.status).toBe(429);
+    expect(((await refused.json()) as ErrorJson).error.details).toEqual({ max: 2, scope: 'client' });
+    expect(((await (await app.request(`/api/games/${g1}`, { headers: { 'x-app-key': KEY } }, from(phone))).json()) as { moves: unknown[] }).moves).toHaveLength(0);
+    // Сдача g0 освобождает место: ход в g1 проходит.
+    expect((await post(app, `/api/games/${g0}/resign`, phone, { color: 'B' })).status).toBe(200);
+    expect((await post(app, `/api/games/${g1}/play`, phone, { coord: 'D4' })).status).toBe(200);
+  });
+
+  it('undo и correct партии, завершённой счётом, через HTTP проходят лимит владельца: сверх лимита — 429, партия завершена; после сдачи текущей undo возвращает её', async () => {
+    const { app, service } = await make({ maxGamesPerClient: 1, ttlMs: 60 * MIN });
+    const phone = '203.0.113.21';
+    const sid = await sessionOf(app, phone);
+    const g0 = await gameIn(app, sid, phone);
+    expect((await post(app, `/api/games/${g0}/play`, phone, { coord: 'D4' })).status).toBe(200);
+    expect((await post(app, `/api/games/${g0}/pass`, phone, {})).status).toBe(200);
+    expect((await post(app, `/api/games/${g0}/pass`, phone, {})).status).toBe(200);
+    await untilTick(() => service.get(g0).status === 'finished');
+    const g1 = await gameIn(app, sid, phone);
+    // Откат с другого адреса (агент) идёт в счёт владельца партии.
+    for (const [path, body] of [[`/api/games/${g0}/undo`, {}], [`/api/games/${g0}/correct`, { coord: 'E5' }]] as const) {
+      const refused = await post(app, path, '198.51.100.30', body);
+      expect(refused.status, path).toBe(429);
+      expect(((await refused.json()) as ErrorJson).error.details, path).toEqual({ max: 1, scope: 'client' });
+    }
+    expect(service.get(g0).status).toBe('finished');
+    expect((await post(app, `/api/games/${g1}/resign`, phone, { color: 'B' })).status).toBe(200);
+    const undone = await post(app, `/api/games/${g0}/undo`, '198.51.100.30', {});
+    expect(undone.status).toBe(200);
+    expect(service.get(g0).status).toBe('playing');
+  });
+
+  it('undo партии без владельца (создана до рестарта) идёт в счёт адреса запроса, и адрес записывается владельцем', async () => {
+    const { app, service } = await make({ maxGamesPerClient: 1 });
+    const g = (await service.create({ ...HUMAN_ONLY, waitForReply: false })).state.id;
+    for (const path of ['play', 'pass', 'pass']) expect((await post(app, `/api/games/${g}/${path}`, '192.0.2.70', path === 'play' ? { coord: 'D4' } : {})).status).toBe(200);
+    await untilTick(() => service.get(g).status === 'finished');
+    expect((await post(app, '/api/games', '192.0.2.71', HUMAN_ONLY)).status).toBe(200);
+    for (const [path, body] of [[`/api/games/${g}/undo`, {}], [`/api/games/${g}/correct`, { coord: 'E5' }]] as const) {
+      const refused = await post(app, path, '192.0.2.71', body);
+      expect(refused.status, path).toBe(429);
+      expect(((await refused.json()) as ErrorJson).error.details, path).toEqual({ max: 1, scope: 'client' });
+    }
+    expect((await post(app, `/api/games/${g}/undo`, '192.0.2.72', {})).status).toBe(200);
+    expect((await post(app, '/api/games', '192.0.2.72', HUMAN_ONLY)).status).toBe(429);
+  });
+
+  it('без sessionlessGames POST /api/games — 400 bad_request с reason sessionless_disabled до разбора тела; партия в сессии и чтение партии работают, список — 400 list_disabled', async () => {
+    const { app, service } = await make({ sessionlessGames: false });
+    const res = await post(app, '/api/games', '192.0.2.40', HUMAN_ONLY);
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as ErrorJson;
+    expect(body).toEqual({ error: { code: 'bad_request', message: 'games are created only inside a session', details: { reason: 'sessionless_disabled' } } });
+    expect(humanText(body.error.code, body.error.details)).toBe('партии создаются только внутри сессии');
+    // Тело не разбирается: мусор получает тот же ответ, а не ошибку схемы.
+    expect(await (await app.request('/api/games', { method: 'POST', headers: H, body: 'not json' }, from('192.0.2.40'))).json()).toEqual(body);
+    expect(service.list()).toHaveLength(0);
+    const sid = await sessionOf(app, '192.0.2.40');
+    const created = await post(app, `/api/sessions/${sid}/games`, '192.0.2.40', HUMAN_ONLY);
+    expect(created.status).toBe(200);
+    const { state } = (await created.json()) as { state: { id: string } };
+    expect((await app.request(`/api/games/${state.id}`, { headers: H }, from('192.0.2.40'))).status).toBe(200);
+    // Список отдал бы id чужих партий: без флага его нет (D-0012).
+    const list = await app.request('/api/games', { headers: H }, from('192.0.2.40'));
+    expect(list.status).toBe(400);
+    const listBody = (await list.json()) as ErrorJson;
+    expect(listBody).toEqual({ error: { code: 'bad_request', message: 'the game list is available only with sessionless games enabled', details: { reason: 'list_disabled' } } });
+    expect(humanText(listBody.error.code, listBody.error.details)).toBe('список партий недоступен');
+  });
+
+  it('с sessionlessGames POST /api/games создаёт партию, и она в счёте адреса; IPv6 одной /64 — один клиент', async () => {
+    const { app } = await make({ sessionlessGames: true, maxGamesPerClient: 1 });
+    expect((await post(app, '/api/games', '192.0.2.41', HUMAN_ONLY)).status).toBe(200);
+    expect((await post(app, '/api/games', '192.0.2.41', HUMAN_ONLY)).status).toBe(429);
+    expect((await post(app, '/api/games', '192.0.2.42', HUMAN_ONLY)).status).toBe(200);
+    expect((await post(app, '/api/games', '2001:db8:5:6::1', HUMAN_ONLY)).status).toBe(200);
+    expect((await post(app, '/api/games', '2001:db8:5:6::2', HUMAN_ONLY)).status).toBe(429);
+  });
+
+  it('умолчание createApp — партии без сессии и список партий выключены', async () => {
+    const { app } = await make({ sessionlessGames: 'default' });
+    const res = await post(app, '/api/games', '192.0.2.60', HUMAN_ONLY);
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as ErrorJson).error.details).toEqual({ reason: 'sessionless_disabled' });
+    const list = await app.request('/api/games', { headers: H }, from('192.0.2.60'));
+    expect(list.status).toBe(400);
+    expect(((await list.json()) as ErrorJson).error.details).toEqual({ reason: 'list_disabled' });
+  });
+
+  it('защитный путь: сессия без записанного владельца (не через POST /api/sessions, в prod недостижимо) — партии в счёт адреса запроса', async () => {
+    const { app, sessions } = await make({ maxGamesPerClient: 1, ttlMs: 60 * MIN });
+    const a = sessions.create().id;
+    const b = sessions.create().id;
+    await gameIn(app, a, '192.0.2.50');
+    expect((await post(app, `/api/sessions/${b}/games`, '192.0.2.50', HUMAN_ONLY)).status).toBe(429);
+    await gameIn(app, b, '192.0.2.51');
   });
 });
