@@ -235,8 +235,7 @@ describe('play_move / correct_last_move', () => {
   it.each<[string, keyof ToolClient, string, (f: ToolFns) => Promise<unknown>, () => Error, unknown, string[]]>([
     ['get_assessment', 'analyze', 'fetch failed', (f) => f.getAssessment(), () => new TypeError('fetch failed'), { ok: false, reason: NETWORK_TEXT }, ['getGame', 'analyze']],
     ['get_assessment', 'analyze', 'таймаут', (f) => f.getAssessment(), () => new ClientTimeoutError('analyze', 15_000), { ok: false, reason: humanText('client_timeout') }, ['getGame', 'analyze']],
-    ['get_position', 'ascii', 'HttpError', (f) => f.getPosition(), () => new HttpError(502, '<html>Bad Gateway</html>'), NETWORK_TEXT, ['getGame', 'ascii']],
-    ['get_position', 'getGame', 'fetch failed', (f) => f.getPosition(), () => new TypeError('fetch failed'), NETWORK_TEXT, ['getGame', 'ascii']],
+    ['get_position', 'getGame', 'fetch failed', (f) => f.getPosition(), () => new TypeError('fetch failed'), NETWORK_TEXT, ['getGame']],
     ['resign', 'resign', 'terminated', (f) => f.resign(), () => new TypeError('terminated'), { ok: false, reason: NETWORK_TEXT }, ['getGame', 'resign']],
     ['set_rank', 'setRank', 'таймаут', (f) => f.setRank({ rank: '5 кю' }), () => new ClientTimeoutError('setRank', 15_000), { ok: false, reason: humanText('client_timeout') }, ['getGame', 'setRank']],
   ])('%s: отказ на %s (%s) — «нет связи с сервером» или «сервер не отвечает», партия и ранг не тронуты', async (_tool, method, _err, run, err, expected, methods) => {
@@ -257,7 +256,7 @@ describe('play_move / correct_last_move', () => {
     const { fns, client, controller } = await withGame({ replies: ['K10'] });
     await fns.playMove({ coord: 'D4' });
     await fns.getPosition();
-    expect(client.signals).toEqual([controller.signal, controller.signal, controller.signal]);
+    expect(client.signals).toEqual([controller.signal, controller.signal]);
     controller.abort();
     const err = await fns.playMove({ coord: 'E5' }).catch((e: unknown) => e);
     expect((err as Error).name).toBe('AbortError');
@@ -1154,7 +1153,7 @@ describe('сигнал сеанса в каждом инструменте (M7)'
     ['resign', (f) => f.resign(), ['getGame', 'resign']],
     ['undo', (f) => f.undo(), ['getGame', 'undo']],
     ['redo', (f) => f.redo(), ['getGame', 'redo']],
-    ['get_position', (f) => f.getPosition(), ['getGame', 'ascii']],
+    ['get_position', (f) => f.getPosition(), ['getGame']],
     ['get_assessment', (f) => f.getAssessment(), ['getGame', 'analyze']],
     ['set_rank', (f) => f.setRank({ rank: '5 кю' }), ['getGame', 'setRank']],
   ];

@@ -25,10 +25,14 @@ describe('intentMatches', () => {
     expect(intentMatches('start_game', 'не начинай новую партию')).toBe(false);
     expect(intentMatches('undo', 'не возвращай ход назад')).toBe(false);
     expect(intentMatches('correct_last_move', 'нет, не исправляй на D5', { coord: 'D5' })).toBe(false);
+    expect(intentMatches('correct_last_move', 'нет, всё правильно, оставь D5', { coord: 'D5' })).toBe(false);
+    expect(intentMatches('set_rank', 'уровень менять не надо, 5 кю', { rank: '5 кю' })).toBe(false);
+    expect(intentMatches('redo', 'не надо вперёд')).toBe(false);
     expect(intentMatches('pass', 'пас?')).toBe(false);
     expect(intentMatches('undo', 'отмени')).toBe(true);
     expect(intentMatches('resign', 'я сдаюсь')).toBe(true);
     expect(intentMatches('correct_last_move', 'исправь на D5', { coord: 'D5' })).toBe(true);
+    expect(intentMatches('correct_last_move', 'нет, D5', { coord: 'D5' })).toBe(true);
   });
 
   it('разрешает документированный чёрный цвет по умолчанию, но сверяет явно названный цвет', () => {

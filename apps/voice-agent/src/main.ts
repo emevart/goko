@@ -169,13 +169,14 @@ async function runSession(ctx: JobContext, sessionId: string): Promise<void> {
   // параллельно с открытием Realtime, но не дольше MODE_WAIT_MS; не пришёл — здороваемся в «Голосе»,
   // поздний атрибут переключит режим через followMode, и остаток приветствия в «Чате» уйдёт текстом.
   // RoomIO привязан к участнику по identity: к нему же после перезагрузки вкладки.
-  const [, modeArrived] = await Promise.all([
-    session.start({
+  const modePromise = waitForMode({ participant, subscribe: attributesChanged });
+  await session.start({
       agent,
       room: ctx.room,
       inputOptions: {
         closeOnDisconnect: false,
         participantIdentity: identity,
+        ...(voiceMode === 'live' ? { audioEnabled: false } : {}),
         ...(voiceMode === 'live' ? {
           textInputCallback: async (_session, ev) => {
             const bridge = await liveBridgeReady;
@@ -189,10 +190,7 @@ async function runSession(ctx: JobContext, sessionId: string): Promise<void> {
           },
         } : {}),
       },
-    }),
-    waitForMode({ participant, subscribe: attributesChanged }),
-  ]);
-  if (!modeArrived) log(`[!] voice-agent: ${MODE_ATTRIBUTE} не пришёл за ${MODE_WAIT_MS / 1000} с, начинаю в режиме по умолчанию`);
+    });
 
   // Применяется после start, см. mode.ts. Атрибуты читаются живыми с участника: пришедшее во время
   // ожидания уже в них.
@@ -200,6 +198,10 @@ async function runSession(ctx: JobContext, sessionId: string): Promise<void> {
   const liveClock = live ? new LiveSilenceClock(live) : undefined;
   if (live) {
     liveResponses = new LiveResponseCoordinator({ live, signal: abort.signal });
+    // start мог уже изменить состояния до установки наших listeners. Начальное аудио Live выше отключено,
+    // но seed всё равно закрывает окно для текста и будущих изменений SDK.
+    liveResponses.noteUserState(session.userState);
+    liveResponses.noteAgentState(session.agentState);
     liveBridge = new LiveBridge({
       live,
       intent,
@@ -208,6 +210,8 @@ async function runSession(ctx: JobContext, sessionId: string): Promise<void> {
     });
     resolveLiveBridge(liveBridge);
   }
+  const modeArrived = await modePromise;
+  if (!modeArrived) log(`[!] voice-agent: ${MODE_ATTRIBUTE} не пришёл за ${MODE_WAIT_MS / 1000} с, начинаю в режиме по умолчанию`);
   const follower = followMode({ participant, session, live: liveClock, log });
   mode = follower;
   let ending = false;

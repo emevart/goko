@@ -27,33 +27,58 @@ const abortError = (signal: AbortSignal): unknown => signal.reason ?? new Error(
 // GPT Live может оставлять AgentSession в listening, пока backend Responses уже занят. Этот координатор
 // следит за публичными response.event и не пускает app-реплику поверх голосовой/инструментальной.
 export class LiveResponseCoordinator {
-  private readonly options: { live: LiveEventSource; signal: AbortSignal; timeoutMs?: number };
+  private readonly options: { live: LiveEventSource; signal: AbortSignal; timeoutMs?: number; nativeSettleMs?: number };
   private readonly responses = new Map<string, ResponseState>();
   private readonly idleWaiters = new Set<{ resolve: () => void; reject: (error: unknown) => void; timer: ReturnType<typeof setTimeout> }>();
   private reply: Reply | null = null;
   private userActive = false;
+  private nativeTurnPending = false;
+  private nativeSawAssistant = false;
+  private nativeTimer: ReturnType<typeof setTimeout> | null = null;
   private agentActive = false;
   private assistantVersion = 0;
   private listeningVersion = 0;
 
-  constructor(options: { live: LiveEventSource; signal: AbortSignal; timeoutMs?: number }) {
+  constructor(options: { live: LiveEventSource; signal: AbortSignal; timeoutMs?: number; nativeSettleMs?: number }) {
     this.options = options;
     options.live.on('openai_server_event_received', this.onServerEvent);
   }
 
   noteUserState(state: string): void {
-    this.userActive = state !== 'listening';
+    this.userActive = state === 'speaking';
+    if (state === 'speaking') {
+      if (this.nativeTimer) clearTimeout(this.nativeTimer);
+      this.nativeTimer = null;
+      this.nativeTurnPending = true;
+      this.nativeSawAssistant = false;
+    } else if (state === 'listening' && this.nativeTurnPending && !this.nativeSawAssistant) {
+      if (this.nativeTimer) clearTimeout(this.nativeTimer);
+      this.nativeTimer = setTimeout(() => {
+        this.nativeTimer = null;
+        if (!this.nativeSawAssistant) this.nativeTurnPending = false;
+        this.notifyIdle();
+      }, this.options.nativeSettleMs ?? 5_000);
+    }
     this.notifyIdle();
   }
 
   noteAssistant(): void {
     this.assistantVersion += 1;
+    if (this.nativeTurnPending) {
+      this.nativeSawAssistant = true;
+      if (this.nativeTimer) clearTimeout(this.nativeTimer);
+      this.nativeTimer = null;
+    }
     this.maybeFinishReply();
   }
 
   noteAgentState(state: string): void {
     this.agentActive = state !== 'listening';
     if (state === 'listening') this.listeningVersion += 1;
+    if (state === 'listening' && this.nativeTurnPending && this.nativeSawAssistant) {
+      this.nativeTurnPending = false;
+      this.nativeSawAssistant = false;
+    }
     this.maybeFinishReply();
     this.notifyIdle();
   }
@@ -105,6 +130,7 @@ export class LiveResponseCoordinator {
   stop(): void {
     this.options.live.off('openai_server_event_received', this.onServerEvent);
     const error = new Error('GPT Live coordinator stopped');
+    if (this.nativeTimer) clearTimeout(this.nativeTimer);
     this.reply?.reject(error);
     for (const waiter of [...this.idleWaiters]) waiter.reject(error);
   }
@@ -114,7 +140,7 @@ export class LiveResponseCoordinator {
   }
 
   private isIdle(): boolean {
-    return !this.userActive && !this.agentActive && this.responses.size === 0;
+    return !this.userActive && !this.nativeTurnPending && !this.agentActive && this.responses.size === 0;
   }
 
   private notifyIdle(): void {

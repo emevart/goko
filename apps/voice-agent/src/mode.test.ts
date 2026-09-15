@@ -48,11 +48,14 @@ describe('applyMode', () => {
   });
 
   it('muted микрофон в voice сохраняет silence clock, атрибут on включает живой input', () => {
-    const live = fakeLive();
-    const f = followMode({ participant: { identity: 'phone-s1', attributes: { [MODE_ATTRIBUTE]: 'voice', [MIC_ATTRIBUTE]: 'muted' } }, session: fakeSession(), live });
-    expect(live.calls).toEqual(['provider:mute']);
+    const calls: string[] = [];
+    const session = { input: { setAudioEnabled: (on: boolean) => calls.push(`input:${on}`) }, output: { setAudioEnabled: (on: boolean) => calls.push(`output:${on}`) } };
+    const live = { calls, setInputEnabled: (on: boolean) => calls.push(`clock:${on}`) };
+    const f = followMode({ participant: { identity: 'phone-s1', attributes: { [MODE_ATTRIBUTE]: 'voice', [MIC_ATTRIBUTE]: 'muted' } }, session, live });
+    expect(calls).toEqual(['output:true', 'input:false', 'clock:false']);
+    calls.length = 0;
     f.onAttributes({ identity: 'phone-s1', attributes: { [MODE_ATTRIBUTE]: 'voice', [MIC_ATTRIBUTE]: 'on' } });
-    expect(live.calls).toEqual(['provider:mute', 'provider:unmute']);
+    expect(calls).toEqual(['output:true', 'clock:true', 'input:true']);
   });
 });
 

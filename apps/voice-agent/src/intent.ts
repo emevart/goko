@@ -33,14 +33,14 @@ type IntentArgs = { coord?: string; my_color?: 'black' | 'white'; rank?: string;
 
 export function intentMatches(intent: MutationIntent, utterance: string, args: IntentArgs = {}): boolean {
   const text = normalize(utterance);
-  if (!text || hypothetical(text) || reported(text)) return false;
+  if (!text || hypothetical(text) || reported(text) || /(?:^|\s)не(?:\s|$)/u.test(text) || hasPhrase(text, ['не надо', 'не нужно', 'ничего не', 'всё правильно', 'все правильно', 'оставь'])) return false;
   switch (intent) {
     case 'play_move': {
       const explicit = isBareCoordinate(text) || /(?:^|\s)(?:поставь|сыграй|сходи|ходи)(?:\s|$)|(?:^|\s)мой\s+ход(?:\s|$)/u.test(text);
       return explicit && (!args.coord || coordinatesIn(text).includes(args.coord.toUpperCase()));
     }
     case 'correct_last_move': {
-      const explicit = /(?:^|\s)(?:поправь|исправь|точнее)(?:\s|$)|^нет[, ]+[^?]+$/u.test(text);
+      const explicit = /(?:^|\s)(?:поправь|исправь)(?:\s|$)/u.test(text) || /^(?:нет[, ]+|точнее\s+)/u.test(text) && words(text).length <= 3 && coordinatesIn(text).length === 1;
       return explicit && (!args.coord || coordinatesIn(text).includes(args.coord.toUpperCase()));
     }
     case 'start_game': {

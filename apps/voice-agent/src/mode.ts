@@ -23,9 +23,15 @@ export type LiveInputSwitch = { setInputEnabled(enabled: boolean): void };
 
 export function applyMode(session: AudioSwitch, mode: TalkMode, live?: LiveInputSwitch, microphoneActive = true): void {
   const on = mode === 'voice';
+  const liveInput = on && microphoneActive;
   session.output.setAudioEnabled(on);
-  session.input.setAudioEnabled(on);
-  live?.setInputEnabled(on && microphoneActive);
+  if (liveInput) {
+    live?.setInputEnabled(true); // сначала остановить synthetic clock
+    session.input.setAudioEnabled(true);
+  } else {
+    session.input.setAudioEnabled(false); // сначала отсоединить реальный Room input
+    live?.setInputEnabled(false);
+  }
 }
 
 // RemoteParticipant из @livekit/rtc-node подходит как есть: identity и attributes — геттеры.

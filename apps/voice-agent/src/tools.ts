@@ -3,6 +3,7 @@
 // Никакой позиции в памяти: всё берётся из ответов game-server.
 import { llm } from '@livekit/agents';
 import { z } from 'zod';
+import { coordToIndex, toAscii } from '@goko/go-core';
 import {
   ApiError,
   ClientTimeoutError,
@@ -511,15 +512,20 @@ export function createToolFns(deps: ToolDeps) {
       if (typeof gameId !== 'string') return gameId.reason;
       const generation = state.gameGeneration;
       let g: GameState;
-      let ascii: string;
       try {
-        [g, ascii] = await Promise.all([client.getGame(gameId, opts), client.ascii(gameId, opts)]);
+        g = await client.getGame(gameId, opts);
       } catch (e) {
         if (!gameIsCurrent(gameId, generation)) return STALE_GAME_TEXT;
         return reasonOf(e).reason;
       }
       if (!resultIsCurrent(gameId, generation, g.revision)) return STALE_GAME_TEXT;
       note(g);
+      const board = toAscii({
+        size: g.settings.boardSize,
+        board: g.board,
+        ko: g.ko === null ? null : coordToIndex(g.ko, g.settings.boardSize),
+        captures: g.captures,
+      }, { lastMove: g.moves.at(-1)?.coord ?? null });
       const last = g.moves
         .slice(-6)
         .map((m) => `${m.n}. ${colorName(m.color)} ${m.coord === 'pass' ? 'пас' : m.coord}`)
@@ -529,7 +535,8 @@ export function createToolFns(deps: ToolDeps) {
       const fallback = state.fallbackMove === null ? undefined : g.moves.find((m) => m.n === state.fallbackMove);
       return [
         `Ориентация: доска ${g.settings.boardSize} на ${g.settings.boardSize}; строки идут сверху от ${g.settings.boardSize} вниз до 1, столбцы слева направо A–N без I.`,
-        ascii.trimEnd(),
+        `# ${g.id} rev ${g.revision} ${g.status} toPlay ${g.toPlay} moves ${g.moves.length}`,
+        board.trimEnd(),
         `Последние ходы: ${last || 'нет'}`,
         `Пленные: чёрные сняли ${g.captures.B}, белые сняли ${g.captures.W}`,
         ...(fallback

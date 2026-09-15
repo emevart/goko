@@ -23,6 +23,9 @@ describe('LiveResponseCoordinator', () => {
     expect(idle).toBe(false);
     live.server(response('response.created'));
     live.server(response('response.completed'));
+    coordinator.noteAgentState('speaking');
+    coordinator.noteAssistant();
+    coordinator.noteAgentState('listening');
     await waiting;
     expect(idle).toBe(true);
     coordinator.stop();
@@ -30,7 +33,7 @@ describe('LiveResponseCoordinator', () => {
 
   it('коррелирует waiter с первым response.created и ждёт его transcript + listening', async () => {
     const live = new FakeLive();
-    const coordinator = new LiveResponseCoordinator({ live, signal: new AbortController().signal, timeoutMs: 100 });
+    const coordinator = new LiveResponseCoordinator({ live, signal: new AbortController().signal, timeoutMs: 100, nativeSettleMs: 1 });
     const reply = coordinator.waitForReply();
     live.server(response('response.created', null));
     live.server(response('response.completed', null));
@@ -58,11 +61,43 @@ describe('LiveResponseCoordinator', () => {
 
   it('короткий голосовой ввод без delegation не оставляет sticky busy', async () => {
     const live = new FakeLive();
-    const coordinator = new LiveResponseCoordinator({ live, signal: new AbortController().signal, timeoutMs: 100 });
+    const coordinator = new LiveResponseCoordinator({ live, signal: new AbortController().signal, timeoutMs: 100, nativeSettleMs: 1 });
     coordinator.noteUserState('speaking');
     const idle = coordinator.waitUntilIdle();
     coordinator.noteUserState('listening');
     await expect(idle).resolves.toBeUndefined();
+    coordinator.stop();
+  });
+
+  it('speaking → user listening остаётся занятым до assistant + позднего agent listening', async () => {
+    const live = new FakeLive();
+    const coordinator = new LiveResponseCoordinator({ live, signal: new AbortController().signal, timeoutMs: 100, nativeSettleMs: 50 });
+    coordinator.noteUserState('speaking');
+    coordinator.noteUserState('listening');
+    let ready = false;
+    const waiting = coordinator.waitUntilIdle().then(() => { ready = true; });
+    await Promise.resolve();
+    expect(ready).toBe(false);
+    coordinator.noteAgentState('speaking');
+    coordinator.noteAssistant();
+    expect(ready).toBe(false);
+    coordinator.noteAgentState('listening');
+    await waiting;
+    expect(ready).toBe(true);
+    coordinator.stop();
+  });
+
+  it('seed текущего speaking после start не даёт приветствию пройти до listening', async () => {
+    const live = new FakeLive();
+    const coordinator = new LiveResponseCoordinator({ live, signal: new AbortController().signal, timeoutMs: 100, nativeSettleMs: 1 });
+    coordinator.noteUserState('speaking');
+    let ready = false;
+    const waiting = coordinator.waitUntilIdle().then(() => { ready = true; });
+    await Promise.resolve();
+    expect(ready).toBe(false);
+    coordinator.noteUserState('listening');
+    await waiting;
+    expect(ready).toBe(true);
     coordinator.stop();
   });
 
@@ -83,6 +118,14 @@ describe('LiveResponseCoordinator', () => {
     const coordinator = new LiveResponseCoordinator({ live, signal: abort.signal, timeoutMs: 100 });
     await expect(coordinator.waitUntilIdle()).rejects.toThrow('ended');
     await expect(coordinator.waitForReply()).rejects.toThrow('ended');
+    coordinator.stop();
+  });
+
+  it('away после тишины не блокирует новую typed реплику', async () => {
+    const live = new FakeLive();
+    const coordinator = new LiveResponseCoordinator({ live, signal: new AbortController().signal, timeoutMs: 100 });
+    coordinator.noteUserState('away');
+    await expect(coordinator.waitUntilIdle()).resolves.toBeUndefined();
     coordinator.stop();
   });
 });
