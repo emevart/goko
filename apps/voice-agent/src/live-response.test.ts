@@ -87,6 +87,26 @@ describe('LiveResponseCoordinator', () => {
     coordinator.stop();
   });
 
+  it('не принимает хвост прерванного ответа за ответ на новую barge-in реплику', async () => {
+    const live = new FakeLive();
+    const coordinator = new LiveResponseCoordinator({ live, signal: new AbortController().signal, timeoutMs: 100, nativeSettleMs: 50 });
+    coordinator.noteAgentState('speaking');
+    coordinator.noteUserState('speaking');
+    coordinator.noteAssistant(); // partial старого ответа во время речи человека
+    coordinator.noteAgentState('listening');
+    coordinator.noteUserState('listening');
+    let ready = false;
+    const waiting = coordinator.waitUntilIdle().then(() => { ready = true; });
+    await Promise.resolve();
+    expect(ready).toBe(false);
+    coordinator.noteAgentState('speaking');
+    coordinator.noteAssistant();
+    coordinator.noteAgentState('listening');
+    await waiting;
+    expect(ready).toBe(true);
+    coordinator.stop();
+  });
+
   it('seed текущего speaking после start не даёт приветствию пройти до listening', async () => {
     const live = new FakeLive();
     const coordinator = new LiveResponseCoordinator({ live, signal: new AbortController().signal, timeoutMs: 100, nativeSettleMs: 1 });

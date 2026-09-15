@@ -34,6 +34,7 @@ export class LiveResponseCoordinator {
   private userActive = false;
   private nativeTurnPending = false;
   private nativeSawAssistant = false;
+  private nativePostStopOutput = false;
   private nativeTimer: ReturnType<typeof setTimeout> | null = null;
   private agentActive = false;
   private assistantVersion = 0;
@@ -51,7 +52,9 @@ export class LiveResponseCoordinator {
       this.nativeTimer = null;
       this.nativeTurnPending = true;
       this.nativeSawAssistant = false;
+      this.nativePostStopOutput = false;
     } else if (state === 'listening' && this.nativeTurnPending && !this.nativeSawAssistant) {
+      this.nativePostStopOutput = this.agentActive;
       if (this.nativeTimer) clearTimeout(this.nativeTimer);
       this.nativeTimer = setTimeout(() => {
         this.nativeTimer = null;
@@ -64,7 +67,7 @@ export class LiveResponseCoordinator {
 
   noteAssistant(): void {
     this.assistantVersion += 1;
-    if (this.nativeTurnPending) {
+    if (this.nativeTurnPending && !this.userActive && this.nativePostStopOutput) {
       this.nativeSawAssistant = true;
       if (this.nativeTimer) clearTimeout(this.nativeTimer);
       this.nativeTimer = null;
@@ -74,10 +77,12 @@ export class LiveResponseCoordinator {
 
   noteAgentState(state: string): void {
     this.agentActive = state !== 'listening';
+    if (state !== 'listening' && this.nativeTurnPending && !this.userActive) this.nativePostStopOutput = true;
     if (state === 'listening') this.listeningVersion += 1;
     if (state === 'listening' && this.nativeTurnPending && this.nativeSawAssistant) {
       this.nativeTurnPending = false;
       this.nativeSawAssistant = false;
+      this.nativePostStopOutput = false;
     }
     this.maybeFinishReply();
     this.notifyIdle();
