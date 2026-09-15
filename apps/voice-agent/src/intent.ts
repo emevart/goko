@@ -11,23 +11,35 @@ const hypothetical = (text: string): boolean => text.includes('?') || hasPhrase(
 const reported = (text: string): boolean => /(?:^|\s)(?:не\s+(?:став|ход|игр|сыгр|пас|отмен|возвращ|верн|исправ|поправ|сда|начин|начн)|как\s+(?:поставить|сыграть|сходить)|я\s+(?:поставил|сыграл|сходил|отменил|вернул|начал)|ты\s+(?:сказал|говорил)|он\s+(?:сказал|говорил)|она\s+(?:сказала|говорила))(?:\S*\s|\S*$)/u.test(text);
 const numberValues: Record<string, string> = { один: '1', два: '2', три: '3', четыре: '4', пять: '5', шесть: '6', семь: '7', восемь: '8', девять: '9', десять: '10', одиннадцать: '11', двенадцать: '12', тринадцать: '13', четырнадцать: '14', пятнадцать: '15', шестнадцать: '16', семнадцать: '17', восемнадцать: '18', девятнадцать: '19' };
 const letterValues: Record<string, string> = Object.fromEntries(Object.entries(COLUMN_NAMES_RU).flatMap(([letter, name]) => [[name, letter], [letter.toLocaleLowerCase('ru-RU'), letter]]));
-Object.assign(letterValues, { эй: 'A', би: 'B', си: 'C', се: 'C', ди: 'D', джи: 'G', ха: 'H', кей: 'K' });
+Object.assign(letterValues, { эй: 'A', би: 'B', си: 'C', се: 'C', ди: 'D', джи: 'G', ха: 'H', кей: 'K', а: 'A', б: 'B', в: 'B', с: 'C', д: 'D', е: 'E', ф: 'F', г: 'G', х: 'H', н: 'H', ж: 'J', к: 'K', л: 'L', м: 'M' });
 const words = (text: string): string[] => normalize(text).replace(/[.,!?;:()[\]«»"']/g, ' ').split(/\s+/u).filter(Boolean);
+const compactCoordinate = (token: string): string => {
+  const joined = /^([a-zа-яё]+)(\d{1,2})$/u.exec(token);
+  return joined && letterValues[joined[1]!] ? `${letterValues[joined[1]!]}${joined[2]}` : normalizeCoordText(token);
+};
+const rowNumber = (token: string): string | undefined => numberValues[token] ?? (/^\d{1,2}$/u.test(token) ? token : undefined);
 const coordinatesIn = (text: string): string[] => {
   const tokens = words(text);
   const result = new Set<string>();
   for (const token of tokens) {
-    const compact = normalizeCoordText(token);
+    const compact = compactCoordinate(token);
     if (/^[A-HJ-N]\d{1,2}$/u.test(compact)) result.add(compact);
   }
   for (let i = 0; i + 1 < tokens.length; i++) {
     const letter = letterValues[tokens[i] ?? ''];
-    const number = numberValues[tokens[i + 1] ?? ''];
+    const number = rowNumber(tokens[i + 1] ?? '');
     if (letter && number && COLUMN_LETTERS.slice(0, 13).includes(letter)) result.add(`${letter}${number}`);
   }
   return [...result];
 };
-const isBareCoordinate = (text: string): boolean => words(text).length <= 2 && coordinatesIn(text).length === 1;
+const isBareCoordinate = (text: string): boolean => {
+  const tokens = words(text);
+  if (tokens.length === 1) return /^[A-HJ-N]\d{1,2}$/u.test(compactCoordinate(tokens[0]!));
+  return tokens.length === 2 && Boolean(letterValues[tokens[0]!] && rowNumber(tokens[1]!));
+};
+// Разговорные вводные допустимы только перед отдельной координатой.
+// «Давай обсудим D4» не является разрешением поставить камень.
+const isConversationalCoordinate = (text: string): boolean => isBareCoordinate(words(text).join(' ').replace(/^(?:(?:ну|давай)\s+)+/u, ''));
 
 type IntentArgs = { coord?: string; my_color?: 'black' | 'white'; rank?: string; komi?: number };
 
@@ -36,7 +48,7 @@ export function intentMatches(intent: MutationIntent, utterance: string, args: I
   if (!text || hypothetical(text) || reported(text) || /(?:^|\s)не(?:\s|$)/u.test(text) || hasPhrase(text, ['не надо', 'не нужно', 'ничего не', 'всё правильно', 'все правильно', 'оставь'])) return false;
   switch (intent) {
     case 'play_move': {
-      const explicit = isBareCoordinate(text) || /(?:^|\s)(?:поставь|сыграй|сходи|ходи)(?:\s|$)|(?:^|\s)мой\s+ход(?:\s|$)/u.test(text);
+      const explicit = isConversationalCoordinate(text) || /(?:^|\s)(?:поставь|сыграй|сходи|ходи)(?:\s|$)|(?:^|\s)мой\s+ход(?:\s|$)/u.test(text);
       return explicit && (!args.coord || coordinatesIn(text).includes(args.coord.toUpperCase()));
     }
     case 'correct_last_move': {

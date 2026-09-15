@@ -2,6 +2,13 @@ import { describe, expect, it, vi } from 'vitest';
 import { IntentLedger, intentMatches } from './intent.ts';
 
 describe('intentMatches', () => {
+  it.each(['Давай Д четыре', 'Ну, Д четыре', 'Д четыре', 'Д4', 'Д 4', 'ну давай дэ четыре'])('принимает телефонную команду %s и сверяет координату', (text) => {
+    expect(intentMatches('play_move', text, { coord: 'D4' })).toBe(true);
+    expect(intentMatches('play_move', text, { coord: 'E4' })).toBe(false);
+  });
+  it.each(['ну, а если Д четыре?', 'давай обсудим Д четыре', 'ну не ставь Д четыре', 'Д четыре или Е пять', 'давай сравни Д четыре и Е пять'])('не превращает обсуждение %s в ход', (text) => {
+    expect(intentMatches('play_move', text, { coord: 'D4' })).toBe(false);
+  });
   it('не принимает гипотетический ход, но принимает голую координату и явную команду', () => {
     expect(intentMatches('play_move', 'а если E9?')).toBe(false);
     expect(intentMatches('play_move', 'стоит ли пойти на E9')).toBe(false);

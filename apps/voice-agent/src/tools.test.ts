@@ -1026,6 +1026,16 @@ describe('get_position / get_assessment / set_rank', () => {
 });
 
 describe('createTools', () => {
+  it.each(['Давай Д четыре', 'Ну, Д четыре', 'Д четыре'])('проводит телефонную фразу %s через intent до игрового клиента', async (text) => {
+    const { client, state } = await withGame();
+    const intent = new IntentLedger();
+    const tools = createTools({ client, state, intent });
+    intent.add(text);
+    await expect(tools.play_move.execute({ coord: 'D4', user_utterance: text }, {} as never)).resolves.toMatchObject({ ok: true, yourMove: 'D4' });
+    expect(client.calls.filter((call) => call.method === 'play')).toHaveLength(1);
+    await expect(tools.play_move.execute({ coord: 'D4', user_utterance: text }, {} as never)).resolves.toMatchObject({ ok: false });
+    expect(client.calls.filter((call) => call.method === 'play')).toHaveLength(1);
+  });
   it('отдаёт девять инструментов с именами из спеки', () => {
     const { client, state } = setup();
     const tools = createTools({ client, state });
