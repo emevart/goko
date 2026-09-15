@@ -10,6 +10,9 @@ updated: 2026-09-14
 определены [дополнением](2026-09-15-goko-conversation-design.md) и
 [D-0014](../../decisions/0014-unified-conversation-history-recording.md).
 В этих областях дополнение имеет приоритет над исходными разделами ниже.
+Повторная итерация 15.09: [явный запуск и GPT-Live](2026-09-15-goko-live-polish.md),
+[D-0015](../../decisions/0015-explicit-live-conversation.md), уточняет запуск,
+транспорт написанных сообщений, завершение и проверку намерения до tools.
 
 - Тип: architecture / product
 - Дата: 2026-09-07

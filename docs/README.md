@@ -27,6 +27,9 @@
 Итерация 15.09: [спека общего разговора](superpowers/specs/2026-09-15-goko-conversation-design.md),
 [журнал](journal/2026-09-15-conversation.md),
 [проверка с записью](research/2026-09-15-conversation-acceptance.md).
+Повторная итерация: [спека GPT-Live](superpowers/specs/2026-09-15-goko-live-polish.md),
+[план](superpowers/plans/2026-09-15-goko-live-polish.md),
+[результаты проверок](research/2026-09-15-live-polish-acceptance.md).
 
 ## Правила базы знаний
 

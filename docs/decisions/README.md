@@ -47,6 +47,7 @@ updated: YYYY-MM-DD
 ## Реестр
 
 Следующая итерация разговора и истории: [D-0014](0014-unified-conversation-history-recording.md), 15.09.2026.
+Явный запуск, GPT-Live и защита намерения: [D-0015](0015-explicit-live-conversation.md), 15.09.2026.
 
 | № | Решение | Дата | Статус |
 | --- | --- | --- | --- |
