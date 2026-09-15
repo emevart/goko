@@ -185,7 +185,11 @@ export class LiveResponseCoordinator {
       return;
     }
     if ((event.type === 'response.output_text.delta' || event.type === 'response.output_text.done') && this.reply?.delegation === key) {
-      this.reply.backendContent = true;
+      if (!this.reply.backendContent) {
+        this.reply.backendContent = true;
+        this.reply.startAssistant = this.assistantVersion;
+        this.reply.startListening = this.listeningVersion;
+      }
       return;
     }
     if (event.type === 'response.failed' || event.type === 'response.incomplete') {
@@ -199,10 +203,6 @@ export class LiveResponseCoordinator {
     if (response?.hasCalls) return;
     this.responses.delete(key);
     if (this.reply?.delegation === key) {
-      // Filler может звучать всё время backend generation. Финальный completed — граница, после которой
-      // ждём именно ConversationItem озвученного результата, а не «Секунду, сверюсь».
-      this.reply.startAssistant = this.assistantVersion;
-      this.reply.startListening = this.listeningVersion;
       this.reply.providerDone = true;
       this.maybeFinishReply();
     }

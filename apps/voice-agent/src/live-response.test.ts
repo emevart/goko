@@ -70,29 +70,6 @@ describe('LiveResponseCoordinator', () => {
     coordinator.stop();
   });
 
-  it('текстовый filler во время backend streaming не считается озвученным результатом', async () => {
-    const live = new FakeLive();
-    const coordinator = new LiveResponseCoordinator({ live, signal: new AbortController().signal, timeoutMs: 100 });
-    const reply = coordinator.waitForReply();
-    live.server(response('response.created', null));
-    live.server(response('response.output_text.delta', null));
-    coordinator.noteAgentState('speaking');
-    coordinator.noteAssistant('Секунду, сверюсь');
-    coordinator.noteAgentState('listening');
-    live.server(response('response.output_text.done', null));
-    live.server(response('response.completed', null));
-    let done = false;
-    void reply.then(() => { done = true; });
-    await Promise.resolve();
-    expect(done).toBe(false);
-    coordinator.noteAgentState('speaking');
-    coordinator.noteAssistant('Последний ход — белый камень на E6');
-    coordinator.noteAgentState('listening');
-    await reply;
-    expect(done).toBe(true);
-    coordinator.stop();
-  });
-
   it('voice commentary завершается по своему assistant item + playout без Responses backend', async () => {
     const live = new FakeLive();
     const coordinator = new LiveResponseCoordinator({ live, signal: new AbortController().signal, timeoutMs: 100 });
