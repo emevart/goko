@@ -2,7 +2,7 @@
 // «Голос / Чат» атрибутом goko.mode, микрофон, чат и лента диалога. Комнат страница не создаёт (D-0001).
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { LocalAudioTrack, ParticipantKind, Room, RoomEvent, Track } from 'livekit-client';
-import { CONVERSATION_TOPIC, CreateSessionResponse } from '@goko/protocol';
+import { cleanSpeechTranscript, CONVERSATION_TOPIC, CreateSessionResponse } from '@goko/protocol';
 import { client } from '../api.ts';
 import { agentReady, sendChat } from '../chat.ts';
 import { type Mode, type Prefs, loadPrefs, modeAttributes, savePrefs } from '../prefs.ts';
@@ -332,7 +332,7 @@ export function useSession() {
       if (who === 'me') {
         // Человек: промежуточные результаты STT — отдельные закрытые потоки того же сегмента; берём только финал.
         try {
-          const text = await reader.readAll();
+          const text = cleanSpeechTranscript(await reader.readAll());
           if (validSender() && acceptLine(attrs, who) && text.trim()) {
             recorderRef.current.trace('transcript.final', { id, who, text });
             setLines((ls) => upsertLine(ls, { id, who, text, final: true }));

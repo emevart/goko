@@ -1026,6 +1026,15 @@ describe('get_position / get_assessment / set_rank', () => {
 });
 
 describe('createTools', () => {
+  it('проводит исходную регрессию К4 до игрового клиента', async () => {
+    const { client, state } = await withGame();
+    const intent = new IntentLedger();
+    const tools = createTools({ client, state, intent });
+    const text = 'А мой первый ход черными К4';
+    intent.add(text);
+    await expect(tools.play_move.execute({coord:'K4', user_utterance:text}, {} as never)).resolves.toMatchObject({ok:true, yourMove:'K4'});
+    expect(client.calls.filter(call => call.method === 'play')).toHaveLength(1);
+  });
   it.each(['Давай Д четыре', 'Ну, Д четыре', 'Д четыре'])('проводит телефонную фразу %s через intent до игрового клиента', async (text) => {
     const { client, state } = await withGame();
     const intent = new IntentLedger();

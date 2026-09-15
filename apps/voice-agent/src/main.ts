@@ -6,7 +6,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { type JobContext, ServerOptions, cli, defineAgent, voice } from '@livekit/agents';
 import { type Participant, type RemoteParticipant, RoomEvent } from '@livekit/rtc-node';
-import { createClient } from '@goko/protocol';
+import { cleanSpeechTranscript, createClient } from '@goko/protocol';
 import { GokoAgent } from './agent.ts';
 import { CONFIG_EXIT_CODE, readConfig } from './config.ts';
 import { attachConversationEvents } from './conversation-events.ts';
@@ -121,8 +121,10 @@ async function runSession(ctx: JobContext, sessionId: string): Promise<void> {
   // транскрипт, текстом из lk.chat — сообщение пользователя в истории (оно приходит и для голоса, повтор безвреден).
   session.on(Events.UserInputTranscribed, (ev) => {
     if (!ev.isFinal) return;
-    log(`[user] ${ev.transcript}`);
-    intent.add(ev.transcript, ev.itemId ? `item:${ev.itemId}` : `transcript:${ev.createdAt}`);
+    const text = cleanSpeechTranscript(ev.transcript);
+    if (!text) return;
+    log(`[user] ${text}`);
+    intent.add(text, ev.itemId ? `item:${ev.itemId}` : `transcript:${ev.createdAt}`);
     watch?.humanSpoke();
   });
   session.on(Events.ConversationItemAdded, (ev) => {

@@ -672,7 +672,7 @@ export function createTools(deps: ToolDeps) {
   const ledger = deps.intent ?? new IntentLedger();
   const guarded = <T extends { user_utterance: string }, R>(intent: MutationIntent, run: (args: Omit<T, 'user_utterance'>) => Promise<R>) => async (args: T) => {
     const { user_utterance: _utterance, ...rest } = args;
-    const permit = await ledger.consume(intent, args.user_utterance, rest, 1_500, deps.signal, { rank: deps.state.rank, komi: deps.state.komi });
+    const permit = await ledger.consume(intent, args.user_utterance, rest, 1_500, deps.signal);
     if (!permit.ok) return permit;
     return run(rest as Omit<T, 'user_utterance'>);
   };

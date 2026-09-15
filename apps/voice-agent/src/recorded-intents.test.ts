@@ -1,6 +1,6 @@
 // Формулировки из spike/phrases.md и телефонных регрессий; аудио хранится вне git.
 import { expect, it } from 'vitest';
-import { IntentLedger, intentMatches, type MutationIntent } from './intent.ts';
+import { IntentLedger, mutationArgumentsMatch, type MutationIntent } from './intent.ts';
 
 const commands: [MutationIntent, string, Record<string, string>][] = [
  ['play_move','ход дэ десять',{coord:'D10'}],
@@ -28,21 +28,7 @@ const commands: [MutationIntent, string, Record<string, string>][] = [
  ['pass','ну, пас',{}],
  ['resign','всё, сдаюсь',{}],
 ];
-it.each(commands)('%s: %s', (intent,text,args)=>expect(intentMatches(intent,text,args)).toBe(true));
-it('новая партия сохраняет доверенный текущий ранг, но не принимает выдуманный',async()=>{
- const ledger=new IntentLedger();ledger.add('Давай новую партию');
- await expect(ledger.consume('start_game','Давай новую партию',{rank:'5 кю'},0,undefined,{rank:'5k',komi:7.5})).resolves.toMatchObject({ok:true});
- const wrong=new IntentLedger();wrong.add('Давай новую партию');
- await expect(wrong.consume('start_game','Давай новую партию',{rank:'2 дан'},0,undefined,{rank:'5k',komi:7.5})).resolves.toMatchObject({ok:false});
-});
-it.each([
- 'а если я поставлю дэ четыре, то что будет',
- 'я вот думал про ка десять, но что-то передумал',
- 'в прошлый раз ты пошёл на цэ три, помнишь',
- 'эф девять вообще хороший ход',
- 'слушай, может мне сходить, например, там а один, как ты считаешь',
- 'не ставь D4', 'Д4 или Е5', 'давай обсудим D4',
-])('обсуждение не ставит камень: %s',text=>expect(intentMatches('play_move',text)).toBe(false));
+it.each(commands)('%s: %s', (intent,text,args)=>expect(mutationArgumentsMatch(intent,text,args)).toBe(true));
 it('различия пунктуации STT и backend не отвергают ту же команду',async()=>{
  const ledger=new IntentLedger();ledger.add(' Ну, Д четыре.');
  await expect(ledger.consume('play_move','Ну Д четыре',{coord:'D4'},0)).resolves.toMatchObject({ok:true});

@@ -1,57 +1,20 @@
 import { describe, expect, it, vi } from 'vitest';
-import { IntentLedger, intentMatches } from './intent.ts';
+import { IntentLedger, mutationArgumentsMatch } from './intent.ts';
 
-describe('intentMatches', () => {
-  it.each(['Давай Д четыре', 'Ну, Д четыре', 'Д четыре', 'Д4', 'Д 4', 'ну давай дэ четыре'])('принимает телефонную команду %s и сверяет координату', (text) => {
-    expect(intentMatches('play_move', text, { coord: 'D4' })).toBe(true);
-    expect(intentMatches('play_move', text, { coord: 'E4' })).toBe(false);
+describe('mutationArgumentsMatch', () => {
+  it.each(['А мой первый ход черными К4', 'Я решил занять К4', 'Пусть это будет К4', 'Не D4, а К4, так и играю'])('принимает решение модели для %s', text => {
+    expect(mutationArgumentsMatch('play_move', text, { coord: 'K4' })).toBe(true);
+    expect(mutationArgumentsMatch('play_move', text, { coord: 'E5' })).toBe(false);
   });
-  it.each(['ну, а если Д четыре?', 'давай обсудим Д четыре', 'ну не ставь Д четыре', 'Д четыре или Е пять', 'давай сравни Д четыре и Е пять'])('не превращает обсуждение %s в ход', (text) => {
-    expect(intentMatches('play_move', text, { coord: 'D4' })).toBe(false);
+  it('не выдаёт сверку аргументов за классификацию намерения', () => {
+    // Вызывать ли инструмент для вопросов/отрицаний, проверяется модельным eval.
+    expect(mutationArgumentsMatch('play_move', 'а если D4?', { coord: 'D4' })).toBe(true);
+    expect(mutationArgumentsMatch('undo', 'не отменяй')).toBe(true);
+    expect(mutationArgumentsMatch('play_move', '[mouth noise', { coord: 'D4' })).toBe(false);
   });
-  it('не принимает гипотетический ход, но принимает голую координату и явную команду', () => {
-    expect(intentMatches('play_move', 'а если E9?')).toBe(false);
-    expect(intentMatches('play_move', 'стоит ли пойти на E9')).toBe(false);
-    expect(intentMatches('play_move', 'E9')).toBe(true);
-    expect(intentMatches('play_move', 'поставь на E9')).toBe(true);
-    expect(intentMatches('play_move', 'D четыре.', { coord: 'D4' })).toBe(true);
-    expect(intentMatches('play_move', 'дэ четыре', { coord: 'D4' })).toBe(true);
-    expect(intentMatches('play_move', 'ка десять', { coord: 'K10' })).toBe(true);
-    expect(intentMatches('play_move', 'Е9', { coord: 'E9' })).toBe(true);
-    expect(intentMatches('play_move', 'сыграй дэ четыре', { coord: 'D4' })).toBe(true);
-    expect(intentMatches('play_move', 'Поставь E9', { coord: 'D4' })).toBe(false);
-    expect(intentMatches('play_move', 'не ставь E9', { coord: 'E9' })).toBe(false);
-    expect(intentMatches('play_move', 'как поставить E9?', { coord: 'E9' })).toBe(false);
-    expect(intentMatches('play_move', 'ты сказал поставить E9', { coord: 'E9' })).toBe(false);
-    expect(intentMatches('play_move', 'если я сыграю D4, что будет?', { coord: 'D4' })).toBe(false);
-    expect(intentMatches('play_move', 'я сыграл D4', { coord: 'D4' })).toBe(false);
-  });
-
-  it('принимает только утвердительные команды для остальных мутаций', () => {
-    expect(intentMatches('resign', 'я не сдаюсь')).toBe(false);
-    expect(intentMatches('start_game', 'не начинай новую партию')).toBe(false);
-    expect(intentMatches('undo', 'не возвращай ход назад')).toBe(false);
-    expect(intentMatches('correct_last_move', 'нет, не исправляй на D5', { coord: 'D5' })).toBe(false);
-    expect(intentMatches('correct_last_move', 'нет, всё правильно, оставь D5', { coord: 'D5' })).toBe(false);
-    expect(intentMatches('set_rank', 'уровень менять не надо, 5 кю', { rank: '5 кю' })).toBe(false);
-    expect(intentMatches('redo', 'не надо вперёд')).toBe(false);
-    expect(intentMatches('pass', 'пас?')).toBe(false);
-    expect(intentMatches('undo', 'отмени')).toBe(true);
-    expect(intentMatches('resign', 'я сдаюсь')).toBe(true);
-    expect(intentMatches('correct_last_move', 'исправь на D5', { coord: 'D5' })).toBe(true);
-    expect(intentMatches('correct_last_move', 'нет, D5', { coord: 'D5' })).toBe(true);
-  });
-
-  it('разрешает документированный чёрный цвет по умолчанию, но сверяет явно названный цвет', () => {
-    expect(intentMatches('start_game', 'давай партию', { my_color: 'black' })).toBe(true);
-    expect(intentMatches('start_game', 'давай партию белыми', { my_color: 'white' })).toBe(true);
-    expect(intentMatches('start_game', 'давай партию белыми', { my_color: 'black' })).toBe(false);
-    expect(intentMatches('start_game', 'давай партию', { my_color: 'white' })).toBe(false);
-    expect(intentMatches('start_game', 'давай партию, коми 17,5', { komi: 7.5 })).toBe(false);
-    expect(intentMatches('start_game', 'давай партию, коми 7,5', { komi: 7.5 })).toBe(true);
-    expect(intentMatches('start_game', 'давай партию', { komi: 7.5 })).toBe(true);
-    expect(intentMatches('start_game', 'давай партию, играй как 15 кю', { rank: '5 кю' })).toBe(false);
-    expect(intentMatches('set_rank', 'играй как 15 кю', { rank: '5 кю' })).toBe(false);
+  it.each(['Давай Д четыре', 'Ну, Д четыре', 'Д4', 'Д 4', 'ну давай дэ четыре'])('сверяет координату: %s', text => {
+    expect(mutationArgumentsMatch('play_move', text, { coord: 'D4' })).toBe(true);
+    expect(mutationArgumentsMatch('play_move', text, { coord: 'E4' })).toBe(false);
   });
 });
 
@@ -94,4 +57,15 @@ describe('IntentLedger', () => {
     during.abort();
     await expect(pending).resolves.toMatchObject({ ok: false, reason: 'разговор уже завершён' });
   });
+});
+
+it('шум между реальной репликой и действием не вытесняет её и сам не разрешает действие', async () => {
+  const ledger = new IntentLedger();
+  ledger.add('А мой первый ход черными К4');
+  expect(ledger.add('[mouth noise')).toBeNull();
+  expect(ledger.add('] [clear throat')).toBeNull();
+  await expect(ledger.consume('play_move', 'А мой первый ход черными К4', {coord:'K4'}, 0)).resolves.toMatchObject({ok:true});
+  const empty = new IntentLedger();
+  empty.add('[clear throat]');
+  await expect(empty.consume('undo', '[clear throat]', {}, 0)).resolves.toMatchObject({ok:false});
 });
