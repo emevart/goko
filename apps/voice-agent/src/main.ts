@@ -24,6 +24,7 @@ import { GREETING_INSTRUCTIONS, VOICE_INSTRUCTIONS } from './prompt.ts';
 import { newAgentState } from './state.ts';
 import { createTools } from './tools.ts';
 import { sessionOptions } from './voice.ts';
+import { prepareRoomInput } from './room-input.ts';
 
 const root = path.resolve(import.meta.dirname, '../../..');
 if (existsSync(path.join(root, '.env'))) process.loadEnvFile(path.join(root, '.env'));
@@ -176,7 +177,7 @@ async function runSession(ctx: JobContext, sessionId: string): Promise<void> {
       inputOptions: {
         closeOnDisconnect: false,
         participantIdentity: identity,
-        ...(voiceMode === 'live' ? { audioEnabled: false } : {}),
+        ...prepareRoomInput(session, voiceMode),
         ...(voiceMode === 'live' ? {
           textInputCallback: async (_session, ev) => {
             const bridge = await liveBridgeReady;
