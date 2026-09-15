@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { EVENT_MESSAGE_PREFIX } from './event-speech.ts';
-import { GREETING_INSTRUCTIONS, INSTRUCTIONS } from './prompt.ts';
+import { BACKEND_INSTRUCTIONS, GREETING_INSTRUCTIONS, INSTRUCTIONS, VOICE_INSTRUCTIONS } from './prompt.ts';
 
 describe('промпт Гоко', () => {
   it('знает сообщения «Событие с экрана» под тем же именем, что пишет адаптер реплик (D-0013)', () => {
@@ -46,5 +46,13 @@ describe('промпт Гоко', () => {
   it('backchannel не получает навязчивое «твой ход», а redo использует инструмент', () => {
     expect(INSTRUCTIONS).toContain('Не повторяй «твой ход» на каждый короткий отклик');
     expect(INSTRUCTIONS).toContain('«верни отменённое», «вперёд» — redo');
+  });
+  it('вопрос о факте не разрешает объявлять будущий ход или выдуманный план', () => {
+    for (const prompt of [BACKEND_INSTRUCTIONS, VOICE_INSTRUCTIONS]) {
+      expect(prompt).toContain('Отвечай ровно на заданный вопрос');
+      expect(prompt).toContain('не разрешает объявлять будущий ход');
+      expect(prompt).toContain('не придумывай план');
+      expect(prompt).toMatch(/инструмент\S* мутации/u);
+    }
   });
 });
