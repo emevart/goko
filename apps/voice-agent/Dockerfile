@@ -20,7 +20,8 @@ RUN ONNXRUNTIME_NODE_INSTALL=skip npm ci --omit=dev --workspace apps/voice-agent
 COPY packages/go-core/src packages/go-core/src
 COPY packages/protocol/src packages/protocol/src
 COPY apps/voice-agent/src apps/voice-agent/src
-RUN npx livekit-agents download-files
+# CLI может находиться в node_modules workspace после обновления SDK.
+RUN npm run download-files --workspace apps/voice-agent
 ENV VOICE_MODE=realtime API_BASE=http://game-server:8787
 USER node
 CMD ["node", "apps/voice-agent/src/main.ts", "start"]
