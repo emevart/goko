@@ -6,7 +6,7 @@ export const TRACE_MAX_JSON_BYTES = 4 * 1024 * 1024;
 
 export type RecordingStopReason = 'user' | 'duration' | 'size' | 'mode-off' | 'disconnect' | 'track-change' | 'error';
 export type TraceEvent = { t: number; type: string; payload?: unknown };
-export type RecorderTrack = Pick<MediaStreamTrack, 'id' | 'kind' | 'readyState' | 'clone' | 'stop' | 'addEventListener' | 'removeEventListener'>;
+export type RecorderTrack = Pick<MediaStreamTrack, 'id' | 'kind' | 'readyState' | 'stop' | 'addEventListener' | 'removeEventListener'> & { getSettings?: () => MediaTrackSettings };
 export type RecorderLike = Pick<MediaRecorder, 'state' | 'mimeType' | 'start' | 'stop' | 'addEventListener' | 'removeEventListener'>;
 
 export type RecordingResult = {
@@ -37,6 +37,14 @@ type Deps = {
   revokeUrl: (url: string) => void;
   setTimer: (fn: () => void, ms: number) => ReturnType<typeof setInterval>;
   clearTimer: (id: ReturnType<typeof setInterval>) => void;
+  createAudioGraph: (mic: RecorderTrack, agent: RecorderTrack) => RecordingAudioGraph;
+};
+
+type RecordingAudioGraph = {
+  context: { sampleRate: number };
+  mic: RecorderTrack;
+  agent: RecorderTrack;
+  cleanup: () => void | Promise<void>;
 };
 
 const MIME_TYPES = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4'];
@@ -59,12 +67,51 @@ function defaults(): Deps {
     revokeUrl: (url) => URL.revokeObjectURL(url),
     setTimer: (fn, ms) => setInterval(fn, ms),
     clearTimer: (id) => clearInterval(id),
+    createAudioGraph: (mic, agent) => {
+      if (typeof AudioContext === 'undefined') throw new Error('браузер не поддерживает нормализацию записи звука');
+      const context = new AudioContext();
+      const makeSide = (track: RecorderTrack) => {
+        const source = context.createMediaStreamSource(new MediaStream([track as MediaStreamTrack]));
+        const destination = context.createMediaStreamDestination();
+        destination.channelCount = 1;
+        destination.channelCountMode = 'explicit';
+        source.connect(destination);
+        const output = destination.stream.getAudioTracks()[0];
+        if (!output) throw new Error('браузер не создал mono-дорожку записи');
+        return { source, destination, output };
+      };
+      let micSide: ReturnType<typeof makeSide> | null = null;
+      let agentSide: ReturnType<typeof makeSide> | null = null;
+      try {
+        micSide = makeSide(mic);
+        agentSide = makeSide(agent);
+      } catch (error) {
+        micSide?.output.stop();
+        agentSide?.output.stop();
+        void context.close();
+        throw error;
+      }
+      return {
+        context,
+        mic: micSide.output,
+        agent: agentSide.output,
+        cleanup: () => {
+          micSide?.source.disconnect();
+          agentSide?.source.disconnect();
+          micSide?.destination.disconnect();
+          agentSide?.destination.disconnect();
+          micSide?.output.stop();
+          agentSide?.output.stop();
+          return context.close();
+        },
+      };
+    },
   };
 }
 
 type Side = {
   label: 'mic' | 'agent';
-  clone: RecorderTrack;
+  track: RecorderTrack;
   recorder: RecorderLike;
   chunks: Blob[];
   startOffsetMs: number;
@@ -85,6 +132,7 @@ export class DiagnosticRecorder {
   private traceBytes = 2;
   private finishing: Promise<void> | null = null;
   private wallStartedAt = '';
+  private audioGraph: RecordingAudioGraph | null = null;
   private readonly available: boolean;
 
   constructor(deps: Partial<Deps> = {}) {
@@ -139,19 +187,17 @@ export class DiagnosticRecorder {
     this.traceEvents = [];
     this.traceTruncated = false;
     this.traceBytes = 2;
-    const clones: RecorderTrack[] = [];
     try {
-      for (const [label, original] of [['mic', mic], ['agent', agent]] as const) {
-        const clone = original.clone() as RecorderTrack;
-        clones.push(clone);
-        const recorder = this.deps.createRecorder(clone, mime);
+      this.audioGraph = this.deps.createAudioGraph(mic, agent);
+      for (const [label, track] of [['mic', this.audioGraph.mic], ['agent', this.audioGraph.agent]] as const) {
+        const recorder = this.deps.createRecorder(track, mime);
         const chunks: Blob[] = [];
         let resolvePromise!: () => void;
         let stoppedResolved = false;
         const stopped = new Promise<void>((resolve) => (resolvePromise = resolve));
         const side: Side = {
           label,
-          clone,
+          track,
           recorder,
           chunks,
           startOffsetMs: Math.max(0, this.deps.now() - startedAtMs),
@@ -189,7 +235,8 @@ export class DiagnosticRecorder {
         else if (!side.stopFallback) side.stopFallback = setTimeout(side.resolveStopped, 1000);
       }
       await Promise.all(this.sides.map((side) => side.stopped));
-      for (const clone of clones) clone.stop();
+      await this.audioGraph?.cleanup();
+      this.audioGraph = null;
       this.sides = [];
       this.publish({ phase: 'failed', error: error instanceof Error ? error.message : 'не удалось начать запись' });
       throw error;
@@ -223,9 +270,13 @@ export class DiagnosticRecorder {
       if (!micSide || !agentSide) return;
       const micBlob = new Blob(micSide.chunks, { type: micSide.recorder.mimeType });
       const agentBlob = new Blob(agentSide.chunks, { type: agentSide.recorder.mimeType });
+      const micSettings = micSide.track.getSettings?.() ?? {};
+      const agentSettings = agentSide.track.getSettings?.() ?? {};
       micSide.chunks.length = 0;
       agentSide.chunks.length = 0;
-      for (const side of this.sides) side.clone.stop();
+      const graph = this.audioGraph;
+      await graph?.cleanup();
+      this.audioGraph = null;
       const finalEvent: TraceEvent = { t: durationMs, type: 'recorder.finished', payload: { reason, micBytes: micBlob.size, agentBytes: agentBlob.size } };
       const finalBytes = encoder.encode(JSON.stringify(finalEvent)).byteLength + 1;
       while (this.traceEvents.length >= TRACE_MAX_EVENTS || this.traceBytes + finalBytes > TRACE_MAX_JSON_BYTES) {
@@ -241,9 +292,10 @@ export class DiagnosticRecorder {
         durationMs,
         stopReason: reason,
         tracks: {
-          mic: { mimeType: micBlob.type, bytes: micBlob.size, startOffsetMs: micSide.startOffsetMs },
-          agent: { mimeType: agentBlob.type, bytes: agentBlob.size, startOffsetMs: agentSide.startOffsetMs },
+          mic: { mimeType: micBlob.type, bytes: micBlob.size, startOffsetMs: micSide.startOffsetMs, settings: micSettings },
+          agent: { mimeType: agentBlob.type, bytes: agentBlob.size, startOffsetMs: agentSide.startOffsetMs, settings: agentSettings },
         },
+        audioGraph: { clock: 'shared-audio-context', sampleRate: graph?.context.sampleRate ?? null },
         trace: this.traceEvents,
         traceTruncated: this.traceTruncated,
       };

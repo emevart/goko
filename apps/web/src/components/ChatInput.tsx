@@ -1,5 +1,5 @@
 // ChatInput.tsx — поле ввода «Чата» (D-0011): Enter или «Отправить» -> lk.chat через useSession.sendText.
-// Логика отправки и её тесты — chat.ts; до готовности агента кнопка выключена.
+// Логика отправки и её тесты — chat.ts; первая отправка сама запускает чат и ограниченно ждёт агента.
 // hint — подсказка об агенте в ленте («Гоко вышел», «Гоко не пришёл»): поле не обещает, что Гоко подключается.
 import { useState } from 'react';
 import type { FormEvent } from 'react';
@@ -13,7 +13,7 @@ export function ChatInput({ ready, hint = null, onSend }: Props) {
   const [busy, setBusy] = useState(false);
   const submit = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
-    if (busy || !ready) return;
+    if (busy) return;
     setBusy(true);
     try {
       setDraft(await onSend(draft));
@@ -40,7 +40,7 @@ export function ChatInput({ ready, hint = null, onSend }: Props) {
           }
         }}
       />
-      <button type="submit" className="btn btn-inline btn-accent" disabled={!ready || busy || !draft.trim()}>
+      <button type="submit" className="btn btn-inline btn-accent" disabled={busy || !draft.trim()}>
         Отправить
       </button>
     </form>

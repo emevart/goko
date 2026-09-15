@@ -11,11 +11,14 @@ import { type Line, acceptLine, isTrustedTranscriptSender, lineId, upsertLine, w
 import { connectionFailureAction } from '../session-connection.ts';
 import { acceptConversationEvent, bindAgent, isBoundAgent, participantRefOf, type AgentBinding } from '../conversation.ts';
 import { DiagnosticRecorder, watchTrackEnd, type RecorderTrack, type RecordingSnapshot, type RecordingStopReason } from '../recording.ts';
+import { preflightVoice, SessionGate, waitForAgentReady } from '../session-lifecycle.ts';
 
 const STORAGE_KEY = 'goko.session';
 
 export type MicState = 'off' | 'connecting' | 'on' | 'failed';
 export type LinkState = 'idle' | 'connecting' | 'connected' | 'failed';
+export type ConversationState = 'idle' | 'chat' | 'voice';
+const AGENT_READY_TIMEOUT_MS = 8_000;
 
 // Функцией: в Safari с запретом данных сайта исключение бросает уже обращение к localStorage (prefs.ts ловит).
 const local = () => localStorage;
@@ -40,17 +43,6 @@ function saveStored(res: CreateSessionResponse | null) {
   }
 }
 
-// getTrackPublications() типизирован базовым TrackPublication без setSubscribed (livekit-client 2.22.3),
-// поэтому публикации удалённого участника — из Map trackPublications (RemoteTrackPublication).
-function setRemoteAudio(room: Room, on: boolean, agentIdentity: string | null) {
-  for (const p of room.remoteParticipants.values()) {
-    if (p.identity !== agentIdentity || p.kind !== ParticipantKind.AGENT) continue;
-    for (const pub of p.trackPublications.values()) {
-      if (pub.kind === Track.Kind.Audio) pub.setSubscribed(on);
-    }
-  }
-}
-
 // Вход отклонён сервером LiveKit: токен истёк или неверен (401/403 при проверке соединения) либо комнаты сессии
 // уже нет (404 «requested room does not exist») — livekit-client 2.22.3 даёт на всё это NotAllowed. С тем же токеном
 // повтор бесполезен. Прочие причины (сеть, таймаут ICE, отмена) — временные: сессия остаётся, повтор по касанию.
@@ -65,6 +57,8 @@ export function useSession() {
   const [agent, setAgent] = useState(false);
   const [agentPresent, setAgentPresent] = useState(false);
   const [agentState, setAgentState] = useState<string>('connecting');
+  const [conversation, setConversation] = useState<ConversationState>('idle');
+  const conversationRef = useRef<ConversationState>('idle');
   const [amplitude, setAmplitude] = useState(0);
   const [audioPlaybackError, setAudioPlaybackError] = useState<string | null>(null);
   const recorderRef = useRef(new DiagnosticRecorder());
@@ -75,11 +69,25 @@ export function useSession() {
   const joining = useRef<Promise<Room | null> | null>(null);
   // Номер попытки входа: reset и размонтирование его меняют, и вход, начатый раньше, не трогает ни комнату, ни состояние.
   const generation = useRef(0);
-  const creating = useRef(false);
+  const sessionGate = useRef<SessionGate<CreateSessionResponse> | null>(null);
   const agentBinding = useRef<AgentBinding | null>(null);
   const micTrack = useRef<RecorderTrack | null>(null);
   const remoteAgentTrack = useRef<RecorderTrack | null>(null);
   const stopMeter = useRef<(() => void) | null>(null);
+  const readyListeners = useRef(new Set<() => void>());
+  const voiceAttempt = useRef(0);
+  const gestureAudio = useRef<AudioContext | null>(null);
+
+  if (!sessionGate.current) {
+    sessionGate.current = new SessionGate(async () => {
+      setError(null);
+      const res = await client.createSession();
+      saveStored(res);
+      setInfo(res);
+      return res;
+    });
+    if (info) sessionGate.current.seed(info);
+  }
 
   useEffect(() => recorderRef.current.subscribe(setRecording), []);
 
@@ -95,37 +103,26 @@ export function useSession() {
       roomRef.current = null;
       joining.current = null;
       stopMeter.current?.();
+      void gestureAudio.current?.close();
       void recorderRef.current.dispose().finally(() => room?.disconnect());
     },
     [],
   );
 
-  // Создание сессии. Один запрос за раз (ref creating): эффект и касание страницы после отказа (activate)
-  // не шлют второй, пока первый в пути. Старая фраза ошибки уходит сразу, чтобы не висеть над новой попыткой.
-  const create = useCallback(() => {
-    if (creating.current) return;
-    creating.current = true;
-    setError(null);
-    client
-      .createSession()
-      .then((res) => {
-        saveStored(res);
-        setInfo(res);
-      })
-      .catch((e: unknown) => setError(describeError(e)))
-      .finally(() => {
-        creating.current = false;
-      });
-  }, []);
-
-  // Без сессии при монтировании и после reset. После отказа сам не повторяет: повтор — касанием (activate).
-  useEffect(() => {
-    if (!info) create();
-  }, [info, create]);
+  const ensureSession = useCallback(async (): Promise<CreateSessionResponse | null> => {
+    if (info) return info;
+    try {
+      return await sessionGate.current!.ensure();
+    } catch (e) {
+      setError(describeError(e));
+      return null;
+    }
+  }, [info]);
 
   // Сессия истекла на сервере (SSE ответил not_found): комната тоже мертва — отключаемся и создаём новую.
   const reset = useCallback(() => {
     saveStored(null);
+    sessionGate.current?.seed(null);
     generation.current++;
     const room = roomRef.current;
     roomRef.current = null;
@@ -142,6 +139,8 @@ export function useSession() {
     setAgent(false);
     setAgentPresent(false);
     setAgentState('connecting');
+    setConversation('idle');
+    conversationRef.current = 'idle';
     setLines([]);
     setError(null); // фраза прежней сессии не должна висеть над новой до входа в комнату
     setInfo(null);
@@ -157,8 +156,9 @@ export function useSession() {
   }, []);
 
   // Вход в комнату, идемпотентный: повторные касания получают тот же промис.
-  const connect = useCallback((): Promise<Room | null> => {
-    if (!info) return Promise.resolve(null);
+  const connect = useCallback(async (): Promise<Room | null> => {
+    const sessionInfo = info ?? await ensureSession();
+    if (!sessionInfo || conversationRef.current === 'idle') return null;
     if (joining.current) return joining.current;
     const gen = ++generation.current;
     const current = () => generation.current === gen;
@@ -184,6 +184,7 @@ export function useSession() {
       setAgentPresent(Boolean(p));
       setAgent(Boolean(p && agentReady(p.attributes)));
       setAgentState(p?.attributes['lk.agent.state'] ?? (p ? 'initializing' : 'connecting'));
+      for (const notify of readyListeners.current) notify();
       if (!p) remoteAgentTrack.current = null;
     };
     room.on(RoomEvent.TrackSubscribed, (track, publication, participant) => {
@@ -329,7 +330,7 @@ export function useSession() {
     setLink('connecting');
     const joined = (async (): Promise<Room | null> => {
       try {
-        await room.connect(info.livekit.url, info.livekit.token);
+        await room.connect(sessionInfo.livekit.url, sessionInfo.livekit.token);
       } catch (e) {
         if (!current()) return null; // reset или размонтирование во время входа: состояние уже сброшено
         console.warn('[!] web: вход в комнату не удался', e);
@@ -341,10 +342,10 @@ export function useSession() {
           // а следующее касание входит уже с её токеном.
           saveStored(null);
           reset();
-          setError('нет связи с Гоко: доска работает тапами, коснись экрана, чтобы подключиться заново');
+          setError('нет связи с Гоко: доска работает тапами, повтори запуск разговора');
         } else {
           // Временный сбой: сессия сохранена, следующее касание страницы входит заново с тем же токеном.
-          setError('нет связи с Гоко: доска работает тапами, коснись экрана, чтобы подключиться снова');
+          setError('нет связи с Гоко: доска работает тапами, повтори действие разговора');
         }
         return null;
       }
@@ -354,7 +355,7 @@ export function useSession() {
       }
       roomRef.current = room;
       recorderRef.current.trace('room.connected', { generation: gen });
-      saveStored(info); // вход удался — сессия переживает перезагрузку вкладки
+      saveStored(sessionInfo); // вход удался — сессия переживает перезагрузку вкладки
       // Режим — сразу после входа и без ожидания: агент ждёт goko.mode перед приветствием не дольше 2 с, а
       // setAttributes ждёт подтверждения до 5 с и не должен задерживать микрофон и чат (отказ sendMode логирует).
       void sendMode(room, modeRef.current);
@@ -368,7 +369,7 @@ export function useSession() {
     })();
     joining.current = joined;
     return joined;
-  }, [info, sendMode, reset]);
+  }, [info, ensureSession, sendMode, reset]);
 
   const enableMic = useCallback(async () => {
     const room = await connect();
@@ -377,7 +378,7 @@ export function useSession() {
     try {
       await room.localParticipant.setMicrophoneEnabled(true);
       // Пока включался микрофон, выбрали «Чат»: запоздавшее включение перекрыло бы выключение ветки «Чата».
-      if (modeRef.current !== 'voice') {
+      if (modeRef.current !== 'voice' || conversationRef.current !== 'voice' || roomRef.current !== room) {
         void room.localParticipant.setMicrophoneEnabled(false);
         setMic('off');
         return;
@@ -433,51 +434,39 @@ export function useSession() {
     }
   }, [connect]);
 
-  // Произвольное касание может восстановить транспорт, но никогда не включает захват микрофона.
-  const activate = useCallback(async () => {
-    if (!info) return create();
-    await connect();
-  }, [info, create, connect]);
-
-  const setMode = useCallback(
-    async (mode: Mode) => {
-      modeRef.current = mode;
-      setPrefs((p) => ({ ...p, mode }));
-      const room = await connect();
-      // Быстрое «Голос → Чат → Голос»: после каждого ожидания выходим, если режим уже сменили снова,
-      // иначе запоздавшая ветка «Чата» выключила бы микрофон и звук уже в «Голосе».
-      if (!room || modeRef.current !== mode) return;
-      // Без ожидания, как при входе: подтверждение setAttributes до 5 с не задерживает микрофон и отписку звука.
-      void sendMode(room, mode);
-      if (mode === 'chat') {
-        await recorderRef.current.stop('mode-off');
-        try {
-          await room.localParticipant.setMicrophoneEnabled(false);
-        } catch {
-          // микрофона и не было
-        }
-        if (modeRef.current !== mode) return;
-        setMic('off');
-        micTrack.current = null;
-        stopMeter.current?.();
-        stopMeter.current = null;
-        setAmplitude(0);
-        setRemoteAudio(room, false, agentBinding.current?.identity ?? null);
-      } else {
-        setRemoteAudio(room, true, agentBinding.current?.identity ?? null);
-        await enableMic();
-      }
-    },
-    [connect, sendMode, enableMic],
-  );
-
   const updatePrefs = useCallback((patch: Partial<Prefs>) => setPrefs((p) => ({ ...p, ...patch })), []);
 
   // Отправка из поля ввода «Чата». Возвращает, что оставить в поле: '' после успеха, черновик при ошибке.
   const sendText = useCallback(
     async (draft: string): Promise<string> => {
+      if (!draft.trim()) return draft;
+      if (conversationRef.current === 'idle') {
+        modeRef.current = 'chat';
+        conversationRef.current = 'chat';
+        setConversation('chat');
+        setPrefs((p) => ({ ...p, mode: 'chat' }));
+      }
       const room = await connect();
       if (!room) return draft;
+      const gen = generation.current;
+      void sendMode(room, modeRef.current);
+      const ready = await waitForAgentReady(
+        () => {
+          const binding = agentBinding.current;
+          const participant = binding ? room.remoteParticipants.get(binding.identity) : undefined;
+          return Boolean(participant && agentReady(participant.attributes));
+        },
+        (notify) => {
+          readyListeners.current.add(notify);
+          return () => readyListeners.current.delete(notify);
+        },
+        () => generation.current === gen && roomRef.current === room && conversationRef.current !== 'idle',
+        AGENT_READY_TIMEOUT_MS,
+      );
+      if (!ready) {
+        setError('Гоко не успел подключиться; сообщение сохранено, попробуй ещё раз');
+        return draft;
+      }
       const res = await sendChat(draft, {
         send: (text) => room.localParticipant.sendText(text, { topic: 'lk.chat' }),
         id: chatLineId,
@@ -487,7 +476,7 @@ export function useSession() {
       if (res.error) setError(res.error);
       return res.draft;
     },
-    [connect],
+    [connect, sendMode],
   );
 
   const clearError = useCallback(() => setError(null), []);
@@ -502,11 +491,82 @@ export function useSession() {
       setAudioPlaybackError('браузер не дал включить звук Гоко');
     }
   }, [connect]);
-  const toggleVoice = useCallback(async () => {
-    if (modeRef.current === 'voice' && (mic === 'on' || mic === 'connecting')) await setMode('chat');
-    else if (modeRef.current === 'voice') await enableMic();
-    else await setMode('voice');
-  }, [mic, setMode, enableMic]);
+  const startVoice = useCallback(async () => {
+    const attempt = ++voiceAttempt.current;
+    conversationRef.current = 'voice';
+    setConversation('voice');
+    modeRef.current = 'voice';
+    setPrefs((p) => ({ ...p, mode: 'voice' }));
+    let permission: MediaStream | null = null;
+    try {
+      permission = await preflightVoice(
+        async () => {
+          if (typeof AudioContext === 'undefined') return;
+          gestureAudio.current ??= new AudioContext();
+          await gestureAudio.current.resume();
+        },
+        () => navigator.mediaDevices.getUserMedia({ audio: true }),
+      );
+    } catch {
+      if (voiceAttempt.current === attempt) {
+        conversationRef.current = 'idle';
+        setConversation('idle');
+        setMic('failed');
+        setError('не удалось включить микрофон: разреши его в браузере; чат остаётся доступен');
+      }
+      return;
+    }
+    for (const track of permission.getTracks()) track.stop();
+    if (voiceAttempt.current !== attempt || conversationRef.current !== 'voice') return;
+    const room = await connect();
+    if (!room || voiceAttempt.current !== attempt) return;
+    void sendMode(room, 'voice');
+    await enableMic();
+  }, [connect, enableMic, sendMode]);
+
+  const toggleMute = useCallback(async () => {
+    if (conversation !== 'voice') return;
+    const room = roomRef.current;
+    if (!room) return startVoice();
+    if (mic === 'on') {
+      await room.localParticipant.setMicrophoneEnabled(false);
+      setMic('off');
+      stopMeter.current?.();
+      stopMeter.current = null;
+      setAmplitude(0);
+    } else await enableMic();
+  }, [conversation, mic, enableMic, startVoice]);
+
+  const endConversation = useCallback(async () => {
+    voiceAttempt.current++;
+    conversationRef.current = 'idle';
+    setConversation('idle');
+    await recorderRef.current.stop('mode-off');
+    const room = roomRef.current;
+    const endedGeneration = ++generation.current;
+    roomRef.current = null;
+    joining.current = null;
+    if (room) {
+      await Promise.race([
+        room.localParticipant.setAttributes({ 'goko.conversation': 'ended' }).catch(() => {}),
+        new Promise<void>((resolve) => setTimeout(resolve, 750)),
+      ]);
+      try { await room.localParticipant.setMicrophoneEnabled(false); } catch { /* уже отключён */ }
+      await room.disconnect();
+    }
+    if (generation.current !== endedGeneration) return;
+    agentBinding.current = null;
+    micTrack.current = null;
+    remoteAgentTrack.current = null;
+    stopMeter.current?.();
+    stopMeter.current = null;
+    setAmplitude(0);
+    setMic('off');
+    setLink('idle');
+    setAgent(false);
+    setAgentPresent(false);
+    setAgentState('connecting');
+  }, []);
   const startRecording = useCallback(() => {
     void recorderRef.current.start(micTrack.current, remoteAgentTrack.current)
       .then(() => recorderRef.current.trace('room.snapshot', { generation: generation.current, agentIdentity: agentBinding.current?.identity, agentSid: agentBinding.current?.sid }))
@@ -526,21 +586,23 @@ export function useSession() {
     agent,
     agentPresent,
     agentState,
+    conversation,
     amplitude,
     prefs,
     error,
     audioPlaybackError,
     recording,
     clearError,
-    activate,
+    ensureSession,
     enableMic,
-    toggleVoice,
+    startVoice,
+    toggleMute,
+    endConversation,
     retryAudio,
     startRecording,
     stopRecording,
     deleteRecording,
     trace,
-    setMode,
     updatePrefs,
     sendText,
     reset,

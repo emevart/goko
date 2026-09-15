@@ -220,9 +220,10 @@ export function useGame(sessionId: string | null, onLost: () => void, trace: (ty
   // Ответ движка ждать не надо: придёт событием, а Гоко прокомментирует новую партию сам.
   // Партии создаются только внутри сессии (D-0012): POST /api/games в prod выключен (задача 9).
   const newGame = useCallback(
-    async (prefs: Prefs) => {
-      if (!sessionId) return;
-      await request((o) => client.newGame(sessionId, newGameRequest(prefs, state), o));
+    async (prefs: Prefs, explicitSessionId?: string) => {
+      const targetSessionId = explicitSessionId ?? sessionId;
+      if (!targetSessionId) return;
+      await request((o) => client.newGame(targetSessionId, newGameRequest(prefs, state), o));
     },
     [sessionId, state, request],
   );

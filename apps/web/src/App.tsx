@@ -63,7 +63,6 @@ export function App() {
   const g = useGame(sessionId, s.reset, s.trace);
   const size = g.state?.settings.boardSize ?? 13;
   const keepAwake = useWakeLock();
-  const activating = useRef(false);
   const agentHint = useAgentHint(sessionId, link === 'connected', agent);
 
   // Ошибка связи с комнатой или микрофона уходит, когда причина прошла: вошли в комнату и микрофон не в отказе.
@@ -71,24 +70,8 @@ export function App() {
     if (link === 'connected' && mic !== 'failed') clearError();
   }, [link, mic, clearError]);
 
-  // Касание страницы: блокировка экрана. Без сессии (создание не удалось) — повтор создания, в том числе касанием
-  // переключателя; второй запрос, пока первый в пути, не уходит (ref creating в useSession). Пока комната не
-  // подключена — вход (startAudio на iOS — только из жеста), в «Голосе» ещё и микрофон; касание во время входа
-  // ничего не добавляет. Касание переключателя режима вход не запускает: setMode сам входит и включает нужное.
-  const onTouch = () => {
-    keepAwake();
-    if (!s.session) {
-      void s.activate();
-      return;
-    }
-    if (link === 'connected' || activating.current) return;
-    activating.current = true;
-    void s.activate().finally(() => {
-      activating.current = false;
-    });
-  };
-
   const onSend = async (draft: string): Promise<string> => {
+    keepAwake();
     const rest = await s.sendText(draft);
     if (draft.trim() && rest === '') clearError(); // отправлено: прежняя ошибка отправки уже не про сейчас
     return rest;
@@ -100,10 +83,13 @@ export function App() {
   }, [g.state, s.trace]);
 
   return (
-    <div className="app" onPointerDownCapture={onTouch}>
+    <div className="app">
       <header className="app-header">
         <h1>Гоко</h1>
-        <NewGame prefs={s.prefs} onChange={s.updatePrefs} onStart={() => void g.newGame(s.prefs)} />
+        <NewGame prefs={s.prefs} onChange={s.updatePrefs} onStart={() => {
+          keepAwake();
+          void s.ensureSession().then((created) => created && g.newGame(s.prefs, created.session.id));
+        }} />
       </header>
       <Controls canPlay={g.state?.status === 'playing'} canUndo={g.canUndo} canRedo={g.canRedo} canResign={g.canResign} onPass={() => void g.pass()} onResign={() => void g.resign()} onUndo={() => void g.undo()} onRedo={() => void g.redo()} />
       {g.mutating && <div className="mutation-busy" role="status">Изменяю позицию…</div>}
@@ -114,15 +100,16 @@ export function App() {
           <MoveHistory state={g.state} />
         </section>
         <section className="conversation" aria-label="разговор с Гоко">
-          <VoiceOrb link={link} mic={mic} agentPresent={s.agentPresent} agentState={s.agentState} amplitude={s.amplitude} />
+          {s.conversation === 'voice' && <VoiceOrb link={link} mic={mic} agentPresent={s.agentPresent} agentState={s.agentState} amplitude={s.amplitude} onToggle={() => void s.toggleMute()} />}
           {s.audioPlaybackError && <div className="playback-error">{s.audioPlaybackError} <button type="button" className="btn btn-inline btn-accent" onClick={() => void s.retryAudio()}>Включить звук</button></div>}
           <Transcript lines={s.lines} mode={s.prefs.mode} notice={agentHint ? AGENT_HINT_TEXT[agentHint] : null} />
           <div className="conversation-input-row">
-            <button type="button" className={`btn voice-button${s.prefs.mode === 'voice' && mic === 'on' ? ' voice-button-on' : ''}`} onClick={() => void s.toggleVoice()} disabled={mic === 'connecting'} aria-pressed={s.prefs.mode === 'voice' && mic === 'on'}>
-              {mic === 'connecting' ? 'Подключаю…' : s.prefs.mode === 'voice' && mic === 'on' ? 'Выключить голос' : mic === 'failed' ? 'Повторить голос' : 'Включить голос'}
+            <button type="button" className="btn voice-button" onClick={() => { keepAwake(); void s.startVoice(); }} disabled={mic === 'connecting' || s.conversation === 'voice'}>
+              {mic === 'connecting' ? 'Подключаю…' : mic === 'failed' ? 'Повторить голос' : s.conversation === 'voice' ? 'Голос включён' : 'Начать голосом'}
             </button>
             <ChatInput ready={agent} hint={agentHint} onSend={onSend} />
           </div>
+          {s.conversation !== 'idle' && <button type="button" className="btn conversation-end" onClick={() => void s.endConversation()}>Завершить разговор</button>}
           <DiagnosticRecording snapshot={s.recording} supported={typeof MediaRecorder !== 'undefined'} onStart={s.startRecording} onStop={() => void s.stopRecording()} onDelete={s.deleteRecording} />
         </section>
       </main>

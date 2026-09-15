@@ -25,11 +25,11 @@ class FakeRecorder extends EventTarget implements RecorderLike {
   }
 }
 
-function track(id: string) {
+function track(id: string, channelCount = 1) {
   const originalStop = vi.fn();
   const cloneStop = vi.fn();
   const clone = { id: `${id}-clone`, kind: 'audio', readyState: 'live', clone: vi.fn(), stop: cloneStop } as unknown as RecorderTrack;
-  const original = { id, kind: 'audio', readyState: 'live', clone: vi.fn(() => clone), stop: originalStop } as unknown as RecorderTrack;
+  const original = { id, kind: 'audio', readyState: 'live', clone: vi.fn(() => clone), stop: originalStop, getSettings: () => ({ channelCount }) } as unknown as RecorderTrack;
   return { original, originalStop, cloneStop };
 }
 
@@ -37,6 +37,7 @@ function fixture() {
   let now = 100;
   const recorders: FakeRecorder[] = [];
   const revoked: string[] = [];
+  const cleanups: ReturnType<typeof vi.fn>[] = [];
   const recorder = new DiagnosticRecorder({
     now: () => now,
     supported: (mime) => mime.includes('webm;codecs=opus'),
@@ -49,8 +50,18 @@ function fixture() {
     revokeUrl: (url) => revoked.push(url),
     setTimer: (() => 1) as never,
     clearTimer: () => {},
+    createAudioGraph: (mic, agent) => {
+      const cleanup = vi.fn();
+      cleanups.push(cleanup);
+      return {
+        context: { sampleRate: 48_000 },
+        mic: { ...mic, id: `${mic.id}-mono`, getSettings: () => ({ channelCount: 1, sampleRate: 48_000 }) },
+        agent: { ...agent, id: `${agent.id}-mono`, getSettings: () => ({ channelCount: 1, sampleRate: 48_000 }) },
+        cleanup,
+      };
+    },
   });
-  return { recorder, recorders, revoked, advance: (ms: number) => (now += ms) };
+  return { recorder, recorders, revoked, cleanups, advance: (ms: number) => (now += ms) };
 }
 
 describe('DiagnosticRecorder', () => {
@@ -95,10 +106,10 @@ describe('DiagnosticRecorder', () => {
     await expect(recorder.start(track('mic').original, track('agent').original)).rejects.toThrow(/MediaRecorder|запись звука/);
   });
 
-  it('пишет две clone-дорожки timeslice=1000, сохраняет финальные chunks и не останавливает originals', async () => {
+  it('пишет обе mono-дорожки от общих часов, сохраняет фактическую конфигурацию и не останавливает originals', async () => {
     const f = fixture();
     const mic = track('mic');
-    const agent = track('agent');
+    const agent = track('agent', 2);
     await f.recorder.start(mic.original, agent.original);
     expect(f.recorders.map((item) => item.timeslice)).toEqual([1000, 1000]);
     f.recorders[0]!.emit(5);
@@ -111,8 +122,13 @@ describe('DiagnosticRecorder', () => {
     expect(f.recorder.getSnapshot().result).toMatchObject({ durationMs: 1200, totalBytes: 15, partial: false });
     expect(mic.originalStop).not.toHaveBeenCalled();
     expect(agent.originalStop).not.toHaveBeenCalled();
-    expect(mic.cloneStop).toHaveBeenCalledOnce();
-    expect(agent.cloneStop).toHaveBeenCalledOnce();
+    const manifest = JSON.parse(await f.recorder.getSnapshot().result!.manifest.blob.text());
+    expect(manifest.audioGraph).toEqual({ clock: 'shared-audio-context', sampleRate: 48_000 });
+    expect(manifest.tracks.mic.settings).toMatchObject({ channelCount: 1, sampleRate: 48_000 });
+    expect(manifest.tracks.agent.settings).toMatchObject({ channelCount: 1, sampleRate: 48_000 });
+    expect(mic.cloneStop).not.toHaveBeenCalled();
+    expect(agent.cloneStop).not.toHaveBeenCalled();
+    expect(f.cleanups[0]).toHaveBeenCalledOnce();
   });
 
   it('сохраняет partial при disconnect и освобождает URL только по delete', async () => {
@@ -139,11 +155,12 @@ describe('DiagnosticRecorder', () => {
         if (++calls === 2) throw new Error('second failed');
         return first;
       },
+      createAudioGraph: (micTrack, agentTrack) => ({ context: { sampleRate: 48_000 }, mic: micTrack, agent: agentTrack, cleanup: vi.fn() }),
     });
     await expect(recorder.start(mic.original, agent.original)).rejects.toThrow('second failed');
     expect(first.state).toBe('inactive');
-    expect(mic.cloneStop).toHaveBeenCalledOnce();
-    expect(agent.cloneStop).toHaveBeenCalledOnce();
+    expect(mic.cloneStop).not.toHaveBeenCalled();
+    expect(agent.cloneStop).not.toHaveBeenCalled();
     expect(mic.originalStop).not.toHaveBeenCalled();
   });
 
