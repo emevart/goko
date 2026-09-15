@@ -96,6 +96,26 @@ const thinkThrough = async (engine: FakeEngine, genmoveCalls: number, delayMs: n
 };
 
 describe('GameService: партия человек против движка', () => {
+  it('применяет выбор персонажа и публикует намерение с ревизией', async () => {
+    const {service,bus}=await make(createFakeEngine({script:['E5']}),{chooseMove:async()=>({coord:'F6',intention:'Хочу развиться по стороне'})});
+    const game=await service.create({...HUMAN_BLACK,...S9,waitForReply:true});
+    const events=record(bus,`game:${game.state.id}`);
+    const result=await service.play(game.state.id,{coord:'D4',waitForReply:true,via:'api'});
+    expect(result.reply?.coord).toBe('F6');
+    expect(events.at(-1)).toMatchObject({engineDecision:{basedOnRevision:1,playerChoice:{coord:'F6'}}});
+  });
+  it('ответ персонажа после сдачи не ставит камень', async () => {
+    let release!: (choice:{coord:string;intention:string})=>void;
+    let choosing=false;
+    const {service}=await make(createFakeEngine({script:['E5']}),{chooseMove:async()=>{choosing=true;return new Promise(resolve=>{release=resolve})}});
+    const game=await service.create({...HUMAN_BLACK,...S9,waitForReply:true});
+    await service.play(game.state.id,{coord:'D4',waitForReply:false,via:'api'});
+    await untilTick(()=>choosing);
+    await service.resign(game.state.id,{color:'B',via:'api'});
+    release({coord:'F6',intention:'Хочу развиться'});
+    await tick();
+    expect(service.get(game.state.id).moves).toHaveLength(1);
+  });
   it('create -> play с ответом движка -> события -> снапшот', async () => {
     const engine = createFakeEngine({ script: ['E5'] });
     // Единственный тест сервиса на настоящем диске: все ожидания здесь — await операций, а не

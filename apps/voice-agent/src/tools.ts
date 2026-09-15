@@ -591,6 +591,7 @@ export function createToolFns(deps: ToolDeps) {
         }));
         const decision = state.engineDecision?.gameId === g.id ? state.engineDecision : null;
         const lastEngineDecision = decision ? {
+          ...(decision.playerChoice ? {playerChoice: decision.playerChoice} : {}),
           moveN: decision.moveN,
           basedOnRevision: decision.basedOnRevision,
           rankCandidates: decision.rankCandidates.map((candidate) => ({ ...candidate, coordSpoken: speakMove(candidate.coord) })),

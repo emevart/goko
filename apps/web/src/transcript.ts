@@ -1,13 +1,17 @@
 // Лента диалога из текстовых потоков LiveKit (lk.transcription). Чистые функции без React.
 export type Who = 'me' | 'goko';
-export type Line = { id: string; who: Who; text: string; final: boolean; error?: boolean };
+export type Line = { id: string; who: Who; text: string; final: boolean; error?: boolean; startedAt?: number };
 
 export const MAX_LINES = 200;
 
 // Потоковая реплика приходит кусками под одним id: заменяем строку, а не добавляем новую.
 export function upsertLine(lines: readonly Line[], line: Line): Line[] {
   const i = lines.findIndex((l) => l.id === line.id);
-  const next = i >= 0 ? lines.map((l, j) => (j === i ? line : l)) : [...lines, line];
+  const previous = lines[i];
+  if (previous?.final && !line.final) return [...lines];
+  const updated = previous?.startedAt !== undefined ? {...line, startedAt: previous.startedAt} : line;
+  const next = i >= 0 ? lines.map((l, j) => (j === i ? updated : l)) : [...lines, updated];
+  next.sort((a,b) => (a.startedAt ?? 0) - (b.startedAt ?? 0));
   return next.length > MAX_LINES ? next.slice(next.length - MAX_LINES) : next;
 }
 

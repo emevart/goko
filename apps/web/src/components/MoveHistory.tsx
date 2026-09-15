@@ -1,10 +1,11 @@
 import type { GameState } from '@goko/protocol';
+import { UtilityPanel } from './UtilityPanel.tsx';
 
 export function MoveHistory({ state }: { state: GameState | null }) {
   const moves = state?.moves ?? [];
   return (
-    <details className="move-history">
-      <summary>История ходов{moves.length ? ` · ${moves.length}` : ''}</summary>
+    <UtilityPanel title={`История ходов · ${moves.length}`} label="История">
+      <div className="move-history">
       {moves.length === 0 ? <p className="muted">Ходов пока нет</p> : (
         <ol>
           {moves.map((move, index) => (
@@ -15,6 +16,7 @@ export function MoveHistory({ state }: { state: GameState | null }) {
           ))}
         </ol>
       )}
-    </details>
+      </div>
+    </UtilityPanel>
   );
 }

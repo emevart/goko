@@ -3,6 +3,19 @@ import { type Line, MAX_LINES, acceptLine, isTrustedTranscriptSender, lineId, up
 
 const line = (id: string, text: string, who: 'me' | 'goko' = 'goko', final = true): Line => ({ id, who, text, final });
 
+it('поздний финал не переставляет реплику и не заменяется старым промежуточным текстом', () => {
+  let rows = upsertLine([], {...line('u','мой', 'me',false), startedAt:10});
+  rows = upsertLine(rows,{...line('a','K10'),startedAt:20});
+  rows = upsertLine(rows,{...line('u','мой ход D4','me'),startedAt:30});
+  rows = upsertLine(rows,{...line('u','мой ход','me',false),startedAt:15});
+  expect(rows.map(r=>r.id)).toEqual(['u','a']);
+  expect(rows[0]?.text).toBe('мой ход D4');
+});
+it('поздно доставленный ранний поток занимает своё место', () => {
+  const rows = upsertLine([{...line('a','ответ'),startedAt:20}],{...line('u','вопрос','me'),startedAt:10});
+  expect(rows.map(r=>r.id)).toEqual(['u','a']);
+});
+
 describe('upsertLine', () => {
   it('добавляет новые и заменяет по id (потоковая реплика дописывается)', () => {
     let lines = upsertLine([], line('a', 'При', 'goko', false));

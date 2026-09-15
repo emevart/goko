@@ -2,8 +2,9 @@
 // после счёта — территория и мёртвые камни из result.score. Тап -> ближайший пункт -> onTap(coord).
 // SVG заполняет гибкий бокс .board-wrap (доска сжимается по доступной высоте) и вписывает квадрат по центру;
 // поля бокса при пересчёте тапа вычитает toView.
-import { useRef } from 'react';
-import type { MouseEvent } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import type { PointerEvent } from 'react';
+import { BoardDrag } from '../board-drag.ts';
 import { COLUMN_LETTERS, parseCoord } from '@goko/go-core';
 import type { GameState } from '@goko/protocol';
 import { VIEW, coordAt, hoshi, indexOf, layout, pointAt, stones, toView, x, y } from '../geometry.ts';
@@ -14,6 +15,10 @@ const TERRITORY_THRESHOLD = 0.6;
 
 export function Board({ state, size, onTap }: Props) {
   const ref = useRef<SVGSVGElement>(null);
+  const drag = useRef(new BoardDrag());
+  const [preview, setPreview] = useState<string | null>(null);
+  const position = `${state?.id}:${state?.revision}`;
+  useEffect(() => { drag.current.cancel(); setPreview(null); }, [position]);
   const l = layout(size);
   const board = state?.board ?? '.'.repeat(size * size);
   const last = state?.moves.at(-1);
@@ -22,19 +27,26 @@ export function Board({ state, size, onTap }: Props) {
   const dead = new Set(score?.dead ?? []);
   const lineIdx = Array.from({ length: size }, (_, i) => i);
 
-  const onClick = (e: MouseEvent<SVGSVGElement>) => {
+  const target = (e: PointerEvent<SVGSVGElement>) => {
     const svg = ref.current;
-    if (!svg) return;
+    if (!svg || state?.status !== 'playing' || state.pendingEngineMove) return null;
     const v = toView(svg.getBoundingClientRect(), e.clientX, e.clientY);
     const p = v && pointAt(l, v.x, v.y);
-    if (p) onTap(coordAt(p));
+    return p && board[indexOf(p,size)] === '.' ? coordAt(p) : null;
   };
+  const point = preview ? parseCoord(preview,size) : null;
 
   const label = `доска ${size}×${size}${last ? `, последний ход ${last.coord === 'pass' ? 'пас' : last.coord}` : ''}`;
 
   return (
     <div className="board-wrap">
-      <svg ref={ref} className="board" viewBox={`0 0 ${VIEW} ${VIEW}`} onClick={onClick} role="img" aria-label={label}>
+      {preview && <output className="board-preview-label">{preview} · отпусти, чтобы поставить</output>}
+      <svg ref={ref} className="board" viewBox={`0 0 ${VIEW} ${VIEW}`} role="img" aria-label={label}
+        onPointerDown={e => { if (!e.isPrimary || e.button !== 0) return; e.preventDefault(); e.currentTarget.setPointerCapture(e.pointerId); const coord=target(e); drag.current.start(e.pointerId,position,coord); setPreview(coord); }}
+        onPointerMove={e => { if (e.isPrimary && e.buttons) setPreview(drag.current.move(e.pointerId,target(e))); }}
+        onPointerUp={e => { if (!e.isPrimary) return; const coord=drag.current.end(e.pointerId,position,target(e)); setPreview(null); if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId); if (coord) onTap(coord); }}
+        onPointerCancel={() => { drag.current.cancel(); setPreview(null); }}
+        onLostPointerCapture={() => { drag.current.cancel(); setPreview(null); }}>
         <rect className="board-bg" width={VIEW} height={VIEW} />
         {lineIdx.map((i) => (
           <g key={i} className="grid">
@@ -73,6 +85,7 @@ export function Board({ state, size, onTap }: Props) {
             </g>
           );
         })}
+        {point && point !== 'pass' && <g className="board-preview"><circle className={state?.toPlay === 'W' ? 'stone-w' : 'stone-b'} cx={x(l,point.col)} cy={y(l,point.row)} r={l.step*.44}/><circle fill="none" stroke="var(--accent)" strokeWidth="5" cx={x(l,point.col)} cy={y(l,point.row)} r={l.step*.55}/></g>}
         {lastPoint && lastPoint !== 'pass' && (
           <circle className={last?.color === 'B' ? 'mark-on-b' : 'mark-on-w'} cx={x(l, lastPoint.col)} cy={y(l, lastPoint.row)} r={l.step * 0.16} />
         )}

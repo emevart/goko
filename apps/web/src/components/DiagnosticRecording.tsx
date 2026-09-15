@@ -1,4 +1,5 @@
 import type { RecordingSnapshot, RecordingStopReason } from '../recording.ts';
+import { UtilityPanel } from './UtilityPanel.tsx';
 
 const duration = (ms: number) => `${Math.floor(ms / 60_000)}:${String(Math.floor(ms / 1000) % 60).padStart(2, '0')}`;
 const bytes = (size: number) => size < 1024 * 1024 ? `${Math.ceil(size / 1024)} КиБ` : `${(size / 1024 / 1024).toFixed(1)} МиБ`;
@@ -18,8 +19,7 @@ export const recordingStopReasonLabel = (reason: RecordingStopReason) => STOP_RE
 export function DiagnosticRecording({ snapshot, supported, onStart, onStop, onDelete }: { snapshot: RecordingSnapshot; supported: boolean; onStart: () => void; onStop: () => void; onDelete: () => void }) {
   const result = snapshot.result;
   return (
-    <details className="diagnostic" open={snapshot.phase === 'recording' || snapshot.phase === 'stopping' || snapshot.phase === 'ready'}>
-      <summary>Записать для диагностики</summary>
+    <UtilityPanel title="Запись для диагностики" label="•••" recording={snapshot.phase === 'recording'}>
       <p className="muted diagnostic-note">Две дорожки хранятся только в памяти этого браузера и пропадут после перезагрузки. На сервер они не отправляются.</p>
       {snapshot.phase === 'recording' || snapshot.phase === 'stopping' ? (
         <div className="recording-active" role="status">
@@ -43,6 +43,6 @@ export function DiagnosticRecording({ snapshot, supported, onStart, onStop, onDe
         <p className="status-notice">Этот браузер не поддерживает локальную запись MediaRecorder.</p>
       )}
       {snapshot.error && <p className="status-notice">{snapshot.error}</p>}
-    </details>
+    </UtilityPanel>
   );
 }

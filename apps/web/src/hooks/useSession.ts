@@ -7,7 +7,7 @@ import { client } from '../api.ts';
 import { agentReady, sendChat } from '../chat.ts';
 import { type Mode, type Prefs, loadPrefs, modeAttributes, savePrefs } from '../prefs.ts';
 import { describeError } from '../text.ts';
-import { type Line, acceptLine, isTrustedTranscriptSender, lineId, upsertLine, whoOf } from '../transcript.ts';
+import { type Line, isTrustedTranscriptSender, lineId, upsertLine, whoOf } from '../transcript.ts';
 import { connectionFailureAction } from '../session-connection.ts';
 import { acceptConversationEvent, bindAgent, isBoundAgent, participantRefOf, type AgentBinding } from '../conversation.ts';
 import { DiagnosticRecorder, watchTrackEnd, type RecorderTrack, type RecordingSnapshot, type RecordingStopReason } from '../recording.ts';
@@ -322,6 +322,7 @@ export function useSession() {
       const sender = streamSender(participant);
       const attrs = reader.info.attributes ?? {};
       const id = lineId(attrs, reader.info.id);
+      const startedAt = reader.info.timestamp || Date.now();
       const mySids = new Set(room.localParticipant.getTrackPublications().map((p) => p.trackSid));
       const senderIdentity = participant?.identity ?? '';
       const myIdentity = room.localParticipant.identity;
@@ -330,12 +331,13 @@ export function useSession() {
       if (!trusted()) return;
       const validSender = () => current() && trusted();
       if (who === 'me') {
-        // Человек: промежуточные результаты STT — отдельные закрытые потоки того же сегмента; берём только финал.
+        // Человек: промежуточные результаты STT — отдельные закрытые потоки того же сегмента; обновляем одну строку до финала.
         try {
           const text = cleanSpeechTranscript(await reader.readAll());
-          if (validSender() && acceptLine(attrs, who) && text.trim()) {
-            recorderRef.current.trace('transcript.final', { id, who, text });
-            setLines((ls) => upsertLine(ls, { id, who, text, final: true }));
+          const final = attrs['lk.transcription_final'] === 'true';
+          if (validSender() && text.trim()) {
+            recorderRef.current.trace(final ? 'transcript.final' : 'transcript.partial', { id, who, text });
+            setLines((ls) => upsertLine(ls, { id, who, text, final, startedAt }));
           }
         } catch {
           // поток оборвался (агент ушёл, комната отключилась): недочитанную фразу человека не показываем
@@ -351,7 +353,7 @@ export function useSession() {
           text += chunk;
           if (validSender()) {
             recorderRef.current.trace('transcript.chunk', { id, who, chars: text.length });
-            setLines((ls) => upsertLine(ls, { id, who, text, final: false }));
+            setLines((ls) => upsertLine(ls, { id, who, text, final: false, startedAt }));
           }
         }
         complete = true;
@@ -360,7 +362,7 @@ export function useSession() {
       } finally {
         if (validSender() && text) {
           recorderRef.current.trace(complete ? 'transcript.final' : 'transcript.stream-error', { id, who, text });
-          setLines((ls) => upsertLine(ls, { id, who, text, final: complete, error: !complete }));
+          setLines((ls) => upsertLine(ls, { id, who, text, final: complete, error: !complete, startedAt }));
         }
       }
     });
@@ -383,7 +385,7 @@ export function useSession() {
       }
       recorderRef.current.trace('conversation.response-finished', { seq: event.seq, itemId: event.itemId, interrupted: event.interrupted, text: event.text });
       if (event.interrupted) {
-        setLines((ls) => upsertLine(ls, { id: `interrupted-${sender?.sid}-${event.seq}`, who: 'goko', text: 'Ответ Гоко прерван', final: true }));
+        setLines((ls) => upsertLine(ls, { id: `interrupted-${sender?.sid}-${event.seq}`, who: 'goko', text: 'Ответ Гоко прерван', final: true, startedAt: Date.now() }));
       }
     });
     setLink('connecting');
@@ -500,6 +502,7 @@ export function useSession() {
   const sendText = useCallback(
     async (draft: string): Promise<string> => {
       if (!draft.trim()) return draft;
+      const startedAt = Date.now();
       chatRequestVersion.current++;
       chatInFlight.current++;
       if (conversationRef.current === 'idle') {
@@ -540,7 +543,7 @@ export function useSession() {
         id: chatLineId,
       });
       const line = res.line;
-      if (line) setLines((ls) => upsertLine(ls, line));
+      if (line) setLines((ls) => upsertLine(ls, {...line, startedAt}));
       if (res.error) setError(res.error);
       chatInFlight.current--;
       return res.draft;

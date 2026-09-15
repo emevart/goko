@@ -192,6 +192,7 @@ export function createEngineApp(deps: EngineDeps): Hono {
         winrateB: root.winrate,
         scoreLeadB: root.scoreLead,
         humanPolicyTop: chosen.top,
+        searchCandidates: [...infos].sort((a,b)=>a.order-b.order).slice(0,5).map(info=>info.move),
         rankCandidates,
         candidateAnalysis,
         humanFallback: chosen.fallback,

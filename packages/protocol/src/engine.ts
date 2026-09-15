@@ -26,6 +26,7 @@ export const EngineGenmoveResponse = z.object({
   winrateB: z.number(),
   scoreLeadB: z.number(),
   humanPolicyTop: z.array(z.object({ coord: z.string(), prob: z.number() })),
+  searchCandidates: z.array(z.string()).max(5).optional(),
   rankCandidates: z.array(z.object({ coord: z.string(), prob: z.number() })).max(3).default([]),
   candidateAnalysis: z.array(z.object({
     coord: z.string(),
@@ -42,6 +43,7 @@ export const EngineGenmoveResponse = z.object({
 export type EngineGenmoveResponse = z.infer<typeof EngineGenmoveResponse>;
 
 export const EngineDecision = z.object({
+  playerChoice: z.object({ coord: z.string(), intention: z.string().max(200) }).optional(),
   moveN: z.number().int().positive(),
   basedOnRevision: z.number().int().nonnegative(),
   rankCandidates: EngineGenmoveResponse.shape.rankCandidates,

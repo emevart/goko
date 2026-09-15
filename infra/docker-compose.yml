@@ -72,10 +72,12 @@ services:
     # Только 127.0.0.1: порты Docker обходят ufw. Сюда ходит Caddy (network_mode: host).
     ports:
       - "127.0.0.1:8787:8787"
-    # Переменные по одной, без env_file: контейнер не видит OPENAI_API_KEY и прочее из .env.
+    # Переменные по одной; OPENAI_API_KEY нужен экспериментальному выбору хода Гоко.
     # ALLOW_SESSIONLESS_GAMES не задан намеренно: POST /api/games в prod выключен (D-0012).
     environment:
       APP_KEY: ${APP_KEY}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      GOKO_PLAYER_MODE: ${GOKO_PLAYER_MODE:-persona}
       LIVEKIT_URL: ${LIVEKIT_URL}
       LIVEKIT_API_KEY: ${LIVEKIT_API_KEY}
       LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET}
@@ -152,6 +154,7 @@ services:
       APP_KEY: ${APP_KEY}
       AGENT_NAME: ${AGENT_NAME:-goko}
       VOICE_MODE: ${VOICE_MODE:-realtime}
+      GOKO_VOICE: ${GOKO_VOICE:-stone}
       VOICE_SESSION_MAX_MS: ${VOICE_SESSION_MAX_MS:-3600000}
     depends_on:
       - game-server

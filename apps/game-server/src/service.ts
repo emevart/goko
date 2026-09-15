@@ -87,6 +87,7 @@ export const INTERNAL_MESSAGE = 'internal server error';
 export const ENGINE_UNAVAILABLE_MESSAGE = 'engine is unavailable';
 
 export type GameServiceDeps = {
+  chooseMove?: import('./persona-player.ts').PersonaSelector;
   store: SnapshotStore;
   // Отметки брошенных сменой партий на диске (D-0012); без них отметка живёт только в памяти.
   marks?: AbandonMarks;
@@ -952,6 +953,15 @@ export class GameService {
         if (await this.onEngineFailure(id, e, signal)) continue;
         return;
       }
+      let playerChoice: import('./persona-player.ts').PersonaChoice | null = null;
+      if (this.deps.chooseMove && !this.outdated(id,state) && !signal.aborted) {
+        try { playerChoice = await this.deps.chooseMove(state,reply,signal); } catch { /* остаётся исходный ход */ }
+        if (playerChoice) {
+          try { applyMove(state,color,playerChoice.coord,this.now()); reply = {...reply,move:playerChoice.coord}; }
+          catch { playerChoice = null; }
+        }
+        this.log(`[OK] player: ${playerChoice ? 'persona' : 'engine fallback'} game=${id} revision=${state.revision}`);
+      }
       const delayLeft = (this.deps.engineMoveDelayMs ?? 0) - (performance.now() - startedAt);
       if (delayLeft > 0) await this.sleep(delayLeft, signal);
       if (this.closed || signal.aborted) return;
@@ -978,6 +988,7 @@ export class GameService {
           basedOnRevision: state.revision,
           rankCandidates: reply.rankCandidates,
           candidateAnalysis: reply.candidateAnalysis,
+          ...(playerChoice ? {playerChoice} : {}),
         });
         return true;
       });

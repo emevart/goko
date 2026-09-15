@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { GPT_LIVE_MODEL_OPTIONS, REALTIME_MODEL_OPTIONS, REALTIME_TURN_DETECTION, parseVoiceMode } from './voice.ts';
+import { GPT_LIVE_MODEL_OPTIONS, REALTIME_MODEL_OPTIONS, REALTIME_TURN_DETECTION, parseVoiceMode, liveVoice } from './voice.ts';
+
+it('голос Stone по выбору founder, неизвестные голоса не отправляются провайдеру', () => {
+  expect(liveVoice('')).toBe('stone');
+  expect(liveVoice('beacon')).toBe('beacon');
+  expect(()=>liveVoice('unknown')).toThrow('GOKO_VOICE');
+});
 
 describe('parseVoiceMode', () => {
   it('realtime по умолчанию, pipeline и live по запросу, иначе ошибка', () => {

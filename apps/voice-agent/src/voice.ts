@@ -33,7 +33,7 @@ export const REALTIME_MODEL_OPTIONS = {
 
 export const GPT_LIVE_MODEL_OPTIONS = {
   model: 'gpt-live-1',
-  voice: 'marin',
+  voice: 'stone',
   delegation: 'responses',
   responsesOptions: {
     model: 'gpt-5.6-luna',
@@ -45,13 +45,19 @@ export const GPT_LIVE_MODEL_OPTIONS = {
   maxSessionDuration: null,
 } as const satisfies ConstructorParameters<typeof openai.realtime.GPTLiveModel>[0];
 
+export function liveVoice(value = process.env.GOKO_VOICE): string {
+  const selected = value?.trim() || 'stone';
+  if (!['aster','beacon','cinder','marin','stone','vesper'].includes(selected)) throw new Error('GOKO_VOICE: unsupported voice');
+  return selected;
+}
+
 export async function sessionOptions(mode: VoiceMode): Promise<SessionOptions> {
   if (mode === 'realtime') {
     return {
       llm: new openai.realtime.RealtimeModel(REALTIME_MODEL_OPTIONS),
     };
   }
-  if (mode === 'live') return { llm: new openai.realtime.GPTLiveModel(GPT_LIVE_MODEL_OPTIONS) };
+  if (mode === 'live') return { llm: new openai.realtime.GPTLiveModel({...GPT_LIVE_MODEL_OPTIONS,voice:liveVoice()}) };
   return {
     vad: await silero.VAD.load(),
     stt: new openai.STT({ model: 'gpt-transcribe', language: 'ru' }),

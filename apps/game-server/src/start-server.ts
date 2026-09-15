@@ -14,6 +14,7 @@ import { type AgentDispatcher, type RoomCreator, createRoomService } from './liv
 import { GameService, type GameServiceDeps } from './service.ts';
 import { SESSION_TTL_MS, SessionManager } from './sessions.ts';
 import { GameStore } from './store.ts';
+import { choosePersonaMove } from './persona-player.ts';
 
 export type Listen = (
   app: Hono,
@@ -189,7 +190,8 @@ export async function startServer(deps: StartDeps = {}): Promise<StartedServer |
   // Партия без активности дольше срока сессии считается брошенной: не занимает лимит и не получает задачу при init (D-0012).
   // Одно хранилище и для снапшотов, и для отметок брошенных партий (D-0012): отметки лежат рядом с <id>.json.
   const store = new GameStore(config.dataDir);
-  const service = createService({ store, marks: store, engine, bus, staleGameMs: config.sessionTtlMs, engineMoveDelayMs: config.engineMoveDelayMs, log });
+  const chooseMove = env.GOKO_PLAYER_MODE === 'persona' && env.OPENAI_API_KEY ? (state: import('@goko/protocol').GameState, reply: import('@goko/protocol').EngineGenmoveResponse, signal: AbortSignal) => choosePersonaMove({state,reply,signal,apiKey:env.OPENAI_API_KEY!}) : undefined;
+  const service = createService({ store, marks: store, engine, bus, staleGameMs: config.sessionTtlMs, engineMoveDelayMs: config.engineMoveDelayMs, chooseMove, log });
   try {
     await service.init();
   } catch (e) {

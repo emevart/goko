@@ -57,6 +57,7 @@ function useAgentHint(sessionId: string | null, connected: boolean, agent: boole
 
 export function App() {
   const s = useSession();
+  const [chatOpen, setChatOpen] = useState(false);
   const { clearError, link, mic, agent } = s;
   const sessionId = s.session?.id ?? null;
   // onLost стабилен (reset — useCallback без зависимостей): иначе useGame переоткрывал бы поток на каждом рендере.
@@ -83,9 +84,11 @@ export function App() {
   }, [g.state, s.trace]);
 
   return (
-    <div className="app">
+    <div className={`app ${chatOpen ? 'chat-expanded' : 'chat-collapsed'}`}>
       <header className="app-header">
         <h1>Гоко</h1>
+        <MoveHistory state={g.state} />
+          <DiagnosticRecording snapshot={s.recording} supported={typeof MediaRecorder !== 'undefined'} onStart={s.startRecording} onStop={() => void s.stopRecording()} onDelete={s.deleteRecording} />
         <NewGame prefs={s.prefs} onChange={s.updatePrefs} onStart={() => {
           keepAwake();
           void s.ensureSession().then((created) => created && g.newGame(s.prefs, created.session.id));
@@ -97,20 +100,14 @@ export function App() {
         <section className="board-column" aria-label="партия">
           <StatusBar state={g.state} thinking={g.thinking} message={g.message} notice={s.error} connected={g.connected} retry={g.retry} onRetry={g.reopen} />
           <Board state={g.state} size={size} onTap={(coord) => void g.play(coord)} />
-          <MoveHistory state={g.state} />
         </section>
         <section className="conversation" aria-label="разговор с Гоко">
+          <button type="button" className="chat-toggle" aria-expanded={chatOpen} onClick={() => setChatOpen(!chatOpen)}>Диалог {s.lines.length > 0 ? `· ${s.lines.length}` : ''} <span>{chatOpen ? '⌄' : '⌃'}</span></button>
           {s.conversation === 'voice' && <VoiceOrb link={link} mic={mic} agentPresent={s.agentPresent} agentState={s.agentState} amplitude={s.amplitude} onToggle={() => void s.toggleMute()} />}
           {s.audioPlaybackError && <div className="playback-error">{s.audioPlaybackError} <button type="button" className="btn btn-inline btn-accent" onClick={() => void s.retryAudio()}>Включить звук</button></div>}
           <Transcript lines={s.lines} mode={s.prefs.mode} notice={agentHint ? AGENT_HINT_TEXT[agentHint] : null} />
-          <div className="conversation-input-row">
-            <button type="button" className="btn voice-button" onClick={() => { keepAwake(); void s.startVoice(); }} disabled={mic === 'connecting' || s.conversation === 'voice'}>
-              {mic === 'connecting' ? 'Подключаю…' : mic === 'failed' ? 'Повторить голос' : s.conversation === 'voice' ? 'Голос включён' : 'Начать голосом'}
-            </button>
-            <ChatInput ready={agent} active={s.conversation !== 'idle'} hint={agentHint} onSend={onSend} />
-          </div>
-          {s.conversation !== 'idle' && <button type="button" className="btn conversation-end" onClick={() => void s.endConversation()}>Завершить разговор</button>}
-          <DiagnosticRecording snapshot={s.recording} supported={typeof MediaRecorder !== 'undefined'} onStart={s.startRecording} onStop={() => void s.stopRecording()} onDelete={s.deleteRecording} />
+          <ChatInput ready={agent} active={s.conversation !== 'idle'} hint={agentHint} onSend={async text => {setChatOpen(true); return onSend(text);}} voiceActive={s.conversation === 'voice'} voiceConnecting={mic === 'connecting'} onVoice={() => {keepAwake(); if (s.conversation === 'voice') void s.endConversation(); else void s.startVoice();}} />
+
         </section>
       </main>
       <div id="audio" hidden />
