@@ -18,9 +18,11 @@ const SEND_TIMEOUT_MS = 3_000;
 
 type PendingEvent = {
   seq: number;
-  type: 'assistant.response_finished';
+  type: 'assistant.response_finished' | 'conversation.failure';
   text: string;
 };
+
+export type ConversationEventsHandle = (() => void) & { failure(message: string): void };
 
 export function attachConversationEvents(deps: {
   subscribe: (listener: (event: { item: ConversationItem }) => void) => () => void;
@@ -28,7 +30,7 @@ export function attachConversationEvents(deps: {
   destinationIdentity: string;
   now?: () => Date;
   log?: (line: string) => void;
-}): () => void {
+}): ConversationEventsHandle {
   const now = deps.now ?? (() => new Date());
   const log = deps.log ?? (() => {});
   let seq = 0;
@@ -127,12 +129,24 @@ export function attachConversationEvents(deps: {
   };
 
   const unsubscribe = deps.subscribe(listener);
-  return () => {
+  const stop = (() => {
     if (closed) return;
     closed = true;
     unsubscribe();
     queue.length = 0;
     stopActiveSend?.();
     stopActiveSend = undefined;
+  }) as ConversationEventsHandle;
+  stop.failure = (message: string) => {
+    if (closed) return;
+    const currentSeq = ++seq;
+    const eventType = 'conversation.failure' as const;
+    try {
+      queue.push({ seq: currentSeq, type: eventType, text: encodeConversationEvent({ version: 1, type: eventType, seq: currentSeq, message, serverTime: now().toISOString() }) });
+      schedulePump();
+    } catch {
+      safeLog({ seq: currentSeq, type: eventType }, 'invalid_payload');
+    }
   };
+  return stop;
 }

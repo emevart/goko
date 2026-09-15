@@ -1,12 +1,13 @@
 // Память агента о сессии. Позиции здесь нет (правило 2 CLAUDE.md): только идентификаторы, настройки
 // и флаги, по которым события SSE решают, что уже озвучено инструментом, а что надо сказать самому.
-import type { Color, Rank, Result } from '@goko/protocol';
+import type { Color, EngineDecision, Rank, Result } from '@goko/protocol';
 
 export type AgentState = {
   sessionId: string;
   gameId: string | null;
   gameGeneration: number; // растёт при session.game другой партии; защищает AgentState от поздних tool-ответов
   observedRevision: { gameId: string; revision: number } | null; // самая новая ревизия этой партии из SSE
+  analysisAbort: { gameId: string; revision: number; controller: AbortController } | null;
   announceSync: string | null; // session.game сменил партию: sync этой партии озвучить «Продолжаем партию» (задача 3)
   humanColor: Color | null; // null — в партии нет движка, играют два человека (D-0005)
   rank: Rank; // ранг Гоко для следующей партии
@@ -18,6 +19,7 @@ export type AgentState = {
   lastErrorAt: number; // когда в последний раз озвучивали ошибку движка
   retriesExhausted: boolean; // пришёл error retries_exhausted: следующая реплика человека переоткроет поток (D-0006)
   fallbackMove: number | null; // номер последнего хода движка с humanFallback (D-0007)
+  engineDecision: ({ gameId: string } & EngineDecision) | null;
   startingGame: boolean; // start_game ждёт ответа newGame: событие new приходит раньше ответа HTTP
   awaitingFinish: string | null; // pass ждёт итог этой партии: game.finished кладёт его в finished, не озвучивая
   finished: { gameId: string; result: Result } | null; // итог из потока сессии для ожидающего pass (R2)
@@ -39,6 +41,7 @@ export function newAgentState(sessionId: string): AgentState {
     gameId: null,
     gameGeneration: 0,
     observedRevision: null,
+    analysisAbort: null,
     announceSync: null,
     humanColor: 'B',
     rank: DEFAULT_RANK,
@@ -50,6 +53,7 @@ export function newAgentState(sessionId: string): AgentState {
     lastErrorAt: 0,
     retriesExhausted: false,
     fallbackMove: null,
+    engineDecision: null,
     startingGame: false,
     awaitingFinish: null,
     finished: null,

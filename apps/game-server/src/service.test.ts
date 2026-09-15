@@ -117,6 +117,7 @@ describe('GameService: партия человек против движка', (
     expect(events.map((e) => e.type)).toEqual(['state.updated', 'engine.thinking', 'state.updated']);
     expect(events[0]).toMatchObject({ type: 'state.updated', cause: 'play', by: 'human', via: 'voice' });
     expect(events[2]).toMatchObject({ type: 'state.updated', cause: 'engine', by: 'engine' });
+    expect(events[2]).toMatchObject({ engineDecision: { moveN: 2, basedOnRevision: 1, rankCandidates: [{ coord: 'E5', prob: 1 }], candidateAnalysis: [] } });
     const saved = await store.load();
     expect(saved[0]?.moves).toHaveLength(2);
   });
@@ -1202,7 +1203,7 @@ describe('GameService: фоновые задачи, дедлайны и мьют
         visits: 50,
         winrateB: 0.5,
         scoreLeadB: 0,
-        moveInfos: ['A1', 'B1', 'C1', 'D1', 'E1', 'F1', 'G1'].map((coord, order) => ({ coord, winrateB: 0.5, scoreLeadB: 0, visits: 7 - order, order })),
+        moveInfos: ['A1', 'B1', 'C1', 'D1', 'E1', 'F1', 'G1'].map((coord, order) => ({ coord, winrateB: 0.5, scoreLeadB: 0, visits: 7 - order, order, pv: [] })),
         ownership: new Array<number>(81).fill(0),
       }),
     };
@@ -1210,6 +1211,51 @@ describe('GameService: фоновые задачи, дедлайны и мьют
     const g = await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false });
     const a = await service.analyze(g.state.id, { maxVisits: 50 });
     expect(a.topMoves.map((m) => m.coord)).toEqual(['A1', 'B1', 'C1', 'D1', 'E1']);
+  });
+
+  it('analyze привязан к exact revision и отвергает ответ, если партия изменилась во время поиска', async () => {
+    const inner = createFakeEngine();
+    let started = false;
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const held: Engine = {
+      ...inner,
+      analyze: async (req, signal) => {
+        started = true;
+        await gate;
+        return inner.analyze(req, signal);
+      },
+    };
+    const { service } = await make(held);
+    const created = await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false });
+    const id = created.state.id;
+    await expect(service.analyze(id, { maxVisits: 50, expectedRevision: 1 })).rejects.toMatchObject({ code: 'revision_conflict' });
+    const pending = service.analyze(id, { maxVisits: 50, expectedRevision: 0 });
+    await untilTick(() => started);
+    await service.play(id, { coord: 'D4', waitForReply: false, via: 'api' });
+    release();
+    await expect(pending).rejects.toMatchObject({ code: 'revision_conflict', details: { revision: 1 } });
+  });
+
+  it('отмена HTTP analyze доходит до занятого вызова движка', async () => {
+    const inner = createFakeEngine();
+    let engineSignal: AbortSignal | undefined;
+    const held: Engine = {
+      ...inner,
+      analyze: async (_req, signal) => {
+        engineSignal = signal;
+        await new Promise<void>((_resolve, reject) => signal?.addEventListener('abort', () => reject(signal.reason), { once: true }));
+        throw new Error('unreachable');
+      },
+    };
+    const { service } = await make(held);
+    const created = await service.create({ ...HUMAN_ONLY, ...S9, waitForReply: false });
+    const abort = new AbortController();
+    const analyzing = service.analyze(created.state.id, { maxVisits: 50 }, abort.signal);
+    await untilTick(() => engineSignal !== undefined);
+    abort.abort(new Error('client left'));
+    await expect(analyzing).rejects.toThrow('client left');
+    expect(engineSignal?.aborted).toBe(true);
   });
 
   it('движку на ход уходит maxVisits 10', async () => {

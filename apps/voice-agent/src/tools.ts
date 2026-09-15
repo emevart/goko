@@ -20,6 +20,7 @@ import {
 } from '@goko/protocol';
 import { colorName, describeResult, parseRank, speakMove, speakRank } from './phrases.ts';
 import { type AgentState, forgetFinishIfReopened, noteFinishRevision } from './state.ts';
+import { IntentLedger, type MutationIntent } from './intent.ts';
 
 export type ToolClient = Pick<
   GokoClient,
@@ -33,6 +34,7 @@ export type ToolDeps = {
   sleep?: (ms: number) => Promise<void>;
   now?: () => number;
   log?: (line: string) => void;
+  intent?: IntentLedger;
 };
 
 export const ASSESSMENT_VISITS = 50;
@@ -541,9 +543,23 @@ export function createToolFns(deps: ToolDeps) {
       const gameId = gameGuard();
       if (typeof gameId !== 'string') return gameId;
       const generation = state.gameGeneration;
+      let revisionController: AbortController | null = null;
       try {
-        const [g, a] = await Promise.all([client.getGame(gameId, opts), client.analyze(gameId, { maxVisits: ASSESSMENT_VISITS }, opts)]);
+        const g = await client.getGame(gameId, opts);
         if (!resultIsCurrent(gameId, generation, g.revision)) return staleGame();
+        state.analysisAbort?.controller.abort(new Error('newer analysis started'));
+        revisionController = new AbortController();
+        const onSessionAbort = () => revisionController?.abort(signal?.reason);
+        signal?.addEventListener('abort', onSessionAbort, { once: true });
+        state.analysisAbort = { gameId, revision: g.revision, controller: revisionController };
+        let a;
+        try {
+          a = await client.analyze(gameId, { maxVisits: ASSESSMENT_VISITS, expectedRevision: g.revision }, { signal: revisionController.signal });
+        } finally {
+          signal?.removeEventListener('abort', onSessionAbort);
+          if (state.analysisAbort?.controller === revisionController) state.analysisAbort = null;
+        }
+        if (a.gameId !== gameId || a.revision !== g.revision || !resultIsCurrent(gameId, generation, a.revision)) return staleGame();
         note(g);
         const lead = a.scoreLeadB;
         // Одно округление до половины очка для обоих знаков; «поровну» — ровно когда округлённый отрыв 0.
@@ -566,6 +582,13 @@ export function createToolFns(deps: ToolDeps) {
           scoreLeadBlack: m.scoreLeadB,
           visits: m.visits,
         }));
+        const decision = state.engineDecision?.gameId === g.id ? state.engineDecision : null;
+        const lastEngineDecision = decision ? {
+          moveN: decision.moveN,
+          basedOnRevision: decision.basedOnRevision,
+          rankCandidates: decision.rankCandidates.map((candidate) => ({ ...candidate, coordSpoken: speakMove(candidate.coord) })),
+          continuations: decision.candidateAnalysis.map((candidate) => ({ ...candidate, coordSpoken: speakMove(candidate.coord), pvSpoken: candidate.pv.map(speakMove) })),
+        } : undefined;
         if (!hasEngine(g)) {
           // Партия двух людей (D-0005): «ты» и «я» здесь не значат ничего, говорим цветами.
           return {
@@ -576,6 +599,7 @@ export function createToolFns(deps: ToolDeps) {
             bestMoves,
             bestMovesSpoken,
             bestCandidates,
+            ...(lastEngineDecision ? { lastEngineDecision } : {}),
             toPlay: colorKey(g.toPlay),
           };
         }
@@ -594,9 +618,11 @@ export function createToolFns(deps: ToolDeps) {
           bestMoves,
           bestMovesSpoken,
           bestCandidates,
+          ...(lastEngineDecision ? { lastEngineDecision } : {}),
           toPlay: g.toPlay === human ? ('you' as const) : ('me' as const),
         };
       } catch (e) {
+        if (revisionController?.signal.aborted && !signal?.aborted) return staleGame();
         if (!gameIsCurrent(gameId, generation)) return staleGame();
         return reasonOf(e);
       }
@@ -636,6 +662,14 @@ export type ToolFns = ReturnType<typeof createToolFns>;
 // Обёртки для модели. Описания — часть промпта: модель читает их при выборе инструмента.
 export function createTools(deps: ToolDeps) {
   const fns = createToolFns(deps);
+  const ledger = deps.intent ?? new IntentLedger();
+  const guarded = <T extends { user_utterance: string }, R>(intent: MutationIntent, run: (args: Omit<T, 'user_utterance'>) => Promise<R>) => async (args: T) => {
+    const { user_utterance: _utterance, ...rest } = args;
+    const permit = await ledger.consume(intent, args.user_utterance, rest, 1_500, deps.signal);
+    if (!permit.ok) return permit;
+    return run(rest as Omit<T, 'user_utterance'>);
+  };
+  const utterance = z.string().min(1).describe('Полная дословная последняя реплика человека, вызвавшая это действие');
   return {
     start_game: llm.tool({
       description:
@@ -644,34 +678,39 @@ export function createTools(deps: ToolDeps) {
         my_color: z.enum(['black', 'white']).optional(),
         rank: z.string().optional(),
         komi: z.number().optional(),
+        user_utterance: utterance,
       }),
-      execute: (args) => fns.startGame(args),
+      execute: guarded('start_game', (args) => fns.startGame(args)),
     }),
     play_move: llm.tool({
       description: 'Применить ход человека. coord — латиницей: буква столбца A–N без I и число 1–13, например D4. Ответный ход Гоко приходит в myMove.',
-      parameters: z.object({ coord: z.string().describe('Например D4') }),
-      execute: (args) => fns.playMove(args),
+      parameters: z.object({ coord: z.string().describe('Например D4'), user_utterance: utterance }),
+      execute: guarded('play_move', (args) => fns.playMove(args)),
     }),
     correct_last_move: llm.tool({
       description: 'Человек поправил свой последний ход («нет, дэ пять»): заменить его на coord. Ответ как у play_move.',
-      parameters: z.object({ coord: z.string().describe('Например D5') }),
-      execute: (args) => fns.correctLastMove(args),
+      parameters: z.object({ coord: z.string().describe('Например D5'), user_utterance: utterance }),
+      execute: guarded('correct_last_move', (args) => fns.correctLastMove(args)),
     }),
     pass: llm.tool({
       description: 'Человек пасует. Если Гоко тоже пасует, партия завершается и приходит result.',
-      execute: () => fns.pass(),
+      parameters: z.object({ user_utterance: utterance }),
+      execute: guarded('pass', () => fns.pass()),
     }),
     resign: llm.tool({
       description: 'Человек сдаётся (в партии двух людей — тот, чей сейчас ход). Возвращает result.',
-      execute: () => fns.resign(),
+      parameters: z.object({ user_utterance: utterance }),
+      execute: guarded('resign', () => fns.resign()),
     }),
     undo: llm.tool({
       description: 'Отменить последний ход человека и ответ Гоко («отмени», «верни ход»).',
-      execute: () => fns.undo(),
+      parameters: z.object({ user_utterance: utterance }),
+      execute: guarded('undo', () => fns.undo()),
     }),
     redo: llm.tool({
       description: 'Вернуть ровно последнюю отменённую порцию ходов («верни отменённое», «вперёд»). Если восстановлен итог, объявить result; иначе сказать, чей ход.',
-      execute: () => fns.redo(),
+      parameters: z.object({ user_utterance: utterance }),
+      execute: guarded('redo', () => fns.redo()),
     }),
     get_position: llm.tool({
       description: 'Текущая позиция: размер и ориентация ASCII-доски, последние ходы, пленные, чей ход. Зови, когда спрашивают о доске или ты не уверен, что было.',
@@ -683,8 +722,8 @@ export function createTools(deps: ToolDeps) {
     }),
     set_rank: llm.tool({
       description: 'Сменить уровень Гоко: rank словами человека, например «5 кю», «1 дан».',
-      parameters: z.object({ rank: z.string() }),
-      execute: (args) => fns.setRank(args),
+      parameters: z.object({ rank: z.string(), user_utterance: utterance }),
+      execute: guarded('set_rank', (args) => fns.setRank(args)),
     }),
   };
 }

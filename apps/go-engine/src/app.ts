@@ -4,7 +4,7 @@ import { type Context, Hono } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import type { ContentfulStatusCode } from 'hono/utils/http-status';
 import { ZodError } from 'zod';
-import { areaScore, deadStones, replay, resultFromArea } from '@goko/go-core';
+import { areaScore, deadStones, parseCoord, play, replay, resultFromArea } from '@goko/go-core';
 import {
   ERROR_STATUS,
   EngineAnalyzeRequest,
@@ -17,7 +17,7 @@ import {
   type ErrorCode,
 } from '@goko/protocol';
 import { type KataGo, KataGoError, type KataQuery, type KataResponse } from './katago.ts';
-import { rankToProfile, reorderFromKata } from './mapping.ts';
+import { kataIndexToCoord, rankToProfile, reorderFromKata } from './mapping.ts';
 import { type ChooseMoveResult, chooseMove } from './sampling.ts';
 
 export type EngineDeps = {
@@ -44,7 +44,7 @@ export const MAX_BODY_BYTES = 64 * 1024;
 const digest = (value: string): Buffer => createHash('sha256').update(value, 'utf8').digest();
 
 type KataRoot = { winrate?: number; scoreLead?: number; visits?: number };
-type KataMoveInfo = { move: string; winrate: number; scoreLead: number; visits: number; order: number };
+type KataMoveInfo = { move: string; winrate: number; scoreLead: number; visits: number; order: number; pv?: unknown };
 
 function baseQuery(req: { boardSize: number; rules: string; komi: number; moves: [string, string][] }): KataQuery {
   return { rules: req.rules, komi: req.komi, boardXSize: req.boardSize, boardYSize: req.boardSize, moves: req.moves };
@@ -61,6 +61,25 @@ function moveInfosOf(r: KataResponse): KataMoveInfo[] {
 
 function numbersOf(value: unknown): number[] {
   return Array.isArray(value) ? (value as number[]) : [];
+}
+
+function boundedPv(value: unknown, size: number, moves: [string, string][]): string[] {
+  if (!Array.isArray(value)) return [];
+  let position = replay(size, moves.map(([color, coord]) => ({ color: color as 'B' | 'W', coord })));
+  let color: 'B' | 'W' = moves.length % 2 === 0 ? 'B' : 'W';
+  const pv: string[] = [];
+  for (const raw of value.slice(0, 4)) {
+    if (typeof raw !== 'string') break;
+    try {
+      parseCoord(raw, size);
+      position = play(position, color, raw).position;
+    } catch {
+      break;
+    }
+    pv.push(raw);
+    color = color === 'B' ? 'W' : 'B';
+  }
+  return pv;
 }
 
 export function createEngineApp(deps: EngineDeps): Hono {
@@ -134,12 +153,47 @@ export function createEngineApp(deps: EngineDeps): Hono {
     let chosen: ChooseMoveResult = { move: bestMove, top: [], fallback: true };
     if (humanPolicy.length === 0) deps.log?.('[!] humanPolicy отсутствует: проверить -human-model');
     else chosen = chooseMove({ humanPolicy, size: req.boardSize, bestMove, random: deps.random });
+    const chosenIndex = humanPolicy.findIndex((_prob, index) => kataIndexToCoord(index, req.boardSize) === chosen.move);
+    const selected = { coord: chosen.move, prob: chosenIndex >= 0 ? (humanPolicy[chosenIndex] ?? 0) : 0 };
+    const rankCandidates = (chosen.fallback ? [] : [selected, ...chosen.top.filter((candidate) => candidate.coord !== chosen.move)])
+      .filter((candidate, index, all) => all.findIndex((item) => item.coord === candidate.coord) === index)
+      .slice(0, 3);
+    const candidateAnalysis: Array<{ coord: string; winrateB: number; scoreLeadB: number; visits: number; pv: string[] }> = [];
+    const deadline = t0 + timeouts.genmove;
+    const player = req.moves.length % 2 === 0 ? 'B' : 'W';
+    for (const candidate of rankCandidates) {
+      const remaining = Math.floor(deadline - performance.now());
+      if (remaining <= 0 || c.req.raw.signal.aborted) break;
+      try {
+        const analysis = await deps.katago.query({
+          ...baseQuery(req),
+          maxVisits: 30,
+          analysisPVLen: 4,
+          allowMoves: [{ player, moves: [candidate.coord], untilDepth: 1 }],
+        }, remaining, c.req.raw.signal);
+        const info = moveInfosOf(analysis).find((item) => item.order === 0) ?? moveInfosOf(analysis)[0];
+        const candidateRoot = rootOf(analysis);
+        candidateAnalysis.push({
+          coord: candidate.coord,
+          winrateB: info?.winrate ?? candidateRoot.winrate,
+          scoreLeadB: info?.scoreLead ?? candidateRoot.scoreLead,
+          visits: info?.visits ?? candidateRoot.visits,
+          pv: boundedPv(info?.pv, req.boardSize, req.moves),
+        });
+      } catch (error) {
+        if (c.req.raw.signal.aborted) throw error;
+        deps.log?.(`[!] engine: дополнительный анализ ${candidate.coord} пропущен: ${error instanceof Error ? error.message : String(error)}`);
+        break;
+      }
+    }
     return c.json(
       EngineGenmoveResponse.parse({
         move: chosen.move,
         winrateB: root.winrate,
         scoreLeadB: root.scoreLead,
         humanPolicyTop: chosen.top,
+        rankCandidates,
+        candidateAnalysis,
         humanFallback: chosen.fallback,
         ms: Math.round(performance.now() - t0),
       }),

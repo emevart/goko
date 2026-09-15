@@ -75,6 +75,8 @@ describe('newAgentState', () => {
       gameId: null,
       gameGeneration: 0,
       observedRevision: null,
+      analysisAbort: null,
+      engineDecision: null,
       announceSync: null,
       humanColor: 'B',
       rank: '10k',

@@ -440,12 +440,16 @@ export class GameService {
     });
   }
 
-  async analyze(id: string, req: AnalyzeInput): Promise<Analysis> {
+  async analyze(id: string, req: AnalyzeInput, outer?: AbortSignal): Promise<Analysis> {
     const state = this.get(id);
-    const call = this.budgeted((signal) => this.deps.engine.analyze({ ...this.engineRequest(state), maxVisits: req.maxVisits, includeOwnership: true }, signal), this.deps.analyzeBudgetMs ?? ANALYZE_BUDGET_MS);
+    this.checkRevision(state, req.expectedRevision);
+    const call = this.budgeted((signal) => this.deps.engine.analyze({ ...this.engineRequest(state), maxVisits: req.maxVisits, includeOwnership: true }, signal), this.deps.analyzeBudgetMs ?? ANALYZE_BUDGET_MS, outer);
     const r = await call.result;
+    this.checkRevision(this.get(id), state.revision);
     const ownership = r.ownership ?? new Array<number>(state.board.length).fill(0);
     return {
+      gameId: state.id,
+      revision: state.revision,
       visits: r.visits,
       winrateB: r.winrateB,
       scoreLeadB: r.scoreLeadB,
@@ -721,7 +725,7 @@ export class GameService {
 
   // Фиксирует новое состояние: снапшот, событие, пробуждение ожидающих, запуск движка или счёта.
   // humanFallback передаёт только ход движка: признак относится к одному ходу, а не к партии.
-  private async commit(next: GameState, cause: StateCause, by: By, via?: Via, humanFallback?: boolean, history = this.redoHistory.get(next.id) ?? [], abortObsolete = false): Promise<void> {
+  private async commit(next: GameState, cause: StateCause, by: By, via?: Via, humanFallback?: boolean, history = this.redoHistory.get(next.id) ?? [], abortObsolete = false, engineDecision?: import('@goko/protocol').EngineDecision): Promise<void> {
     const prev = this.games.get(next.id);
     next = { ...next, canRedo: history.length > 0 };
     // Снапшот пишется до публикации состояния: читатель, увидевший новое состояние
@@ -742,7 +746,7 @@ export class GameService {
     // (currentGameId, поток сессии) сразу читает её состояние. При отказе записи события нет.
     const sessionId = this.sessionsByGame.get(next.id);
     if (cause === 'new' && sessionId) this.switchSessionGame(sessionId, next.id);
-    this.emitGame(next.id, { type: 'state.updated', state: next, cause, by, ...(via ? { via } : {}), ...(humanFallback === undefined ? {} : { humanFallback }) });
+    this.emitGame(next.id, { type: 'state.updated', state: next, cause, by, ...(via ? { via } : {}), ...(humanFallback === undefined ? {} : { humanFallback }), ...(engineDecision ? { engineDecision } : {}) });
     if (next.status === 'finished' && prev?.status !== 'finished' && next.result) this.emitGame(next.id, { type: 'game.finished', result: next.result });
     this.settleWaiters(next, cause, prev);
     this.kick(next);
@@ -969,7 +973,12 @@ export class GameService {
           this.log(`[!] the engine suggested an illegal move ${reply.move}: ${e instanceof Error ? e.message : String(e)}; passing instead`);
           next = applyMove(current, color, 'pass', this.now());
         }
-        await this.commit(next.state, 'engine', 'engine', undefined, reply.humanFallback, []);
+        await this.commit(next.state, 'engine', 'engine', undefined, reply.humanFallback, [], false, {
+          moveN: next.move.n,
+          basedOnRevision: state.revision,
+          rankCandidates: reply.rankCandidates,
+          candidateAnalysis: reply.candidateAnalysis,
+        });
         return true;
       });
       if (applied) return;

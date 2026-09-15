@@ -13,8 +13,15 @@ export const AssistantResponseFinished = z.strictObject({
   interrupted: z.boolean(),
   serverTime: z.iso.datetime(),
 });
+export const ConversationFailure = z.strictObject({
+  version: z.literal(1),
+  type: z.literal('conversation.failure'),
+  seq: z.number().int().positive(),
+  message: z.string().min(1).max(500),
+  serverTime: z.iso.datetime(),
+});
 
-export const ConversationEvent = z.discriminatedUnion('type', [AssistantResponseFinished]);
+export const ConversationEvent = z.discriminatedUnion('type', [AssistantResponseFinished, ConversationFailure]);
 export type ConversationEvent = z.infer<typeof ConversationEvent>;
 
 export function encodeConversationEvent(value: unknown): string {

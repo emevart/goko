@@ -418,6 +418,8 @@ describe('операции', () => {
     requiresKeys(GroupInfo, group, Object.keys(group));
 
     const analysis = {
+      gameId: 'g1',
+      revision: 3,
       visits: 50,
       winrateB: 0.52,
       scoreLeadB: 1.5,
@@ -672,18 +674,20 @@ describe('движок', () => {
       winrateB: 0.5,
       scoreLeadB: 0.5,
       humanPolicyTop: [{ coord: 'Q16', prob: 0.3 }],
+      rankCandidates: [],
+      candidateAnalysis: [],
       humanFallback: false,
       ms: 120,
     };
     expect(EngineGenmoveResponse.parse(genmove)).toEqual(genmove);
-    requiresKeys(EngineGenmoveResponse, genmove, Object.keys(genmove));
+    requiresKeys(EngineGenmoveResponse, genmove, ['move', 'winrateB', 'scoreLeadB', 'humanPolicyTop', 'humanFallback', 'ms']);
     expect(() => EngineGenmoveResponse.parse({ ...genmove, humanPolicyTop: [{ coord: 'Q16' }] })).toThrow();
     // Признак хода из поиска обязателен: ответ без него — старый движок, а не «ход человеческой сети».
     expect(() => EngineGenmoveResponse.parse({ ...genmove, humanFallback: 'no' })).toThrow();
 
-    const info = { coord: 'D4', winrateB: 0.5, scoreLeadB: 1, visits: 20, order: 0 };
+    const info = { coord: 'D4', winrateB: 0.5, scoreLeadB: 1, visits: 20, order: 0, pv: [] };
     expect(EngineMoveInfo.parse(info)).toEqual(info);
-    requiresKeys(EngineMoveInfo, info, Object.keys(info));
+    requiresKeys(EngineMoveInfo, info, ['coord', 'winrateB', 'scoreLeadB', 'visits', 'order']);
 
     const analyze = { visits: 50, winrateB: 0.5, scoreLeadB: 1, moveInfos: [info] };
     expect(EngineAnalyzeResponse.parse(analyze)).toEqual(analyze);

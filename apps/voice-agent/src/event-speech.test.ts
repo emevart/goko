@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { llm } from '@livekit/agents';
 import {
   EVENT_MESSAGE_PREFIX,
@@ -10,6 +10,7 @@ import {
   createEventSpeaker,
   eventMessage,
 } from './event-speech.ts';
+import type { LiveBridge } from './live-bridge.ts';
 
 type Journal = string[];
 
@@ -230,5 +231,33 @@ describe('createEventSpeaker: событие не гоняется с резул
 
   it('потолок ожидания — 20 с: выше клиентского потолка play/analyze (15 с) плюс таймаут синхронизации плагина (5 с)', () => {
     expect(THINKING_WAIT_MS).toBe(20_000);
+  });
+});
+
+describe('createEventSpeaker: GPT Live получает только актуальное событие', () => {
+  it('отбрасывает старую ревизию и повтор eventId, передаёт актуальный факт через commentary без generateReply', async () => {
+    const journal: Journal = [];
+    const agent = realtimeAgent(undefined);
+    const { session, calls } = fakeSession(journal, () => agent._chatCtx);
+    const commentary = vi.fn(async () => {});
+    const speak = createEventSpeaker({
+      agent,
+      session,
+      liveBridge: { commentary } as unknown as LiveBridge,
+      current: () => ({ gameId: 'g1', revision: 3 }),
+    });
+
+    await speak('Устаревший ход.', { eventId: 'event-2', gameId: 'g1', revision: 2, cause: 'tap' });
+    await speak('Актуальный ход.', { eventId: 'event-3', gameId: 'g1', revision: 3, cause: 'tap' });
+    await speak('Повтор актуального хода.', { eventId: 'event-3', gameId: 'g1', revision: 3, cause: 'tap' });
+    await speak('Чужая партия.', { eventId: 'event-other', gameId: 'g2', revision: 3, cause: 'tap' });
+
+    expect(commentary).toHaveBeenCalledTimes(1);
+    expect(commentary).toHaveBeenCalledWith(
+      SAY_EVENT_INSTRUCTIONS,
+      'Событие с экрана: Актуальный ход. [game=g1 rev=3 cause=tap]',
+      expect.any(Function),
+    );
+    expect(calls).toEqual([]);
   });
 });

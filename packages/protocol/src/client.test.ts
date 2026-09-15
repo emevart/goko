@@ -85,7 +85,7 @@ describe('createClient', () => {
 // Таблица маршрутов: у каждого метода клиента проверены HTTP-метод, путь и тело.
 // Идентификатор партии взят со слэшем — путь обязан его кодировать.
 const move = { n: 1, color: 'B', coord: 'D4', captured: 0, at: '2026-09-07T10:00:01.000Z' };
-const analysis = { visits: 1, winrateB: 0.5, scoreLeadB: 0, topMoves: [], ownership: [], groups: [] };
+const analysis = { gameId: 'g1', revision: 0, visits: 1, winrateB: 0.5, scoreLeadB: 0, topMoves: [], ownership: [], groups: [] };
 const result = { winner: 'W', margin: 7.5, reason: 'score' };
 const sessionResponse = {
   session: { id: 's1', room: 'goko-s1', currentGameId: null, createdAt: state.createdAt },

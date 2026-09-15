@@ -86,7 +86,7 @@ export function createFakeEngine(opts: FakeEngineOptions = {}): FakeEngine {
         const lastCoord = req.moves.at(-1)?.[1];
         move = passAfterPass && lastCoord === 'pass' ? 'pass' : randomLegal(positionOf(req), color, random);
       }
-      return { move, winrateB: 0.5, scoreLeadB: 0, humanPolicyTop: [{ coord: move, prob: 1 }], humanFallback: false, ms: Math.round(performance.now() - t0) };
+      return { move, winrateB: 0.5, scoreLeadB: 0, humanPolicyTop: [{ coord: move, prob: 1 }], rankCandidates: [{ coord: move, prob: 1 }], candidateAnalysis: [], humanFallback: false, ms: Math.round(performance.now() - t0) };
     },
     async analyze(req: EngineAnalyzeRequest, signal?: AbortSignal): Promise<EngineAnalyzeResponse> {
       calls.analyze++;
@@ -98,7 +98,7 @@ export function createFakeEngine(opts: FakeEngineOptions = {}): FakeEngine {
         visits: req.maxVisits ?? 50,
         winrateB: 0.5,
         scoreLeadB: 0,
-        moveInfos: [{ coord: best, winrateB: 0.5, scoreLeadB: 0, visits: 1, order: 0 }],
+        moveInfos: [{ coord: best, winrateB: 0.5, scoreLeadB: 0, visits: 1, order: 0, pv: [] }],
         ownership: req.includeOwnership === false ? undefined : naiveOwnership(pos),
       };
     },

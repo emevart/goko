@@ -7,6 +7,7 @@ import { type Clock, realClock } from './clock.ts';
 export type TalkMode = 'voice' | 'chat';
 
 export const MODE_ATTRIBUTE = 'goko.mode';
+export const MIC_ATTRIBUTE = 'goko.mic';
 
 // Незнакомое значение и отсутствие атрибута — «Голос»: основной режим, и старый веб без атрибута работает как раньше.
 export function modeOf(attributes: Readonly<Record<string, string>> | undefined): TalkMode {
@@ -18,11 +19,13 @@ export type AudioSwitch = {
   input: { setAudioEnabled(enabled: boolean): void };
   output: { setAudioEnabled(enabled: boolean): void };
 };
+export type LiveInputSwitch = { setInputEnabled(enabled: boolean): void };
 
-export function applyMode(session: AudioSwitch, mode: TalkMode): void {
+export function applyMode(session: AudioSwitch, mode: TalkMode, live?: LiveInputSwitch, microphoneActive = true): void {
   const on = mode === 'voice';
   session.output.setAudioEnabled(on);
   session.input.setAudioEnabled(on);
+  live?.setInputEnabled(on && microphoneActive);
 }
 
 // RemoteParticipant из @livekit/rtc-node подходит как есть: identity и attributes — геттеры.
@@ -32,17 +35,20 @@ export type ModeFollower = { readonly mode: TalkMode; onAttributes(p: Participan
 
 // Следит за режимом одного участника — того, кого дождался ctx.waitForParticipant(). Вызывать после
 // session.start: подключение аудиовыхода RoomIO внутри start вызывает onAttached независимо от флага.
-export function followMode(opts: { participant: ParticipantLike; session: AudioSwitch; log?: (line: string) => void }): ModeFollower {
+export function followMode(opts: { participant: ParticipantLike; session: AudioSwitch; live?: LiveInputSwitch; log?: (line: string) => void }): ModeFollower {
   const log = opts.log ?? (() => {});
   let mode = modeOf(opts.participant.attributes);
-  applyMode(opts.session, mode);
+  let microphoneActive = opts.participant.attributes[MIC_ATTRIBUTE] !== 'muted';
+  applyMode(opts.session, mode, opts.live, microphoneActive);
   log(`[OK] voice-agent: режим ${mode}`);
   const onAttributes = (p: ParticipantLike) => {
     if (p.identity !== opts.participant.identity) return;
     const next = modeOf(p.attributes);
-    if (next === mode) return;
+    const nextMicrophoneActive = p.attributes[MIC_ATTRIBUTE] !== 'muted';
+    if (next === mode && nextMicrophoneActive === microphoneActive) return;
     mode = next;
-    applyMode(opts.session, mode);
+    microphoneActive = nextMicrophoneActive;
+    applyMode(opts.session, mode, opts.live, microphoneActive);
     log(`[OK] voice-agent: режим ${mode}`);
   };
   return {

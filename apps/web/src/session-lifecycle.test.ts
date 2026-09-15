@@ -71,9 +71,10 @@ describe('явный запуск разговора', () => {
   });
 
   it('mic failure сохраняет явно начатый параллельный чат, а без него возвращает idle', () => {
-    expect(voiceFailureMode(false, true)).toBe('chat');
-    expect(voiceFailureMode(true, false)).toBe('chat');
-    expect(voiceFailureMode(false, false)).toBe('idle');
+    expect(voiceFailureMode(false, false, true)).toBe('chat');
+    expect(voiceFailureMode(true, false, false)).toBe('chat');
+    expect(voiceFailureMode(false, true, false)).toBe('chat');
+    expect(voiceFailureMode(false, false, false)).toBe('idle');
   });
 
   it('передаёт LiveKit исходный gesture track, а stale и publish failure останавливают его ровно раз', async () => {

@@ -20,6 +20,7 @@ import {
   seatColor,
 } from '@goko/protocol';
 import { colorName, colorNameInstrumental, describeResult, speakMove, speakRank } from './phrases.ts';
+import type { EventSpeechMeta } from './event-speech.ts';
 import { type AgentState, forgetFinishIfReopened, noteFinishRevision } from './state.ts';
 
 export const ERROR_REPEAT_MS = 30_000;
@@ -80,6 +81,8 @@ function engineReplyText(state: AgentState, last: Move, prev: Move | undefined):
 
 function onStateUpdated(ev: Extract<GameEvent, { type: 'state.updated' }>, state: AgentState): string | null {
   const g = ev.state;
+  const analysis = state.analysisAbort;
+  if (analysis && (analysis.gameId !== g.id || analysis.revision < g.revision)) analysis.controller.abort(new Error('game revision changed'));
   const observed = state.observedRevision;
   if (!observed || observed.gameId !== g.id || observed.revision < g.revision) {
     state.observedRevision = { gameId: g.id, revision: g.revision };
@@ -91,6 +94,8 @@ function onStateUpdated(ev: Extract<GameEvent, { type: 'state.updated' }>, state
   state.humanColor = hasEngine(g) ? humanColorOf(g) : null;
   state.retriesExhausted = false; // был коммит или открытие потока: серия повторов перезапущена (D-0006)
   const last = g.moves.at(-1);
+  if (ev.engineDecision) state.engineDecision = { gameId: g.id, ...ev.engineDecision };
+  else if (state.engineDecision?.gameId === g.id && !g.moves.some((move) => move.n === state.engineDecision?.moveN)) state.engineDecision = null;
   // Последний ход, который поток уже показывал по этой партии; null — не показывал (или только другую партию).
   const seen = state.seenMove?.gameId === g.id ? state.seenMove.n : null;
   state.seenMove = { gameId: g.id, n: last?.n ?? 0 };
@@ -195,6 +200,8 @@ export function handleEvent(ev: GameEvent, state: AgentState, now: () => number 
       // флаги прежней партии сброшены. Переподключение к уже знакомой партии флаги не трогает: ожидание хода
       // движка и fallbackMove переживают обрыв и переоткрытие после retries_exhausted, sync сверит их с позицией.
       if (ev.gameId !== state.gameId) {
+        state.analysisAbort?.controller.abort(new Error('game changed'));
+        state.analysisAbort = null;
         state.gameGeneration++;
         state.observedRevision = null;
         state.announceSync = ev.gameId;
@@ -244,7 +251,7 @@ export function handleEvent(ev: GameEvent, state: AgentState, now: () => number 
 export type WatchOptions = {
   client: Pick<GokoClient, 'events'>;
   state: AgentState;
-  speak: (text: string) => Promise<void> | void; // текст события; реплику строит event-speech.ts
+  speak: (text: string, meta?: EventSpeechMeta) => Promise<void> | void; // текст события; реплику строит event-speech.ts
   signal: AbortSignal;
   log?: (line: string) => void;
   delaysMs?: readonly number[]; // паузы по попыткам, последняя — потолок; по умолчанию RETRY_MS
@@ -286,8 +293,8 @@ export function watchSession(opts: WatchOptions): WatchHandle {
 
   // Реплику ждём, пока сеанс не остановлен: зависший generateReply (сессия LiveKit закрывается) не держит done.
   // Отказ реплики ловится и после остановки — иначе он стал бы unhandled rejection.
-  const say = async (instructions: string) => {
-    const reply = (async () => opts.speak(instructions))().catch((e: unknown) => {
+  const say = async (instructions: string, meta?: EventSpeechMeta) => {
+    const reply = (async () => opts.speak(instructions, meta))().catch((e: unknown) => {
       log(`[!] voice-agent: generateReply не удался: ${failureText(e)}`);
     });
     let wake: () => void = () => {};
@@ -342,7 +349,15 @@ export function watchSession(opts: WatchOptions): WatchHandle {
       try {
         for await (const ev of opts.client.events({ sessionId: opts.state.sessionId }, current.signal)) {
           const instructions = react(ev);
-          if (instructions) await say(instructions);
+          if (instructions) {
+            const observed = opts.state.observedRevision;
+            const meta = ev.type === 'state.updated'
+              ? { eventId: `${ev.state.id}:${ev.state.revision}:${ev.cause}`, gameId: ev.state.id, revision: ev.state.revision, cause: ev.cause }
+              : observed && opts.state.gameId === observed.gameId
+                ? { eventId: `${observed.gameId}:${observed.revision}:${ev.type}`, gameId: observed.gameId, revision: observed.revision, cause: ev.type }
+                : undefined;
+            await say(instructions, meta);
+          }
           // Подключение оборвали, пока шла реплика (humanSpoke, остановка): следующего события старого потока
           // не ждём — источник мог ещё не заметить отмену, и цикл висел бы на нём.
           if (current.signal.aborted) break;

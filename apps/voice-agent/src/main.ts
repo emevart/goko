@@ -12,11 +12,15 @@ import { CONFIG_EXIT_CODE, readConfig } from './config.ts';
 import { attachConversationEvents } from './conversation-events.ts';
 import { watchDeparture } from './departure.ts';
 import { createEventSpeaker } from './event-speech.ts';
+import { IntentLedger } from './intent.ts';
+import { LiveBridge, type LiveWire } from './live-bridge.ts';
+import { LiveSilenceClock, type LiveAudioProvider } from './live-clock.ts';
+import { LiveResponseCoordinator, type LiveEventSource } from './live-response.ts';
 import { type WatchHandle, watchSession } from './events.ts';
 import { workerPoolOptions } from './load.ts';
 import { sessionIdOf } from './metadata.ts';
 import { MODE_ATTRIBUTE, MODE_WAIT_MS, type ModeFollower, type ParticipantLike, followMode, waitForMode } from './mode.ts';
-import { GREETING_INSTRUCTIONS } from './prompt.ts';
+import { GREETING_INSTRUCTIONS, VOICE_INSTRUCTIONS } from './prompt.ts';
 import { newAgentState } from './state.ts';
 import { createTools } from './tools.ts';
 import { sessionOptions } from './voice.ts';
@@ -29,7 +33,7 @@ if (!config) {
   for (const line of errors) console.error(line);
   process.exit(CONFIG_EXIT_CODE);
 }
-const { appKey, apiBase, agentName, voiceMode } = config;
+const { appKey, apiBase, agentName, voiceMode, sessionMaxMs } = config;
 
 const log = (line: string) => console.log(line);
 // Имена событий сеанса — из перечисления библиотеки: строковые литералы тип TypedEmitter не принимает.
@@ -84,12 +88,20 @@ async function runSession(ctx: JobContext, sessionId: string): Promise<void> {
 
   const client = createClient({ baseUrl: apiBase, appKey });
   const state = newAgentState(sessionId);
+  const intent = new IntentLedger();
   // Сигнал сеанса: закрытие сессии или остановка воркера обрывает поток и вызовы инструментов.
   // Долгоживущий сигнал в CallOptions допустим: клиент снимает свой слушатель после каждого вызова.
   const abort = new AbortController();
   // Приветствие не в onEnter, а после применения режима: в «Чате» оно должно прийти только текстом.
-  const agent = new GokoAgent(createTools({ client, state, log, signal: abort.signal }), { greet: false });
+  const agent = new GokoAgent(createTools({ client, state, log, signal: abort.signal, intent }), {
+    greet: false,
+    ...(voiceMode === 'live' ? { instructions: VOICE_INSTRUCTIONS } : {}),
+  });
   const session = new voice.AgentSession(await sessionOptions(voiceMode));
+  let liveBridge: LiveBridge | null = null;
+  let liveResponses: LiveResponseCoordinator | null = null;
+  let resolveLiveBridge: (bridge: LiveBridge) => void = () => {};
+  const liveBridgeReady = new Promise<LiveBridge>((resolve) => { resolveLiveBridge = resolve; });
   let watch: WatchHandle | null = null;
   const localParticipant = ctx.room.localParticipant;
   if (!localParticipant) throw new Error('local participant unavailable after connect');
@@ -109,17 +121,27 @@ async function runSession(ctx: JobContext, sessionId: string): Promise<void> {
   session.on(Events.UserInputTranscribed, (ev) => {
     if (!ev.isFinal) return;
     log(`[user] ${ev.transcript}`);
+    intent.add(ev.transcript, ev.itemId ? `item:${ev.itemId}` : `transcript:${ev.createdAt}`);
     watch?.humanSpoke();
   });
   session.on(Events.ConversationItemAdded, (ev) => {
     const item = ev.item;
     if (item.type !== 'message') return; // AgentHandoffItem без role и текста
-    if (item.role === 'user') watch?.humanSpoke();
-    if (item.role === 'assistant' && item.textContent) log(`[goko] ${item.textContent}`);
+    if (item.role === 'user') {
+      watch?.humanSpoke();
+      if (item.transcriptConfidence === undefined && item.textContent) intent.add(item.textContent, `item:${item.id}`);
+    }
+    if (item.role === 'assistant' && item.textContent) {
+      liveResponses?.noteAssistant();
+      log(`[goko] ${item.textContent}`);
+    }
   });
   session.on(Events.FunctionToolsExecuted, (ev) => {
     for (const call of ev.functionCalls) log(`[tool] ${call.name} ${call.args}`);
   });
+
+  session.on(Events.AgentStateChanged, (ev) => liveResponses?.noteAgentState(ev.newState));
+  session.on(Events.UserStateChanged, (ev) => liveResponses?.noteUserState(ev.newState));
 
   // Закрытый сеанс (неустранимая ошибка модели, остановка job) не оживёт: job завершается, а не висит
   // в комнате молча. При остановке job повторный shutdown ничего не делает.
@@ -134,6 +156,7 @@ async function runSession(ctx: JobContext, sessionId: string): Promise<void> {
     abort.abort();
     departure.stop();
     stopConversationEvents();
+    await session.close();
   });
 
   const attributesChanged = (listener: (p: ParticipantLike) => void) => {
@@ -147,17 +170,69 @@ async function runSession(ctx: JobContext, sessionId: string): Promise<void> {
   // поздний атрибут переключит режим через followMode, и остаток приветствия в «Чате» уйдёт текстом.
   // RoomIO привязан к участнику по identity: к нему же после перезагрузки вкладки.
   const [, modeArrived] = await Promise.all([
-    session.start({ agent, room: ctx.room, inputOptions: { closeOnDisconnect: false, participantIdentity: identity } }),
+    session.start({
+      agent,
+      room: ctx.room,
+      inputOptions: {
+        closeOnDisconnect: false,
+        participantIdentity: identity,
+        ...(voiceMode === 'live' ? {
+          textInputCallback: async (_session, ev) => {
+            const bridge = await liveBridgeReady;
+            watch?.humanSpoke();
+            try {
+              await bridge.typed(ev.text, ev.info?.streamId);
+            } catch (e) {
+              log(`[!] voice-agent: текстовый ответ Live не завершился (${errorText(e)})`);
+              stopConversationEvents.failure('Гоко не смог ответить; сообщение можно отправить ещё раз');
+            }
+          },
+        } : {}),
+      },
+    }),
     waitForMode({ participant, subscribe: attributesChanged }),
   ]);
   if (!modeArrived) log(`[!] voice-agent: ${MODE_ATTRIBUTE} не пришёл за ${MODE_WAIT_MS / 1000} с, начинаю в режиме по умолчанию`);
 
   // Применяется после start, см. mode.ts. Атрибуты читаются живыми с участника: пришедшее во время
   // ожидания уже в них.
-  const follower = followMode({ participant, session, log });
+  const live = voiceMode === 'live' ? agent.duplexSession as unknown as LiveWire & LiveAudioProvider & LiveEventSource : undefined;
+  const liveClock = live ? new LiveSilenceClock(live) : undefined;
+  if (live) {
+    liveResponses = new LiveResponseCoordinator({ live, signal: abort.signal });
+    liveBridge = new LiveBridge({
+      live,
+      intent,
+      waitUntilReady: () => liveResponses!.waitUntilIdle(),
+      waitForReply: (kind) => liveResponses!.waitForReply(kind),
+    });
+    resolveLiveBridge(liveBridge);
+  }
+  const follower = followMode({ participant, session, live: liveClock, log });
   mode = follower;
-  ctx.room.on(RoomEvent.ParticipantAttributesChanged, (_changed, p) => follower.onAttributes(p));
-  session.generateReply({ instructions: GREETING_INSTRUCTIONS });
+  let ending = false;
+  const end = (reason: string) => {
+    if (ending) return;
+    ending = true;
+    abort.abort();
+    void session.close().finally(() => ctx.shutdown(reason));
+  };
+  if (participant.attributes['goko.conversation'] === 'ended') {
+    end('conversation ended before greeting');
+    return;
+  }
+  ctx.room.on(RoomEvent.ParticipantAttributesChanged, (_changed, p) => {
+    follower.onAttributes(p);
+    if (p.identity === identity && p.attributes['goko.conversation'] === 'ended') end('conversation ended');
+  });
+  const hardTimer = setTimeout(() => end('session duration reached'), sessionMaxMs);
+  ctx.addShutdownCallback(async () => {
+    clearTimeout(hardTimer);
+    liveClock?.stop();
+    liveResponses?.stop();
+  });
+  if (liveBridge) void liveBridge.greet(GREETING_INSTRUCTIONS).catch((e) => log(`[!] voice-agent: приветствие Live не завершилось (${errorText(e)})`));
+  else session.generateReply({ instructions: GREETING_INSTRUCTIONS });
 
   watch = watchSession({
     client,
@@ -167,7 +242,15 @@ async function runSession(ctx: JobContext, sessionId: string): Promise<void> {
     // Реплики событий по очереди: следующее событие ждёт, пока прозвучит (или прервётся) предыдущая.
     // Текст события — в историю разговора, ответ — без инструментов (event-speech.ts, D-0013).
     // Остановку сеанса say в events.ts не ждёт: ожидание ограничено сигналом.
-    speak: createEventSpeaker({ agent, session, log }),
+    speak: createEventSpeaker({
+      agent,
+      session,
+      log,
+      ...(liveBridge ? {
+        liveBridge,
+        current: () => ({ gameId: state.gameId, revision: state.observedRevision?.gameId === state.gameId ? state.observedRevision.revision : null }),
+      } : {}),
+    }),
   });
   void watch.done;
 }

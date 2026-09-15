@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { ApiError, ClientTimeoutError, type GameState, HttpError, humanText } from '@goko/protocol';
 import { type AgentState, newAgentState } from './state.ts';
 import { handleEvent } from './events.ts';
+import { IntentLedger } from './intent.ts';
 import { createFakeClient, fakeGame } from './testing/fake-client.ts';
 import {
   ASSESSMENT_VISITS,
@@ -973,7 +974,21 @@ describe('get_position / get_assessment / set_rank', () => {
       ],
       toPlay: 'you',
     });
-    expect(client.calls.find((c) => c.method === 'analyze')).toMatchObject({ args: ['g1', { maxVisits: ASSESSMENT_VISITS }] });
+    expect(client.calls.find((c) => c.method === 'analyze')).toMatchObject({ args: ['g1', { maxVisits: ASSESSMENT_VISITS, expectedRevision: 0 }] });
+  });
+  it('state.updated новой revision abort-ит старую оценку и late result не попадает в ответ', async () => {
+    const { fns, client, state } = await withGame();
+    let analyzeSignal: AbortSignal | undefined;
+    client.analyze = async (_id, _req, options) => {
+      analyzeSignal = options?.signal;
+      return new Promise((_resolve, reject) => analyzeSignal?.addEventListener('abort', () => reject(analyzeSignal?.reason), { once: true }));
+    };
+    const pending = fns.getAssessment();
+    await vi.waitFor(() => expect(analyzeSignal).toBeDefined());
+    const newer = fakeGame({ revision: 1, moves: [{ n: 1, color: 'B', coord: 'D4', captured: 0, at: 't' }], toPlay: 'W' });
+    handleEvent({ type: 'state.updated', state: newer, cause: 'play', by: 'human', via: 'tap' }, state);
+    expect(analyzeSignal?.aborted).toBe(true);
+    await expect(pending).resolves.toEqual({ ok: false, reason: expect.stringMatching(/сменилась/) });
   });
   it('оценка не обрезает список камней слабой группы', async () => {
     const stones = ['A1', 'A2', 'A3', 'A4', 'A5'];
@@ -1018,6 +1033,20 @@ describe('createTools', () => {
     expect(Object.keys(tools).sort()).toEqual(
       ['correct_last_move', 'get_assessment', 'get_position', 'pass', 'play_move', 'redo', 'resign', 'set_rank', 'start_game', 'undo'],
     );
+  });
+  it('mutation требует тот же trusted final turn и сверяет координату аргумента', async () => {
+    const { client, state } = await withGame();
+    const intent = new IntentLedger();
+    const tools = createTools({ client, state, intent });
+    intent.add('Поставь E9');
+    const denied = await tools.play_move.execute({ coord: 'D4', user_utterance: 'Поставь E9' }, {} as never);
+    expect(denied).toMatchObject({ ok: false });
+    expect(client.calls).toEqual([]);
+
+    intent.add('D4');
+    await expect(tools.play_move.execute({ coord: 'D4', user_utterance: 'D4' }, {} as never)).resolves.toMatchObject({ ok: true, yourMove: 'D4' });
+    expect(client.calls.map((call) => call.method)).toContain('play');
+    await expect(tools.play_move.execute({ coord: 'D4', user_utterance: 'D4' }, {} as never)).resolves.toMatchObject({ ok: false });
   });
 });
 
@@ -1137,7 +1166,10 @@ describe('сигнал сеанса в каждом инструменте (M7)'
     await run(fns);
     expect(client.calls.map((c) => c.method)).toEqual(methods);
     expect(client.signals).toHaveLength(methods.length);
-    for (const s of client.signals) expect(s).toBe(controller.signal);
+    for (const [index, s] of client.signals.entries()) {
+      if (_name === 'get_assessment' && index === 1) expect(s).not.toBe(controller.signal);
+      else expect(s).toBe(controller.signal);
+    }
   });
 });
 

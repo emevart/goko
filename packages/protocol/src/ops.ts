@@ -75,7 +75,10 @@ export type CorrectRequest = z.input<typeof CorrectRequest>;
 export const SetRankRequest = z.strictObject({ color: Color, rank: Rank });
 export type SetRankRequest = z.input<typeof SetRankRequest>;
 
-export const AnalyzeRequest = z.strictObject({ maxVisits: z.number().int().min(1).max(1000).default(50) });
+export const AnalyzeRequest = z.strictObject({
+  maxVisits: z.number().int().min(1).max(1000).default(50),
+  expectedRevision: z.number().int().nonnegative().optional(),
+});
 export type AnalyzeRequest = z.input<typeof AnalyzeRequest>;
 
 export const GroupInfo = z.object({
@@ -88,6 +91,8 @@ export const GroupInfo = z.object({
 export type GroupInfo = z.infer<typeof GroupInfo>;
 
 export const Analysis = z.object({
+  gameId: z.string(),
+  revision: z.number().int().nonnegative(),
   visits: z.number().int(),
   winrateB: z.number(),
   scoreLeadB: z.number(),

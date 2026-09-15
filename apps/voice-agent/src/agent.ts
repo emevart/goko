@@ -6,8 +6,8 @@ import type { GokoTools } from './tools.ts';
 export class GokoAgent extends voice.Agent {
   readonly greet: boolean;
 
-  constructor(tools: GokoTools, opts: { greet?: boolean } = {}) {
-    super({ instructions: INSTRUCTIONS, tools });
+  constructor(tools: GokoTools, opts: { greet?: boolean; instructions?: string } = {}) {
+    super({ instructions: opts.instructions ?? INSTRUCTIONS, tools });
     this.greet = opts.greet ?? true;
   }
 

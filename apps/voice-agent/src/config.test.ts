@@ -13,17 +13,22 @@ const REQUIRED = {
 describe('readConfig', () => {
   it('все обязательные заданы — значения по умолчанию для API_BASE, AGENT_NAME, VOICE_MODE', () => {
     expect(readConfig({ ...REQUIRED })).toEqual({
-      config: { appKey: 'app-key-value', apiBase: 'http://127.0.0.1:8787', agentName: 'goko', voiceMode: 'realtime' },
+      config: { appKey: 'app-key-value', apiBase: 'http://127.0.0.1:8787', agentName: 'goko', voiceMode: 'realtime', sessionMaxMs: 3_600_000 },
       errors: [],
     });
   });
 
   it('необязательные берутся из env, пустые и из пробелов — как не заданные', () => {
     const custom = readConfig({ ...REQUIRED, API_BASE: 'http://game-server:8787', AGENT_NAME: 'goko-dev', VOICE_MODE: 'pipeline' });
-    expect(custom.config).toEqual({ appKey: 'app-key-value', apiBase: 'http://game-server:8787', agentName: 'goko-dev', voiceMode: 'pipeline' });
+    expect(custom.config).toEqual({ appKey: 'app-key-value', apiBase: 'http://game-server:8787', agentName: 'goko-dev', voiceMode: 'pipeline', sessionMaxMs: 3_600_000 });
     const blank = readConfig({ ...REQUIRED, API_BASE: ' ', AGENT_NAME: '', VOICE_MODE: '  ' });
-    expect(blank.config).toEqual({ appKey: 'app-key-value', apiBase: 'http://127.0.0.1:8787', agentName: 'goko', voiceMode: 'realtime' });
+    expect(blank.config).toEqual({ appKey: 'app-key-value', apiBase: 'http://127.0.0.1:8787', agentName: 'goko', voiceMode: 'realtime', sessionMaxMs: 3_600_000 });
     expect(readConfig({ ...REQUIRED, VOICE_MODE: 'realtime' }).config?.voiceMode).toBe('realtime');
+  });
+
+  it('принимает live и честный hard limit, неверный limit отклоняет', () => {
+    expect(readConfig({ ...REQUIRED, VOICE_MODE: 'live', VOICE_SESSION_MAX_MS: '60000' }).config).toMatchObject({ voiceMode: 'live', sessionMaxMs: 60_000 });
+    expect(readConfig({ ...REQUIRED, VOICE_SESSION_MAX_MS: '0' }).errors).toEqual(['[X] voice-agent: VOICE_SESSION_MAX_MS должна быть целым числом от 60000 до 7200000']);
   });
 
   it('каждая обязательная переменная: нет, пустая, из пробелов — ошибка с её именем', () => {
@@ -48,11 +53,11 @@ describe('readConfig', () => {
   it('неверный VOICE_MODE — ошибка конфигурации с именем переменной, без значения', () => {
     const result = readConfig({ ...REQUIRED, VOICE_MODE: 'gpt-secret-mode' });
     expect(result.config).toBeNull();
-    expect(result.errors).toEqual(['[X] voice-agent: VOICE_MODE должна быть realtime или pipeline']);
+    expect(result.errors).toEqual(['[X] voice-agent: VOICE_MODE должна быть realtime, live или pipeline']);
     const both = readConfig({ ...REQUIRED, APP_KEY: '', VOICE_MODE: 'Realtime' });
     expect(both.errors).toEqual([
       '[X] voice-agent: нужна переменная APP_KEY (см. infra/.env.example)',
-      '[X] voice-agent: VOICE_MODE должна быть realtime или pipeline',
+      '[X] voice-agent: VOICE_MODE должна быть realtime, live или pipeline',
     ]);
   });
 

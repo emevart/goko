@@ -18,6 +18,20 @@ function deferred() {
 }
 
 describe('attachConversationEvents', () => {
+  it('публикует видимый conversation.failure в общей sequence без phantom assistant transcript', async () => {
+    const session = new EventEmitter();
+    const sent: string[] = [];
+    const handle = attachConversationEvents({
+      subscribe: (listener) => { session.on('conversation_item_added', listener); return () => void session.off('conversation_item_added', listener); },
+      sendText: async (text) => { sent.push(text); },
+      destinationIdentity: 'phone-1',
+      now: () => new Date('2026-09-15T10:00:00.000Z'),
+    });
+    handle.failure('Гоко не смог ответить; повтори сообщение');
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+    expect(JSON.parse(sent[0] ?? '')).toEqual({ version: 1, type: 'conversation.failure', seq: 1, message: 'Гоко не смог ответить; повтори сообщение', serverTime: '2026-09-15T10:00:00.000Z' });
+    handle();
+  });
   it('синхронно фиксирует payload и serverTime, сохраняя адресат и порядок', async () => {
     const session = new EventEmitter();
     const sendText = vi.fn(async (_text: string, _options: { topic: string; destinationIdentities: string[] }) => undefined);

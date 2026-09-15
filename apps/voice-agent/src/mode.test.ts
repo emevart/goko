@@ -1,7 +1,7 @@
 // mode.test.ts — режим Голос / Чат (D-0011) на замоканном сеансе
 import { describe, expect, it } from 'vitest';
 import type { Clock } from './clock.ts';
-import { MODE_ATTRIBUTE, MODE_WAIT_MS, type ParticipantLike, applyMode, followMode, modeOf, waitForMode } from './mode.ts';
+import { MIC_ATTRIBUTE, MODE_ATTRIBUTE, MODE_WAIT_MS, type ParticipantLike, applyMode, followMode, modeOf, waitForMode } from './mode.ts';
 
 function fakeSession() {
   const calls: string[] = [];
@@ -10,6 +10,11 @@ function fakeSession() {
     input: { setAudioEnabled: (enabled: boolean) => void calls.push(`in:${enabled}`) },
     output: { setAudioEnabled: (enabled: boolean) => void calls.push(`out:${enabled}`) },
   };
+}
+
+function fakeLive() {
+  const calls: string[] = [];
+  return { calls, setInputEnabled: (enabled: boolean) => calls.push(`provider:${enabled ? 'unmute' : 'mute'}`) };
 }
 
 describe('modeOf', () => {
@@ -26,9 +31,28 @@ describe('modeOf', () => {
 describe('applyMode', () => {
   it('chat выключает аудиовыход и аудиовход сессии, voice включает обратно', () => {
     const s = fakeSession();
-    applyMode(s, 'chat');
-    applyMode(s, 'voice');
+    const live = fakeLive();
+    applyMode(s, 'chat', live);
+    applyMode(s, 'voice', live);
     expect(s.calls).toEqual(['out:false', 'in:false', 'out:true', 'in:true']);
+    expect(live.calls).toEqual(['provider:mute', 'provider:unmute']);
+  });
+
+  it('followMode применяет provider mute до приветствия и unmute при включении голоса', () => {
+    const s = fakeSession();
+    const live = fakeLive();
+    const f = followMode({ participant: { identity: 'phone-s1', attributes: { 'goko.mode': 'chat' } }, session: s, live });
+    expect(live.calls).toEqual(['provider:mute']);
+    f.onAttributes({ identity: 'phone-s1', attributes: { 'goko.mode': 'voice' } });
+    expect(live.calls).toEqual(['provider:mute', 'provider:unmute']);
+  });
+
+  it('muted микрофон в voice сохраняет silence clock, атрибут on включает живой input', () => {
+    const live = fakeLive();
+    const f = followMode({ participant: { identity: 'phone-s1', attributes: { [MODE_ATTRIBUTE]: 'voice', [MIC_ATTRIBUTE]: 'muted' } }, session: fakeSession(), live });
+    expect(live.calls).toEqual(['provider:mute']);
+    f.onAttributes({ identity: 'phone-s1', attributes: { [MODE_ATTRIBUTE]: 'voice', [MIC_ATTRIBUTE]: 'on' } });
+    expect(live.calls).toEqual(['provider:mute', 'provider:unmute']);
   });
 });
 

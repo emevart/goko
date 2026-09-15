@@ -17,11 +17,18 @@ describe('agent conversation binding', () => {
   it('валидирует схему, отбрасывает повторы seq и принимает seq=1 после рестарта producer с новым SID', () => {
     const first = bindAgent(1, [{ identity: 'goko', sid: 'A1', kind: agentKind }], agentKind)!;
     const sender1 = { identity: 'goko', sid: 'A1', kind: agentKind };
-    expect(acceptConversationEvent(first, 1, sender1, event(1, true))?.interrupted).toBe(true);
+    const interrupted = acceptConversationEvent(first, 1, sender1, event(1, true));
+    expect(interrupted?.type === 'assistant.response_finished' && interrupted.interrupted).toBe(true);
     expect(acceptConversationEvent(first, 1, sender1, event(1))).toBeNull();
     expect(acceptConversationEvent(first, 1, sender1, '{"type":"bad"}')).toBeNull();
     const restarted = bindAgent(1, [{ identity: 'goko', sid: 'A2', kind: agentKind }], agentKind)!;
     expect(acceptConversationEvent(restarted, 1, { ...sender1, sid: 'A2' }, event(1))).not.toBeNull();
+  });
+
+  it('принимает trusted conversation.failure как отдельный status event', () => {
+    const binding = bindAgent(1, [{ identity: 'goko', sid: 'A1', kind: agentKind }], agentKind)!;
+    const failure = JSON.stringify({ version: 1, type: 'conversation.failure', seq: 1, message: 'Повтори сообщение', serverTime: '2026-09-15T10:00:00.000Z' });
+    expect(acceptConversationEvent(binding, 1, { identity: 'goko', sid: 'A1', kind: agentKind }, failure)).toMatchObject({ type: 'conversation.failure', message: 'Повтори сообщение' });
   });
 
   it('не переименовывает поздний stream A1 в нового producer A2 с той же identity', () => {

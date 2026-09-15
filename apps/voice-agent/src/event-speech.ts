@@ -4,6 +4,7 @@
 // кладём в историю system-сообщением «Событие с экрана: …» и ждём, пока сервер его подтвердит, а ответ
 // просим с toolChoice 'none': вызвать инструмент в ответ на событие модель не может.
 import type { llm, voice } from '@livekit/agents';
+import type { LiveBridge } from './live-bridge.ts';
 
 export const EVENT_MESSAGE_PREFIX = 'Событие с экрана';
 export const eventMessage = (text: string): string => `${EVENT_MESSAGE_PREFIX}: ${text}`;
@@ -43,7 +44,10 @@ export type EventSpeakerOptions = {
   log?: (line: string) => void;
   thinkingWaitMs?: number;
   pollMs?: number;
+  liveBridge?: LiveBridge;
+  current?: () => { gameId: string | null; revision: number | null };
 };
+export type EventSpeechMeta = { eventId: string; gameId: string; revision: number; cause: string };
 
 const errorText = (e: unknown): string => (e instanceof Error ? `${e.name}: ${e.message}` : String(e));
 const seconds = (ms: number): string => String(ms / 1000).replace('.', ',');
@@ -57,7 +61,10 @@ export function createEventSpeaker({
   log = () => {},
   thinkingWaitMs = THINKING_WAIT_MS,
   pollMs = THINKING_POLL_MS,
-}: EventSpeakerOptions): (text: string) => Promise<void> {
+  liveBridge,
+  current,
+}: EventSpeakerOptions): (text: string, meta?: EventSpeechMeta) => Promise<void> {
+  const liveEvents = new Set<string>();
   // Гонка истории Realtime (ревью I1). И мы, и библиотека (результат инструмента, agent_activity.ts) делают одно:
   // копия истории сессии + свои элементы + updateChatCtx. Мьютекс плагина защищает отправку, а не момент копии,
   // и сверка удаляет на сервере всё, чего нет в копии. Если копии сняты до того, как чужая синхронизация
@@ -116,8 +123,26 @@ export function createEventSpeaker({
     return true;
   };
 
-  const speakOne = async (text: string): Promise<void> => {
+  const speakOne = async (text: string, meta?: EventSpeechMeta): Promise<void> => {
     const content = eventMessage(text);
+    if (liveBridge) {
+      if (meta && liveEvents.has(meta.eventId)) return;
+      if (meta) {
+        liveEvents.add(meta.eventId);
+        if (liveEvents.size > 64) liveEvents.delete(liveEvents.values().next().value as string);
+      }
+      const stillCurrent = () => {
+        if (!meta || !current) return true;
+        const snapshot = current();
+        return snapshot.gameId === meta.gameId && (snapshot.revision === null || snapshot.revision <= meta.revision);
+      };
+      await liveBridge.commentary(
+        SAY_EVENT_INSTRUCTIONS,
+        meta ? `${content} [game=${meta.gameId} rev=${meta.revision} cause=${meta.cause}]` : content,
+        stillCurrent,
+      );
+      return;
+    }
     const inHistory = await addToHistory(content);
     const instructions = inHistory ? SAY_EVENT_INSTRUCTIONS : `${SAY_EVENT_FALLBACK_INSTRUCTIONS}\n${content}`;
     await session.generateReply({ instructions, toolChoice: 'none' }).waitForPlayout();
@@ -126,8 +151,14 @@ export function createEventSpeaker({
   // Своя очередь дублирует последовательность say в watchSession (await в цикле) и страхует вызовы вне него:
   // две синхронизации истории вперемешку снова дали бы гонку копий.
   let tail: Promise<void> = Promise.resolve();
-  return (text: string) => {
-    const run = tail.then(() => speakOne(text));
+  return (text: string, meta?: EventSpeechMeta) => {
+    const run = tail.then(() => {
+      if (meta && current) {
+        const snapshot = current();
+        if (snapshot.gameId !== meta.gameId || snapshot.revision !== null && snapshot.revision > meta.revision) return;
+      }
+      return speakOne(text, meta);
+    });
     tail = run.catch(() => {});
     return run;
   };

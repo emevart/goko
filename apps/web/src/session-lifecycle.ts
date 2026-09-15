@@ -150,4 +150,5 @@ export async function publishGestureTrack<T extends { stop: () => void }, R>(
   }
 }
 
-export const voiceFailureMode = (chatWasActive: boolean, chatInFlight: boolean): 'chat' | 'idle' => chatWasActive || chatInFlight ? 'chat' : 'idle';
+export const voiceFailureMode = (chatWasActive: boolean, chatRequestedSince: boolean, chatInFlight: boolean): 'chat' | 'idle' =>
+  chatWasActive || chatRequestedSince || chatInFlight ? 'chat' : 'idle';

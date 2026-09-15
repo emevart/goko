@@ -152,6 +152,7 @@ services:
       APP_KEY: ${APP_KEY}
       AGENT_NAME: ${AGENT_NAME:-goko}
       VOICE_MODE: ${VOICE_MODE:-realtime}
+      VOICE_SESSION_MAX_MS: ${VOICE_SESSION_MAX_MS:-3600000}
     depends_on:
       - game-server
 

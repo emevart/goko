@@ -436,7 +436,7 @@ export function createApp(deps: AppDeps): Hono {
   app.post('/api/games/:id/redo', async (c) => c.json(await service.redo(c.req.param('id'), await parseBody(c, RedoRequest), 'human', { clientKey: clientKey(c, trustProxy) })));
   app.post('/api/games/:id/correct', async (c) => c.json(await service.correct(c.req.param('id'), await parseBody(c, CorrectRequest), 'human', { clientKey: clientKey(c, trustProxy) })));
   app.post('/api/games/:id/rank', async (c) => c.json(await service.setRank(c.req.param('id'), await parseBody(c, SetRankRequest))));
-  app.post('/api/games/:id/analyze', async (c) => c.json(await service.analyze(c.req.param('id'), await parseBody(c, AnalyzeRequest))));
+  app.post('/api/games/:id/analyze', async (c) => c.json(await service.analyze(c.req.param('id'), await parseBody(c, AnalyzeRequest), c.req.raw.signal)));
   app.post('/api/games/:id/score', async (c) => c.json(await service.score(c.req.param('id'))));
   app.get('/api/games/:id/ascii', (c) => c.text(service.ascii(c.req.param('id'))));
   app.get('/api/games/:id/sgf', (c) => new Response(service.sgf(c.req.param('id')), { status: 200, headers: { 'content-type': 'application/x-go-sgf; charset=utf-8' } }));

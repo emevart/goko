@@ -93,6 +93,7 @@ export function useSession() {
   const conversationAbort = useRef(new AbortController());
   const endBarrier = useRef(new ConversationEndBarrier());
   const chatInFlight = useRef(0);
+  const chatRequestVersion = useRef(0);
 
   if (!sessionGate.current) {
     sessionGate.current = new SessionGate(async () => {
@@ -172,11 +173,14 @@ export function useSession() {
 
   const sendMode = useCallback(async (room: Room, mode: Mode) => {
     try {
-      await room.localParticipant.setAttributes({ ...modeAttributes(mode), 'goko.conversation': 'active' });
+      await room.localParticipant.setAttributes({ ...modeAttributes(mode), 'goko.conversation': 'active', ...(mode === 'chat' ? { 'goko.mic': 'muted' } : {}) });
     } catch (e) {
       // Нет права canUpdateOwnMetadata или сервер не ответил: агент останется в прежнем режиме.
       console.warn('[!] web: не удалось выставить goko.mode', e);
     }
+  }, []);
+  const sendMicState = useCallback((room: Room, active: boolean) => {
+    void room.localParticipant.setAttributes({ 'goko.mic': active ? 'on' : 'muted' }).catch(() => {});
   }, []);
 
   // Вход в комнату, идемпотентный: повторные касания получают тот же промис.
@@ -363,6 +367,11 @@ export function useSession() {
       }
       const event = acceptConversationEvent(agentBinding.current, gen, sender, raw);
       if (!current() || !event) return;
+      if (event.type === 'conversation.failure') {
+        recorderRef.current.trace('conversation.failure', { seq: event.seq, message: event.message });
+        setError(event.message);
+        return;
+      }
       recorderRef.current.trace('conversation.response-finished', { seq: event.seq, itemId: event.itemId, interrupted: event.interrupted, text: event.text });
       if (event.interrupted) {
         setLines((ls) => upsertLine(ls, { id: `interrupted-${sender?.sid}-${event.seq}`, who: 'goko', text: 'Ответ Гоко прерван', final: true }));
@@ -461,6 +470,7 @@ export function useSession() {
         return;
       }
       setMic('on');
+      sendMicState(room, true);
       const currentMic = room.localParticipant.getTrackPublications().find((p) => p.kind === Track.Kind.Audio)?.track?.mediaStreamTrack ?? null;
       if (currentMic) monitorMic(room, currentMic);
     } catch {
@@ -473,7 +483,7 @@ export function useSession() {
       setMic('failed');
       setError('не удалось включить микрофон: разреши его в браузере или переключись на «Чат»');
     }
-  }, [connect, monitorMic]);
+  }, [connect, monitorMic, sendMicState]);
 
   const updatePrefs = useCallback((patch: Partial<Prefs>) => setPrefs((p) => ({ ...p, ...patch })), []);
 
@@ -481,6 +491,7 @@ export function useSession() {
   const sendText = useCallback(
     async (draft: string): Promise<string> => {
       if (!draft.trim()) return draft;
+      chatRequestVersion.current++;
       chatInFlight.current++;
       if (conversationRef.current === 'idle') {
         conversationAbort.current = new AbortController();
@@ -542,6 +553,7 @@ export function useSession() {
   }, [connect]);
   const startVoice = useCallback(async () => {
     const chatWasActive = conversationRef.current === 'chat';
+    const chatVersionAtStart = chatRequestVersion.current;
     if (conversationRef.current === 'idle') conversationAbort.current = new AbortController();
     const attempt = ++voiceAttempt.current;
     conversationRef.current = 'voice';
@@ -561,7 +573,7 @@ export function useSession() {
       );
     } catch {
       if (voiceAttempt.current === attempt) {
-        const fallback = voiceFailureMode(chatWasActive, chatInFlight.current > 0);
+        const fallback = voiceFailureMode(chatWasActive, chatRequestVersion.current > chatVersionAtStart, chatInFlight.current > 0);
         conversationRef.current = fallback;
         setConversation(fallback);
         if (fallback === 'chat') {
@@ -593,6 +605,7 @@ export function useSession() {
       return;
     }
     void sendMode(room, 'voice');
+    sendMicState(room, false);
     setMic('connecting');
     try {
       const publication = await publishGestureTrack(
@@ -607,6 +620,7 @@ export function useSession() {
       }
       monitorMic(room, publication.track?.mediaStreamTrack ?? acquiredTrack);
       setMic('on');
+      sendMicState(room, true);
     } catch {
       acquiredTrack.stop();
       if (voiceAttempt.current === attempt) {
@@ -614,7 +628,7 @@ export function useSession() {
         setError('не удалось опубликовать микрофон; повтори запуск голоса');
       }
     }
-  }, [connect, monitorMic, sendMode]);
+  }, [connect, monitorMic, sendMicState, sendMode]);
 
   const toggleMute = useCallback(async () => {
     if (conversation !== 'voice') return;
@@ -622,12 +636,13 @@ export function useSession() {
     if (!room) return startVoice();
     if (mic === 'on') {
       await room.localParticipant.setMicrophoneEnabled(false);
+      sendMicState(room, false);
       setMic('off');
       stopMeter.current?.();
       stopMeter.current = null;
       setAmplitude(0);
     } else await enableMic();
-  }, [conversation, mic, enableMic, startVoice]);
+  }, [conversation, mic, enableMic, sendMicState, startVoice]);
 
   const endConversation = useCallback(async () => {
     const endedAttempt = ++voiceAttempt.current;

@@ -180,6 +180,8 @@ export function createFakeClient(opts: FakeClientOptions = {}): FakeClient {
       record('analyze', o, id, req);
       throwPendingAny();
       return {
+        gameId: self.game?.id ?? id,
+        revision: self.game?.revision ?? 0,
         visits: 50,
         winrateB: 0.7,
         scoreLeadB: 6.2,
