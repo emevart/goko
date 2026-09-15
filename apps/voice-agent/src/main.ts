@@ -25,6 +25,7 @@ import { newAgentState } from './state.ts';
 import { createTools } from './tools.ts';
 import { sessionOptions } from './voice.ts';
 import { prepareRoomInput } from './room-input.ts';
+import { BoardAwareness } from './board-awareness.ts';
 
 const root = path.resolve(import.meta.dirname, '../../..');
 if (existsSync(path.join(root, '.env'))) process.loadEnvFile(path.join(root, '.env'));
@@ -93,13 +94,18 @@ async function runSession(ctx: JobContext, sessionId: string): Promise<void> {
   // Сигнал сеанса: закрытие сессии или остановка воркера обрывает поток и вызовы инструментов.
   // Долгоживущий сигнал в CallOptions допустим: клиент снимает свой слушатель после каждого вызова.
   const abort = new AbortController();
+  let liveBridge: LiveBridge | null = null;
+  const awareness = new BoardAwareness({
+    publish: context => liveBridge?.context(context),
+    analyze: (g, signal) => client.analyze(g.id,{maxVisits:50,expectedRevision:g.revision},{signal}),
+  });
+  abort.signal.addEventListener('abort',()=>awareness.close(),{once:true});
   // Приветствие не в onEnter, а после применения режима: в «Чате» оно должно прийти только текстом.
-  const agent = new GokoAgent(createTools({ client, state, log, signal: abort.signal, intent }), {
+  const agent = new GokoAgent(createTools({ client, state, log, signal: abort.signal, intent, awareness }), {
     greet: false,
     ...(voiceMode === 'live' ? { instructions: VOICE_INSTRUCTIONS } : {}),
   });
   const session = new voice.AgentSession(await sessionOptions(voiceMode));
-  let liveBridge: LiveBridge | null = null;
   let liveResponses: LiveResponseCoordinator | null = null;
   let resolveLiveBridge: (bridge: LiveBridge) => void = () => {};
   const liveBridgeReady = new Promise<LiveBridge>((resolve) => { resolveLiveBridge = resolve; });
@@ -259,6 +265,15 @@ async function runSession(ctx: JobContext, sessionId: string): Promise<void> {
       } : {}),
     }),
   });
+  if(liveBridge) {
+    const background = watchSession({client,state:newAgentState(sessionId),signal:abort.signal,log,speak:()=>{},
+      observe:ev=>{
+        if(ev.type==='session.game') awareness.clear(ev.gameId);
+        else if(ev.type==='state.updated') awareness.update(ev.state,ev.engineDecision);
+      },
+    });
+    void background.done;
+  }
   void watch.done;
 }
 

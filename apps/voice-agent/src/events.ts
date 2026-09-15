@@ -249,6 +249,7 @@ export function handleEvent(ev: GameEvent, state: AgentState, now: () => number 
 }
 
 export type WatchOptions = {
+  observe?: (event: GameEvent) => void;
   client: Pick<GokoClient, 'events'>;
   state: AgentState;
   speak: (text: string, meta?: EventSpeechMeta) => Promise<void> | void; // текст события; реплику строит event-speech.ts
@@ -348,6 +349,7 @@ export function watchSession(opts: WatchOptions): WatchHandle {
       let retryAfter = 0;
       try {
         for await (const ev of opts.client.events({ sessionId: opts.state.sessionId }, current.signal)) {
+          opts.observe?.(ev);
           const instructions = react(ev);
           if (instructions) {
             const observed = opts.state.observedRevision;

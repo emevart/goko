@@ -29,6 +29,7 @@ export type ToolClient = Pick<
 >;
 
 export type ToolDeps = {
+  awareness?: import('./board-awareness.ts').BoardAwareness;
   client: ToolClient;
   state: AgentState;
   signal?: AbortSignal; // сигнал сеанса воркера: уходит в каждый вызов клиента, долгоживущий — это можно (раздел 5 спеки)
@@ -561,7 +562,7 @@ export function createToolFns(deps: ToolDeps) {
         state.analysisAbort = { gameId, revision: g.revision, controller: revisionController };
         let a;
         try {
-          a = await client.analyze(gameId, { maxVisits: ASSESSMENT_VISITS, expectedRevision: g.revision }, { signal: revisionController.signal });
+          a = deps.awareness?.cached(g) ?? await client.analyze(gameId, { maxVisits: ASSESSMENT_VISITS, expectedRevision: g.revision }, { signal: revisionController.signal });
         } finally {
           signal?.removeEventListener('abort', onSessionAbort);
           if (state.analysisAbort?.controller === revisionController) state.analysisAbort = null;

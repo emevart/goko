@@ -3,6 +3,17 @@ import { IntentLedger } from './intent.ts';
 import { LiveBridge } from './live-bridge.ts';
 
 describe('LiveBridge', () => {
+  it('фоновый контекст объединяет снимки и не запускает речь или ответ backend',async()=>{
+    let release!:()=>void;const events:Array<Record<string,unknown>>=[];const thinking=vi.fn(),commentary=vi.fn(),wait=vi.fn();
+    const bridge=new LiveBridge({live:{sendEvent:e=>events.push(e),appendThinking:thinking,appendCommentary:commentary},intent:new IntentLedger(),waitUntilReady:()=>new Promise<void>(r=>{release=r}),waitForReply:wait});
+    bridge.context({compact:'old',detailed:'old board',current:()=>false});
+    await vi.waitFor(()=>expect(release).toBeDefined());
+    bridge.context({compact:'new',detailed:'new board',current:()=>true});release();
+    await vi.waitFor(()=>expect(thinking).toHaveBeenCalledWith('new'));
+    expect(events).toHaveLength(1);expect(events[0]).toMatchObject({type:'session.update'});
+    expect(JSON.stringify(events)).toContain('new board');expect(JSON.stringify(events)).not.toContain('old board');
+    expect(commentary).not.toHaveBeenCalled();expect(wait).not.toHaveBeenCalled();
+  });
   it('typed turn отправляет официальный item.create перед response.create и регистрирует точный intent', async () => {
     const events: unknown[] = [];
     const ledger = new IntentLedger();

@@ -1,4 +1,5 @@
 import { IntentLedger } from './intent.ts';
+import { BACKEND_INSTRUCTIONS } from './prompt.ts';
 
 export type LiveWire = {
   sendEvent(event: Record<string, unknown>): void;
@@ -7,6 +8,8 @@ export type LiveWire = {
 };
 
 export class LiveBridge {
+  private latestContext: import('./board-awareness.ts').BoardContext | null = null;
+  private contextPending = false;
   private tail: Promise<void> = Promise.resolve();
   private readonly deps: { live: LiveWire; intent: IntentLedger; waitUntilReady: () => Promise<void>; waitForReply: (kind: 'backend' | 'voice') => Promise<void> };
 
@@ -35,6 +38,20 @@ export class LiveBridge {
       });
       this.deps.live.sendEvent({ type: 'response.create' });
     });
+  }
+
+  context(value: import('./board-awareness.ts').BoardContext): void {
+    this.latestContext=value;
+    if(this.contextPending) return;
+    this.contextPending=true;
+    const run=this.tail.then(async()=>{
+      await this.deps.waitUntilReady();
+      const value=this.latestContext;this.latestContext=null;
+      if(!value?.current()) return;
+      this.deps.live.appendThinking(value.compact);
+      this.deps.live.sendEvent({type:'session.update',session:{delegation:{type:'responses',responses:{instructions:BACKEND_INSTRUCTIONS+'\n\n'+value.detailed}}}});
+    });
+    this.tail=run.catch(()=>{}).finally(()=>{this.contextPending=false;if(this.latestContext)this.context(this.latestContext);});
   }
 
   commentary(instructions: string, context?: string, guard?: () => boolean): Promise<void> {
