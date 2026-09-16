@@ -45,7 +45,7 @@ describe('промпт Гоко', () => {
   });
   it('backchannel не получает навязчивое «твой ход», а redo использует инструмент', () => {
     expect(INSTRUCTIONS).toContain('Не повторяй «твой ход» на каждый короткий отклик');
-    expect(INSTRUCTIONS).toContain('«верни отменённое», «вперёд» — redo');
+    expect(INSTRUCTIONS).toContain('«верни отменённое», «вперёд», «переиграем» — redo');
   });
   it('вопрос о факте не разрешает объявлять будущий ход или выдуманный план', () => {
     for (const prompt of [BACKEND_INSTRUCTIONS, VOICE_INSTRUCTIONS]) {

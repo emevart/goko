@@ -21,7 +21,7 @@ import {
 } from '@goko/protocol';
 import { colorName, describeResult, parseRank, speakMove, speakRank } from './phrases.ts';
 import { type AgentState, forgetFinishIfReopened, noteFinishRevision } from './state.ts';
-import { IntentLedger, type MutationIntent } from './intent.ts';
+import { historyCountIn, IntentLedger, type MutationIntent } from './intent.ts';
 import { boardStones } from './board-facts.ts';
 
 export type ToolClient = Pick<
@@ -50,6 +50,7 @@ export const FINISH_WAIT_MS = 22_000;
 // Итог берём из потока сессии (state.finished); get_game — запасной путь, не чаще раза в 2,5 с (R2).
 export const FINISH_POLL_MS = 2_500;
 export const FINISH_TICK_MS = 250;
+export const MAX_HISTORY_STEPS = 8;
 
 export const NETWORK_TEXT = 'нет связи с сервером';
 export const KOMI_TEXT = 'коми бывает только с половиной, от 0,5 до 13,5: например 6,5 или 7,5';
@@ -70,6 +71,7 @@ const UNDO_UNKNOWN_TEXT = 'отмена могла пройти. Не повто
 const REDO_UNKNOWN_TEXT = 'возврат мог пройти. Не повторяй возврат сам: посмотри позицию и скажи человеку';
 const STALE_GAME_TEXT = 'партия уже сменилась: посмотри текущую позицию и скажи человеку';
 const STARTING_GAME_TEXT = 'новая партия уже создаётся: дождись результата';
+const HISTORY_STEPS_TEXT = `можно отменить или вернуть от 1 до ${MAX_HISTORY_STEPS} порций за раз`;
 
 // Коми по протоколу — x.5 от 0,5 до 13,5 (иначе сервер ответит bad_request без понятной человеку причины).
 const komiValid = (komi: number): boolean => Number.isFinite(komi) && komi >= 0.5 && komi <= 13.5 && komi % 1 === 0.5;
@@ -197,6 +199,11 @@ export function createToolFns(deps: ToolDeps) {
     return blocked() ?? state.gameId;
   }
 
+  function historySteps(value: number | undefined): number | Fail {
+    if (value === undefined) return 1;
+    return Number.isInteger(value) && value >= 1 && value <= MAX_HISTORY_STEPS ? value : fail(HISTORY_STEPS_TEXT);
+  }
+
   // Последняя ревизия партии и число ходов в ней из ответов сервера инструментам. События потока сюда не
   // пишутся: state.updated о записанном ходе приходит раньше таймаута, и сверка в sendMove приняла бы
   // записанный ход за незаписанный.
@@ -304,6 +311,89 @@ export function createToolFns(deps: ToolDeps) {
     } finally {
       if (gameIsCurrent(gameId, generation) && state.awaitingFinish === gameId) state.awaitingFinish = null;
     }
+  }
+
+  async function undoOnce(gameId: string, generation: number) {
+    try {
+      const revision = await revisionFor(gameId, generation);
+      if (typeof revision !== 'number') return revision;
+      const res = await client.undo(gameId, { via: 'voice', expectedRevision: revision }, opts);
+      if (!resultIsCurrent(gameId, generation, res.state.revision)) return staleGame();
+      note(res.state);
+      // Удачная отмена возвращает партию в игру: итог, известный на ревизии старше ответа, устарел.
+      forgetFinishIfReopened(state, gameId, res.state.revision);
+      state.awaitingReply = false;
+      state.lastTap = null;
+      return {
+        ok: true as const,
+        removed: res.removed.map((m) => m.coord),
+        removedSpoken: res.removed.map((m) => speakMove(m.coord)),
+        toPlay: res.state.toPlay,
+        status: res.state.status,
+      };
+    } catch (e) {
+      if (!gameIsCurrent(gameId, generation)) return staleGame();
+      // Отмена могла пройти: перечитывание не скажет, чья она (две отмены подряд неотличимы), повтор снял бы
+      // лишние ходы.
+      const failed = reasonOf(e);
+      return maybeDone(e) ? fail(`${failed.reason}: ${UNDO_UNKNOWN_TEXT}`) : failed;
+    }
+  }
+
+  async function redoOnce(gameId: string, generation: number) {
+    try {
+      const revision = await revisionFor(gameId, generation);
+      if (typeof revision !== 'number') return revision;
+      const res = await client.redo(gameId, { via: 'voice', expectedRevision: revision }, opts);
+      if (!resultIsCurrent(gameId, generation, res.state.revision)) return staleGame();
+      const g = note(res.state);
+      state.awaitingReply = false;
+      state.awaitingFinish = null;
+      state.lastTap = null;
+      if (g.status === 'finished' && g.result) {
+        state.announcedFinish = g.id;
+        state.finished = { gameId: g.id, result: g.result };
+        noteFinishRevision(state, g.id, g.revision);
+      } else {
+        forgetFinishIfReopened(state, g.id, g.revision);
+      }
+      return {
+        ok: true as const,
+        restored: res.restored.map((m) => m.coord),
+        restoredSpoken: res.restored.map((m) => speakMove(m.coord)),
+        toPlay: g.toPlay,
+        status: g.status,
+        ...finishedFields(g),
+      };
+    } catch (e) {
+      if (!gameIsCurrent(gameId, generation)) return staleGame();
+      const failed = reasonOf(e);
+      return maybeDone(e) ? fail(`${failed.reason}: ${REDO_UNKNOWN_TEXT}`) : failed;
+    }
+  }
+
+  async function historyAction(kind: 'undo' | 'redo', requested: number | undefined) {
+    const count = historySteps(requested);
+    if (typeof count !== 'number') return count;
+    const guardedGame = gameGuard();
+    if (typeof guardedGame !== 'string') return guardedGame;
+    const generation = state.gameGeneration;
+    const results: Array<Awaited<ReturnType<typeof undoOnce>> | Awaited<ReturnType<typeof redoOnce>>> = [];
+    for (let i = 0; i < count; i++) {
+      const result = await (kind === 'undo' ? undoOnce(guardedGame, generation) : redoOnce(guardedGame, generation));
+      if (!result.ok) {
+        if (i === 0) return result;
+        return fail(`${kind === 'undo' ? 'отменено' : 'возвращено'} ${i} ${i === 1 ? 'порция' : 'порции'}; дальше: ${result.reason}`);
+      }
+      results.push(result);
+    }
+    const last = results.at(-1)!;
+    if (count === 1) return last;
+    const moves = kind === 'undo' ? results.flatMap((result) => ('removed' in result ? result.removed : [])) : results.flatMap((result) => ('restored' in result ? result.restored : []));
+    const spoken = kind === 'undo' ? results.flatMap((result) => ('removedSpoken' in result ? result.removedSpoken : [])) : results.flatMap((result) => ('restoredSpoken' in result ? result.restoredSpoken : []));
+    return kind === 'undo'
+      ? { ...last, removed: moves, removedSpoken: spoken, steps: count }
+      : { ...last, restored: moves, restoredSpoken: spoken, steps: count };
   }
 
   return {
@@ -445,70 +535,9 @@ export function createToolFns(deps: ToolDeps) {
       }
     },
 
-    async undo() {
-      const gameId = gameGuard();
-      if (typeof gameId !== 'string') return gameId;
-      const generation = state.gameGeneration;
-      try {
-        const revision = await revisionFor(gameId, generation);
-        if (typeof revision !== 'number') return revision;
-        const res = await client.undo(gameId, { via: 'voice', expectedRevision: revision }, opts);
-        if (!resultIsCurrent(gameId, generation, res.state.revision)) return staleGame();
-        note(res.state);
-        // Удачная отмена возвращает партию в игру: итог, известный на ревизии старше ответа, устарел.
-        forgetFinishIfReopened(state, gameId, res.state.revision);
-        state.awaitingReply = false;
-        state.lastTap = null;
-        return {
-          ok: true as const,
-          removed: res.removed.map((m) => m.coord),
-          removedSpoken: res.removed.map((m) => speakMove(m.coord)),
-          toPlay: res.state.toPlay,
-          status: res.state.status,
-        };
-      } catch (e) {
-        if (!gameIsCurrent(gameId, generation)) return staleGame();
-        // Отмена могла пройти: перечитывание не скажет, чья она (две отмены подряд неотличимы), повтор снял бы
-        // лишние ходы.
-        const failed = reasonOf(e);
-        return maybeDone(e) ? fail(`${failed.reason}: ${UNDO_UNKNOWN_TEXT}`) : failed;
-      }
-    },
+    async undo(args: { count?: number } = {}) { return historyAction('undo', args.count); },
 
-    async redo() {
-      const gameId = gameGuard();
-      if (typeof gameId !== 'string') return gameId;
-      const generation = state.gameGeneration;
-      try {
-        const revision = await revisionFor(gameId, generation);
-        if (typeof revision !== 'number') return revision;
-        const res = await client.redo(gameId, { via: 'voice', expectedRevision: revision }, opts);
-        if (!resultIsCurrent(gameId, generation, res.state.revision)) return staleGame();
-        const g = note(res.state);
-        state.awaitingReply = false;
-        state.awaitingFinish = null;
-        state.lastTap = null;
-        if (g.status === 'finished' && g.result) {
-          state.announcedFinish = g.id;
-          state.finished = { gameId: g.id, result: g.result };
-          noteFinishRevision(state, g.id, g.revision);
-        } else {
-          forgetFinishIfReopened(state, g.id, g.revision);
-        }
-        return {
-          ok: true as const,
-          restored: res.restored.map((m) => m.coord),
-          restoredSpoken: res.restored.map((m) => speakMove(m.coord)),
-          toPlay: g.toPlay,
-          status: g.status,
-          ...finishedFields(g),
-        };
-      } catch (e) {
-        if (!gameIsCurrent(gameId, generation)) return staleGame();
-        const failed = reasonOf(e);
-        return maybeDone(e) ? fail(`${failed.reason}: ${REDO_UNKNOWN_TEXT}`) : failed;
-      }
-    },
+    async redo(args: { count?: number } = {}) { return historyAction('redo', args.count); },
 
     async getPosition(): Promise<string> {
       const gameId = gameGuard();
@@ -681,25 +710,37 @@ export type ToolFns = ReturnType<typeof createToolFns>;
 export function createTools(deps: ToolDeps) {
   const fns = createToolFns(deps);
   const ledger = deps.intent ?? new IntentLedger();
+  let toolTail: Promise<unknown> = Promise.resolve();
   const tracked = <T, R>(name: string, run: (args: T) => Promise<R>) => async (args: T) => {
-    deps.onToolStateChange?.(true, name);
-    try {
-      return await run(args);
-    } finally {
-      deps.onToolStateChange?.(false, name);
-    }
+    // Модель может вернуть несколько function call одним ответом. Выполняем их
+    // строго в порядке поступления: start_game успевает создать партию до
+    // следующего play_move, а повторные undo/redo видят новую ревизию.
+    const operation = toolTail.then(async () => {
+      deps.onToolStateChange?.(true, name);
+      try {
+        return await run(args);
+      } finally {
+        deps.onToolStateChange?.(false, name);
+      }
+    });
+    toolTail = operation.catch(() => undefined);
+    return operation;
   };
   const guarded = <T extends { user_utterance: string }, R>(intent: MutationIntent, run: (args: Omit<T, 'user_utterance'>) => Promise<R>) => async (args: T) => {
     const { user_utterance: _utterance, ...rest } = args;
     const permit = await ledger.consume(intent, args.user_utterance, rest, 1_500, deps.signal);
     if (!permit.ok) return permit;
+    if ((intent === 'undo' || intent === 'redo') && (rest as { count?: number }).count === undefined) {
+      const inferred = historyCountIn(args.user_utterance);
+      if (inferred !== undefined) (rest as { count?: number }).count = inferred;
+    }
     return run(rest as Omit<T, 'user_utterance'>);
   };
   const utterance = z.string().min(1).describe('Полная дословная последняя реплика человека, вызвавшая это действие');
   return {
     start_game: llm.tool({
       description:
-        'Начать новую партию 13x13. my_color — цвет человека: black (чёрные, ходит первым) или white (белые; тогда Гоко ходит первым, его ход в firstMove). rank — уровень Гоко, например «10 кю» или «2 дан»; без него — прежний. komi — число с половиной от 0.5 до 13.5, по умолчанию 7.5.',
+        'Начать новую партию 13x13. my_color — цвет человека: black (чёрные, ходит первым) или white (белые; тогда Гоко ходит первым, его ход в firstMove). rank — уровень Гоко, например «10 кю» или «2 дан»; без него — прежний. komi — число с половиной от 0.5 до 13.5, по умолчанию 7.5. Если в той же реплике назван первый ход человека, после успешного start_game последовательно вызови play_move с этой координатой.',
       parameters: z.object({
         my_color: z.enum(['black', 'white']).optional(),
         rank: z.string().optional(),
@@ -729,14 +770,14 @@ export function createTools(deps: ToolDeps) {
       execute: tracked('resign', guarded('resign', () => fns.resign())),
     }),
     undo: llm.tool({
-      description: 'Отменить последний ход человека и ответ Гоко («отмени», «верни ход»).',
-      parameters: z.object({ user_utterance: utterance }),
-      execute: tracked('undo', guarded('undo', () => fns.undo())),
+      description: `Отменить последнюю порцию ходов («отмени», «верни ход»). count — сколько порций отменить последовательно (1–${MAX_HISTORY_STEPS}); одна порция обычно снимает ход человека и ответ Гоко. Для «отмени на три шага» передай count: 3.`,
+      parameters: z.object({ count: z.number().int().min(1).max(MAX_HISTORY_STEPS).optional(), user_utterance: utterance }),
+      execute: tracked('undo', guarded('undo', (args) => fns.undo(args))),
     }),
     redo: llm.tool({
-      description: 'Вернуть ровно последнюю отменённую порцию ходов («верни отменённое», «вперёд»). Если восстановлен итог, объявить result; иначе сказать, чей ход.',
-      parameters: z.object({ user_utterance: utterance }),
-      execute: tracked('redo', guarded('redo', () => fns.redo())),
+      description: `Вернуть отменённые порции ходов («верни отменённое», «вперёд»). count — сколько порций вернуть последовательно (1–${MAX_HISTORY_STEPS}); для «верни на три шага» передай count: 3. Если восстановлен итог, объявить result; иначе сказать, чей ход.`,
+      parameters: z.object({ count: z.number().int().min(1).max(MAX_HISTORY_STEPS).optional(), user_utterance: utterance }),
+      execute: tracked('redo', guarded('redo', (args) => fns.redo(args))),
     }),
     get_position: llm.tool({
       description: 'Текущая позиция: точный полный список камней по цветам, размер и ориентация ASCII-доски, последние ходы, пленные, чей ход. Для расположения доверяй списку камней, а ASCII используй только как схему.',

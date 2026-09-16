@@ -681,6 +681,17 @@ describe('pass / resign / undo', () => {
     expect(state.awaitingReply).toBe(false);
     expect(client.calls.at(-1)).toMatchObject({ method: 'undo', args: ['g1', { via: 'voice', expectedRevision: 2 }] });
   });
+  it('undo/redo count последовательно повторяет порцию и собирает результат', async () => {
+    const { fns, client } = await withGame({ replies: ['K10', 'D10'] });
+    await fns.playMove({ coord: 'D4' });
+    await fns.playMove({ coord: 'C3' });
+    const undone = await fns.undo({ count: 2 });
+    expect(undone).toMatchObject({ ok: true, steps: 2, removed: ['C3', 'D10', 'D4', 'K10'], status: 'playing' });
+    expect(client.calls.map((call) => call.method)).toEqual(['play', 'play', 'getGame', 'undo', 'getGame', 'undo']);
+    const redone = await fns.redo({ count: 2 });
+    expect(redone).toMatchObject({ ok: true, steps: 2, restored: ['D4', 'K10', 'C3', 'D10'], status: 'playing' });
+    expect(client.calls.map((call) => call.method).slice(-4)).toEqual(['getGame', 'redo', 'getGame', 'redo']);
+  });
   it('undo перечитывает актуальную ревизию перед мутацией', async () => {
     const { fns, state, client } = setup({ replies: ['K10'] });
     client.game = fakeGame({ id: 'g1', moves: [{ n: 1, color: 'B', coord: 'D4', captured: 0, at: 't' }], revision: 1 });
@@ -1050,6 +1061,36 @@ describe('createTools', () => {
     intent.add(text);
     await expect(tools.play_move.execute({ coord: 'D4', user_utterance: text }, {} as never)).resolves.toMatchObject({ ok: true });
     expect(activity).toEqual([[true, 'play_move'], [false, 'play_move']]);
+  });
+
+  it('последовательно выполняет start_game и play_move из одной реплики', async () => {
+    const client = createFakeClient({ replies: ['K10'] });
+    const state = newAgentState('s1');
+    const intent = new IntentLedger();
+    const tools = createTools({ client, state, intent });
+    const text = 'Новая партия, я чёрными, первый ход Д четыре';
+    intent.add(text);
+    const [start, move] = await Promise.all([
+      tools.start_game.execute({ my_color: 'black', user_utterance: text }, {} as never),
+      tools.play_move.execute({ coord: 'D4', user_utterance: text }, {} as never),
+    ]);
+    expect(start).toMatchObject({ ok: true, youPlay: 'black' });
+    expect(move).toMatchObject({ ok: true, yourMove: 'D4', myMove: 'K10' });
+    expect(client.calls.map((call) => call.method)).toEqual(['newGame', 'play']);
+  });
+
+  it('undo извлекает число порций из полной реплики, даже если модель не передала count', async () => {
+    const { client, state } = await withGame({ replies: ['K10', 'D10'] });
+    const intent = new IntentLedger();
+    const tools = createTools({ client, state, intent });
+    intent.add('Д четыре');
+    await tools.play_move.execute({ coord: 'D4', user_utterance: 'Д четыре' }, {} as never);
+    intent.add('Си три');
+    await tools.play_move.execute({ coord: 'C3', user_utterance: 'Си три' }, {} as never);
+    const text = 'Отмени на два шага';
+    intent.add(text);
+    await expect(tools.undo.execute({ user_utterance: text }, {} as never)).resolves.toMatchObject({ ok: true, steps: 2 });
+    expect(client.calls.filter((call) => call.method === 'undo')).toHaveLength(2);
   });
 
   it('проводит исходную регрессию К4 до игрового клиента', async () => {
