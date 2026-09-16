@@ -10,6 +10,8 @@ type SphereUniforms = {
   uDeformation: Uniform;
   uVoiceDeformation: Uniform;
   uBreath: Uniform;
+  uSurfaceContrast: Uniform;
+  uSpecular: Uniform;
   uPulse: Uniform;
   uColorA: Uniform;
   uColorB: Uniform;
@@ -31,7 +33,9 @@ const SPHERE_VERTEX = /* glsl */ `
   varying vec3 vNormal;
   varying vec3 vWorldPosition;
   varying float vField;
+  varying float vDetail;
   varying float vVoice;
+  varying float vShape;
 
   float hash3(vec3 p) {
     p = fract(p * 0.3183099 + vec3(0.1, 0.2, 0.3));
@@ -78,23 +82,28 @@ const SPHERE_VERTEX = /* glsl */ `
 
     float field = fbm(domain);
     float detail = fbm(domain * 2.15 - vec3(uTime * 0.31, uTime * 0.27, -uTime * 0.24));
-    float voice = smoothstep(0.015, 0.62, uLevel);
+    float voice = pow(smoothstep(0.008, 0.48, uLevel), 0.72);
     float ripple = 0.5 + 0.5 * sin(field * 9.0 + detail * 5.0 + uTime * (1.15 + flow));
+    float organic = (field - 0.5) * 1.2 + (detail - 0.5) * 0.34;
     float breath = sin(uTime * (0.72 + uPulse * 1.15) + field * 5.5) * uBreath;
-    float displacement = uDeformation * (0.34 + field * 0.88)
-      + uVoiceDeformation * voice * (0.18 + ripple * 0.92)
+    float displacement = uDeformation * organic
+      + uVoiceDeformation * voice * ((detail - 0.48) * 0.36 + 0.14 + ripple * 0.76)
       + breath;
 
     // Небольшое касательное смещение делает голосовую волну текучей, а не
     // равномерным увеличением сферы.
     vec3 tangent = normalize(vec3(direction.y + 0.001, -direction.z + 0.001, direction.x + 0.001));
-    float twist = sin(detail * 7.0 + uTime * 0.8) * uVoiceDeformation * voice * 0.018;
-    vec3 p = position + direction * displacement + tangent * twist;
+    vec3 bitangent = normalize(cross(direction, tangent));
+    float twist = sin(detail * 7.0 + uTime * 0.8) * uVoiceDeformation * voice * 0.032;
+    float flowWave = cos(field * 8.0 - detail * 4.0 + uTime * (1.4 + flow)) * uVoiceDeformation * voice * 0.018;
+    vec3 p = position + direction * displacement + tangent * twist + bitangent * flowWave;
     vec4 world = modelMatrix * vec4(p, 1.0);
     vWorldPosition = world.xyz;
-    vNormal = normalize(normalMatrix * direction);
+    vNormal = normalize(normalMatrix * normalize(direction + tangent * twist * 2.0 + bitangent * flowWave * 2.0));
     vField = field;
+    vDetail = detail;
     vVoice = voice;
+    vShape = displacement;
     gl_Position = projectionMatrix * viewMatrix * world;
   }
 `;
@@ -105,21 +114,35 @@ const SPHERE_FRAGMENT = /* glsl */ `
   uniform vec3 uColorB;
   uniform vec3 uGlow;
   uniform float uOpacity;
+  uniform float uSurfaceContrast;
+  uniform float uSpecular;
   varying vec3 vNormal;
   varying vec3 vWorldPosition;
   varying float vField;
+  varying float vDetail;
   varying float vVoice;
+  varying float vShape;
 
   void main() {
     vec3 viewDir = normalize(cameraPosition - vWorldPosition);
     vec3 normal = normalize(vNormal);
     float facing = max(dot(normal, viewDir), 0.0);
     float fresnel = pow(1.0 - facing, 2.35);
-    float light = 0.52 + 0.48 * max(dot(normal, normalize(vec3(-0.42, 0.76, 0.58))), 0.0);
-    float flowLight = smoothstep(0.1, 0.92, light + (vField - 0.4) * 0.22);
+    vec3 lightDir = normalize(vec3(-0.48, 0.74, 0.55));
+    float diffuse = max(dot(normal, lightDir), 0.0);
+    float backLight = max(dot(normal, -lightDir), 0.0);
+    float light = 0.32 + 0.68 * diffuse;
+    float flowLight = smoothstep(0.06, 0.96, light + (vField - 0.42) * 0.3);
+    float grain = 0.5 + 0.5 * sin(vField * 21.0 + vDetail * 14.0 + vShape * 18.0);
+    float structure = mix(0.7, 1.3, smoothstep(0.16, 0.84, grain));
     vec3 color = mix(uColorB, uColorA, flowLight);
-    color += uGlow * (fresnel * (0.74 + vVoice * 0.8) + vField * 0.055);
-    float alpha = uOpacity * (0.75 + light * 0.18 + fresnel * 0.2);
+    color *= mix(0.74, 1.28, clamp(structure * 0.48 + uSurfaceContrast * 0.45, 0.0, 1.0));
+    color += uColorB * backLight * 0.18;
+    float specular = pow(max(dot(reflect(-lightDir, normal), viewDir), 0.0), 18.0) * uSpecular;
+    float innerLight = pow(max(1.0 - facing, 0.0), 3.0) * (0.08 + vVoice * 0.13);
+    color += uGlow * (fresnel * (0.78 + vVoice * 1.35) + innerLight + vField * 0.07);
+    color += uColorA * specular * 1.35;
+    float alpha = uOpacity * (0.68 + light * 0.29 + fresnel * 0.24);
     gl_FragColor = vec4(color, alpha);
   }
 `;
@@ -162,8 +185,10 @@ function applyVisual(THREE: ThreeModule, visual: OrbVisual, sphereUniforms: Sphe
   sphereUniforms.uDeformation.value = visual.deformation;
   sphereUniforms.uVoiceDeformation.value = visual.voiceDeformation;
   sphereUniforms.uBreath.value = visual.breath;
+  sphereUniforms.uSurfaceContrast.value = visual.surfaceContrast;
+  sphereUniforms.uSpecular.value = visual.specular;
   sphereUniforms.uPulse.value = visual.pulse;
-  shellUniforms.uOpacity.value = 0.28 * visual.opacity;
+  shellUniforms.uOpacity.value = 0.42 * visual.opacity;
   root.scale.setScalar(visual.scale);
 }
 
@@ -213,6 +238,8 @@ export function VoiceOrb3D({ state, level }: Props) {
         uDeformation: { value: 0.02 },
         uVoiceDeformation: { value: 0 },
         uBreath: { value: 0.01 },
+        uSurfaceContrast: { value: 1 },
+        uSpecular: { value: 0.25 },
         uPulse: { value: 0.2 },
         uColorA: { value: new THREE.Color() },
         uColorB: { value: new THREE.Color() },
@@ -273,6 +300,9 @@ export function VoiceOrb3D({ state, level }: Props) {
         sphereUniforms.uTime.value = seconds * visual.speed * motion;
         sphereUniforms.uLevel.value = smoothedLevel;
         applyVisual(THREE, visual, sphereUniforms, shellUniforms, root);
+        // Голос слегка меняет и общий объём: реакция читается даже на маленьком экране,
+        // но амплитуда остаётся достаточно мягкой, чтобы не превращаться в прыжки.
+        root.scale.multiplyScalar(1 + motion * smoothedLevel * (0.018 + visual.voiceDeformation * 0.16));
         if (motion) {
           root.rotation.y += delta * 0.00008 * visual.speed;
           root.rotation.x = Math.sin(seconds * 0.35 * visual.speed) * 0.045;
