@@ -9,6 +9,7 @@ describe('модель орба', () => {
     expect(listening.colorA).not.toEqual(speaking.colorA);
     expect(listening.voiceDeformation).toBeGreaterThan(0);
     expect(orbVisualForState('thinking').voiceDeformation).toBe(0);
+    expect(speaking.specular).toBeGreaterThan(orbVisualForState('muted').specular);
   });
 
   it('интерполирует переход без скачка и ограничивает прогресс', () => {
@@ -17,6 +18,7 @@ describe('модель орба', () => {
     expect(mixOrbVisual(from, to, 0)).toEqual(from);
     expect(mixOrbVisual(from, to, 1)).toEqual(to);
     expect(mixOrbVisual(from, to, 0.5).scale).toBeCloseTo((from.scale + to.scale) / 2);
+    expect(mixOrbVisual(from, to, 0.5).surfaceContrast).toBeCloseTo((from.surfaceContrast + to.surfaceContrast) / 2);
     expect(mixOrbVisual(from, to, 3).opacity).toBe(to.opacity);
   });
 

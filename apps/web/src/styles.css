@@ -224,7 +224,7 @@ body { background: var(--bg); color: var(--fg); font: 16px/1.4 system-ui, -apple
   .chat-collapsed .transcript { display: none; }
   .chat-expanded .conversation { flex: 1; min-height: 170px; }
   .voice-orb { flex-basis: auto; }
-  .voice-orb-visual { width: 64px; }
+  .voice-orb-visual { width: 72px; }
   .voice-orb-label { font-size: 12px; }
   .status-main { font-size: 15px; height: 1.3em; -webkit-line-clamp: 1; line-clamp: 1; }
   .status-sub { font-size: 12px; min-height: 16px; }
