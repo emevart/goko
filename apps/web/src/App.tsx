@@ -8,6 +8,7 @@ import { NewGame } from './components/NewGame.tsx';
 import { StatusBar } from './components/StatusBar.tsx';
 import { Transcript } from './components/Transcript.tsx';
 import { VoiceOrb } from './components/VoiceOrb.tsx';
+import { MAX_LINES } from './transcript.ts';
 import { MoveHistory } from './components/MoveHistory.tsx';
 import { DiagnosticRecording } from './components/DiagnosticRecording.tsx';
 import { useGame } from './hooks/useGame.ts';
@@ -65,6 +66,7 @@ export function App() {
   const size = g.state?.settings.boardSize ?? 13;
   const keepAwake = useWakeLock();
   const agentHint = useAgentHint(sessionId, link === 'connected', agent);
+  const dialogCount = s.lines.length >= MAX_LINES ? `${MAX_LINES}+` : String(s.lines.length);
 
   // Ошибка связи с комнатой или микрофона уходит, когда причина прошла: вошли в комнату и микрофон не в отказе.
   useEffect(() => {
@@ -102,8 +104,8 @@ export function App() {
           <Board state={g.state} size={size} onTap={(coord) => void g.play(coord)} />
         </section>
         <section className="conversation" aria-label="разговор с Гоко">
-          <button type="button" className="chat-toggle" aria-expanded={chatOpen} onClick={() => setChatOpen(!chatOpen)}>Диалог {s.lines.length > 0 ? `· ${s.lines.length}` : ''} <span>{chatOpen ? '⌄' : '⌃'}</span></button>
-          {s.conversation === 'voice' && <VoiceOrb link={link} mic={mic} agentPresent={s.agentPresent} agentState={s.agentState} toolState={s.toolState} amplitude={s.amplitude} onToggle={() => void s.toggleMute()} />}
+          <button type="button" className="chat-toggle" aria-expanded={chatOpen} aria-label={s.lines.length >= MAX_LINES ? `Диалог, показаны последние ${MAX_LINES} реплик` : undefined} onClick={() => setChatOpen(!chatOpen)}>Диалог {s.lines.length > 0 ? `· ${dialogCount}` : ''} <span>{chatOpen ? '⌄' : '⌃'}</span></button>
+          {s.conversation === 'voice' && <VoiceOrb link={link} mic={mic} agentPresent={s.agentPresent} agentState={s.agentState} toolState={s.toolState} micLevel={s.micLevel} agentLevel={s.agentLevel} onToggle={() => void s.toggleMute()} />}
           {s.audioPlaybackError && <div className="playback-error">{s.audioPlaybackError} <button type="button" className="btn btn-inline btn-accent" onClick={() => void s.retryAudio()}>Включить звук</button></div>}
           <Transcript lines={s.lines} mode={s.prefs.mode} notice={agentHint ? AGENT_HINT_TEXT[agentHint] : null} />
           <ChatInput ready={agent} active={s.conversation !== 'idle'} hint={agentHint} onSend={async text => {setChatOpen(true); return onSend(text);}} voiceActive={s.conversation === 'voice'} voiceConnecting={mic === 'connecting'} onVoice={() => {keepAwake(); if (s.conversation === 'voice') void s.endConversation(); else void s.startVoice();}} />

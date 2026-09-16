@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { IntentLedger, mutationArgumentsMatch } from './intent.ts';
+import { historyCountIn, IntentLedger, mutationArgumentsMatch } from './intent.ts';
 
 describe('mutationArgumentsMatch', () => {
   it.each(['А мой первый ход черными К4', 'Я решил занять К4', 'Пусть это будет К4', 'Не D4, а К4, так и играю'])('принимает решение модели для %s', text => {
@@ -16,16 +16,58 @@ describe('mutationArgumentsMatch', () => {
     expect(mutationArgumentsMatch('play_move', text, { coord: 'D4' })).toBe(true);
     expect(mutationArgumentsMatch('play_move', text, { coord: 'E4' })).toBe(false);
   });
+  it('сверяет цвет старта по последнему явно названному цвету', () => {
+    expect(mutationArgumentsMatch('start_game', 'новая партия, я белыми', { my_color: 'white' })).toBe(true);
+    expect(mutationArgumentsMatch('start_game', 'не белыми, а чёрными', { my_color: 'black' })).toBe(true);
+    expect(mutationArgumentsMatch('start_game', 'новая партия, я белыми', { my_color: 'black' })).toBe(false);
+    expect(mutationArgumentsMatch('start_game', 'давай партию', { my_color: 'black' })).toBe(true);
+  });
+  it.each([
+    ['отмени последний ход', undefined],
+    ['отмени два хода', 2],
+    ['верни на 3 шага', 3],
+    ['отмени на несколько шагов', 2],
+    ['отмени восемь порций', 8],
+    ['отмени десять ходов', undefined],
+  ])('извлекает число порций: %s', (text, expected) => {
+    expect(historyCountIn(text)).toBe(expected);
+  });
 });
 
 describe('IntentLedger', () => {
-  it('потребляет один trusted final turn ровно один раз и требует полный текст', async () => {
+  it('потребляет один trusted final turn ровно один раз и принимает безопасное сокращение', async () => {
     const ledger = new IntentLedger();
     ledger.add('Поставь на E9');
     await expect(ledger.consume('play_move', 'Поставь на E9')).resolves.toMatchObject({ ok: true, turnId: 1 });
     await expect(ledger.consume('play_move', 'Поставь на E9', {}, 0)).resolves.toMatchObject({ ok: false });
     ledger.add('Поставь на E9');
-    await expect(ledger.consume('play_move', 'E9', {}, 0)).resolves.toMatchObject({ ok: false });
+    await expect(ledger.consume('play_move', 'E9', { coord: 'E9' }, 0)).resolves.toMatchObject({ ok: true, turnId: 2 });
+    await expect(ledger.consume('play_move', 'D4', { coord: 'D4' }, 0)).resolves.toMatchObject({ ok: false });
+  });
+
+  it('сверяет разговорные формы отмены, но не оживляет отрицание или старую реплику', async () => {
+    const ledger = new IntentLedger();
+    ledger.add('Давай отмотаем назад');
+    await expect(ledger.consume('undo', 'отмена', {}, 0)).resolves.toMatchObject({ ok: true, turnId: 1 });
+
+    const negated = new IntentLedger();
+    negated.add('Нет, ничего не отменяй');
+    await expect(negated.consume('undo', 'отмени', {}, 0)).resolves.toMatchObject({ ok: false });
+
+    const stale = new IntentLedger();
+    stale.add('Отмени');
+    stale.add('угу');
+    await expect(stale.consume('undo', 'отмени', {}, 0)).resolves.toMatchObject({ ok: false });
+  });
+
+  it('одна реплика подтверждает разные действия последовательно, но не дубли одного действия', async () => {
+    const ledger = new IntentLedger();
+    const text = 'Новая партия, я чёрными, первый ход Д четыре';
+    ledger.add(text);
+    await expect(ledger.consume('start_game', text, { my_color: 'black' }, 0)).resolves.toMatchObject({ ok: true, turnId: 1 });
+    await expect(ledger.consume('play_move', text, { coord: 'D4' }, 0)).resolves.toMatchObject({ ok: true, turnId: 1 });
+    await expect(ledger.consume('start_game', text, { my_color: 'black' }, 0)).resolves.toMatchObject({ ok: false });
+    await expect(ledger.consume('play_move', text, { coord: 'D4' }, 0)).resolves.toMatchObject({ ok: false });
   });
 
   it('bounded ждёт final, а timeout и server commentary fail closed', async () => {
