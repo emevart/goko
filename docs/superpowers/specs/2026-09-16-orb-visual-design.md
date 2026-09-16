@@ -1,5 +1,5 @@
 ---
-status: draft
+status: implemented
 area: design
 updated: 2026-09-16
 ---

@@ -104,7 +104,10 @@ body { background: var(--bg); color: var(--fg); font: 16px/1.4 system-ui, -apple
 .chat-field { resize: none; padding: 10px; line-height: 1.35; }
 .playback-error { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: #9b341f; }
 .voice-orb { --level: 0; position: relative; flex: 0 0 112px; display: grid; justify-items: center; align-content: center; gap: 7px; border: 0; background: transparent; color: inherit; cursor: pointer; font: inherit; }
-.voice-orb-core { width: 82px; height: 82px; border-radius: 50%; background: radial-gradient(circle at 35% 30%, #f1dcae, var(--accent)); box-shadow: 0 0 calc(12px + var(--level) * 26px) color-mix(in srgb, var(--accent) 60%, transparent); transform: scale(calc(1 + var(--level) * .12)); animation: orb-idle 4s ease-in-out infinite; transition: transform 100ms linear, box-shadow 100ms linear; }
+.voice-orb-visual { position: relative; width: 82px; height: 82px; display: grid; place-items: center; isolation: isolate; transition: transform 240ms ease; }
+.voice-orb-visual::before { content: ''; position: absolute; inset: 6px; z-index: -1; border-radius: 50%; background: radial-gradient(circle, color-mix(in srgb, var(--accent) 35%, transparent), transparent 68%); filter: blur(9px); opacity: .7; transform: scale(calc(1 + var(--level) * .16)); transition: transform 120ms linear, opacity 240ms ease; }
+.voice-orb-core { position: absolute; inset: 8px; z-index: 0; border-radius: 50%; background: radial-gradient(circle at 35% 30%, #f1dcae, var(--accent)); box-shadow: 0 0 calc(12px + var(--level) * 26px) color-mix(in srgb, var(--accent) 60%, transparent); transform: scale(calc(1 + var(--level) * .12)); animation: orb-idle 4s ease-in-out infinite; transition: transform 100ms linear, box-shadow 100ms linear; }
+.voice-orb-canvas { position: absolute; inset: 0; z-index: 1; display: block; width: 100%; height: 100%; pointer-events: none; }
 .voice-orb-speaking .voice-orb-core { background: radial-gradient(circle at 35% 30%, #fff0c8, #bf6f45); }
 .voice-orb-speaking .voice-orb-core { animation: orb-speaking .8s ease-in-out infinite; }
 .voice-orb-listening .voice-orb-core { background: radial-gradient(circle at 35% 30%, #d9f2df, #4d9b73); animation: orb-listening 1.5s ease-in-out infinite; }
@@ -113,13 +116,16 @@ body { background: var(--bg); color: var(--fg); font: 16px/1.4 system-ui, -apple
 .voice-orb-connecting .voice-orb-core { opacity: .55; }
 .voice-orb-muted .voice-orb-core { filter: grayscale(.7); opacity: .65; animation-duration: 5s; }
 .voice-orb-error .voice-orb-core { background: radial-gradient(circle at 35% 30%, #f5d0c9, #b55c54); opacity: .8; }
-.voice-orb-label { font-size: 14px; color: var(--muted); }
+.voice-orb-label { position: relative; z-index: 2; font-size: 14px; color: var(--muted); }
+.voice-orb:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; border-radius: 14px; }
+.voice-orb:hover .voice-orb-visual { transform: translateY(-1px) scale(1.02); }
+.voice-orb:active .voice-orb-visual { transform: scale(.96); }
 @keyframes orb-idle { 50% { transform: scale(calc(1.025 + var(--level) * .12)); } }
 @keyframes orb-speaking { 50% { transform: scale(calc(1.05 + var(--level) * .16)); } }
 @keyframes orb-listening { 50% { transform: scale(calc(1.045 + var(--level) * .12)); } }
 @keyframes orb-thinking { 0%,100% { transform: scale(calc(1 + var(--level) * .08)) rotate(0deg); filter: hue-rotate(0deg); } 50% { transform: scale(calc(1.035 + var(--level) * .08)) rotate(8deg); filter: hue-rotate(18deg); } }
 @keyframes orb-tool { to { transform: rotate(360deg) scale(calc(1.035 + var(--level) * .1)); } }
-@media (prefers-reduced-motion: reduce) { .voice-orb-core { animation: none; transition: none; } }
+@media (prefers-reduced-motion: reduce) { .voice-orb-core, .voice-orb-visual, .voice-orb-visual::before { animation: none; transition: none; } }
 .move-history ol { max-height: 150px; overflow-y: auto; margin: 4px 0 0; padding: 0; list-style: none; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 3px 12px; }
 .move-history li { display: flex; gap: 7px; align-items: center; padding: 3px 5px; border-radius: 6px; }
 .move-last { background: color-mix(in srgb, var(--accent) 14%, transparent); font-weight: 600; }
@@ -147,7 +153,8 @@ body { background: var(--bg); color: var(--fg); font: 16px/1.4 system-ui, -apple
   .chat-collapsed .transcript { display: none; }
   .chat-expanded .conversation { flex: 1; min-height: 170px; }
   .voice-orb { flex-basis: 50px; }
-  .voice-orb-core { width: 42px; height: 42px; }
+  .voice-orb-visual { width: 42px; height: 42px; }
+  .voice-orb-core { inset: 4px; }
   .voice-orb-label { font-size: 12px; }
   .status-main { font-size: 15px; height: 1.3em; -webkit-line-clamp: 1; line-clamp: 1; }
   .status-sub { font-size: 12px; min-height: 16px; }

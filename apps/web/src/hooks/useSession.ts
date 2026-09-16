@@ -72,7 +72,10 @@ export function useSession() {
   const [toolState, setToolState] = useState<string>('idle');
   const [conversation, setConversation] = useState<ConversationState>('idle');
   const conversationRef = useRef<ConversationState>('idle');
-  const [amplitude, setAmplitude] = useState(0);
+  // Орб получает два независимых канала: микрофон человека и удалённую речь Гоко.
+  // Смешивать их нельзя: кашель не должен выглядеть как речь Гоко и наоборот.
+  const [micLevel, setMicLevel] = useState(0);
+  const [agentLevel, setAgentLevel] = useState(0);
   const [audioPlaybackError, setAudioPlaybackError] = useState<string | null>(null);
   const recorderRef = useRef(new DiagnosticRecorder());
   const [recording, setRecording] = useState<RecordingSnapshot>(recorderRef.current.getSnapshot());
@@ -87,6 +90,7 @@ export function useSession() {
   const micTrack = useRef<RecorderTrack | null>(null);
   const remoteAgentTrack = useRef<RecorderTrack | null>(null);
   const stopMeter = useRef<(() => void) | null>(null);
+  const stopAgentMeter = useRef<(() => void) | null>(null);
   const readyListeners = useRef(new Set<() => void>());
   const voiceAttempt = useRef(0);
   const gestureAudio = useRef<AudioContext | null>(null);
@@ -127,6 +131,7 @@ export function useSession() {
       roomRef.current = null;
       joining.current = null;
       stopMeter.current?.();
+      stopAgentMeter.current?.();
       void gestureAudio.current?.close();
       void recorderRef.current.dispose().finally(() => room?.disconnect());
     },
@@ -158,7 +163,10 @@ export function useSession() {
     remoteAgentTrack.current = null;
     stopMeter.current?.();
     stopMeter.current = null;
-    setAmplitude(0);
+    stopAgentMeter.current?.();
+    stopAgentMeter.current = null;
+    setMicLevel(0);
+    setAgentLevel(0);
     void recorderRef.current.stop('disconnect').finally(() => room?.disconnect());
     setMic('off');
     setLink('idle');
@@ -186,6 +194,31 @@ export function useSession() {
   }, []);
   const sendMicState = useCallback((room: Room, active: boolean) => {
     void room.localParticipant.setAttributes({ 'goko.mic': active ? 'on' : 'muted' }).catch(() => {});
+  }, []);
+
+  // Уровень удалённой дорожки живёт отдельно от микрофона: после mute Гоко всё ещё может говорить,
+  // и орб должен продолжать реагировать на его речь.
+  const monitorAgentLevel = useCallback((room: Room) => {
+    stopAgentMeter.current?.();
+    let frame = 0;
+    let running = true;
+    let previousLevel = 0;
+    const tick = () => {
+      if (!running) return;
+      const participantLevel = agentBinding.current ? room.remoteParticipants.get(agentBinding.current.identity)?.audioLevel ?? 0 : 0;
+      const nextLevel = conversationRef.current === 'voice' ? Math.min(1, Math.max(participantLevel, 0)) : 0;
+      if (Math.abs(nextLevel - previousLevel) >= 0.01) {
+        previousLevel = nextLevel;
+        setAgentLevel(nextLevel);
+      }
+      frame = requestAnimationFrame(tick);
+    };
+    frame = requestAnimationFrame(tick);
+    stopAgentMeter.current = () => {
+      running = false;
+      cancelAnimationFrame(frame);
+      setAgentLevel(0);
+    };
   }, []);
 
   // Вход в комнату, идемпотентный: повторные касания получают тот же промис.
@@ -307,7 +340,10 @@ export function useSession() {
       void recorderRef.current.stop('disconnect');
       stopMeter.current?.();
       stopMeter.current = null;
-      setAmplitude(0);
+      stopAgentMeter.current?.();
+      stopAgentMeter.current = null;
+      setMicLevel(0);
+      setAgentLevel(0);
       // Состояние — только для вошедшей и не сброшенной комнаты: неудачный вход livekit тоже завершает событием
       // Disconnected (до отказа connect), а комната после reset не должна сбрасывать вход новой сессии.
       if (roomRef.current !== room) return;
@@ -422,6 +458,7 @@ export function useSession() {
         return null;
       }
       roomRef.current = room;
+      monitorAgentLevel(room);
       recorderRef.current.trace('room.connected', { generation: gen });
       saveStored(sessionInfo); // вход удался — сессия переживает перезагрузку вкладки
       // Режим — сразу после входа и без ожидания: агент ждёт goko.mode перед приветствием не дольше 2 с, а
@@ -437,12 +474,15 @@ export function useSession() {
     })();
     joining.current = joined;
     return joined;
-  }, [info, ensureSession, sendMode, reset]);
+  }, [info, ensureSession, monitorAgentLevel, sendMode, reset]);
 
-  const monitorMic = useCallback((room: Room, currentMic: RecorderTrack) => {
+  const monitorMic = useCallback((_room: Room, currentMic: RecorderTrack) => {
     micTrack.current = currentMic;
     stopMeter.current?.();
-    const stopTrackEnd = watchTrackEnd(currentMic, () => void recorderRef.current.stop('track-change'));
+    const stopTrackEnd = watchTrackEnd(currentMic, () => {
+      setMicLevel(0);
+      void recorderRef.current.stop('track-change');
+    });
     stopMeter.current = stopTrackEnd;
     if (typeof AudioContext === 'undefined') return;
     try {
@@ -458,8 +498,7 @@ export function useSession() {
         analyser.getByteTimeDomainData(samples);
         let energy = 0;
         for (const sample of samples) energy += ((sample - 128) / 128) ** 2;
-        const participantLevel = agentBinding.current ? room.remoteParticipants.get(agentBinding.current.identity)?.audioLevel ?? 0 : 0;
-        setAmplitude(Math.min(1, Math.max(Math.sqrt(energy / samples.length) * 3, participantLevel)));
+        setMicLevel(Math.min(1, Math.max(Math.sqrt(energy / samples.length) * 3, 0)));
         frame = requestAnimationFrame(tick);
       };
       frame = requestAnimationFrame(tick);
@@ -661,7 +700,7 @@ export function useSession() {
       setMic('off');
       stopMeter.current?.();
       stopMeter.current = null;
-      setAmplitude(0);
+      setMicLevel(0);
     } else await enableMic();
   }, [conversation, mic, enableMic, sendMicState, startVoice]);
 
@@ -698,7 +737,8 @@ export function useSession() {
     remoteAgentTrack.current = null;
     stopMeter.current?.();
     stopMeter.current = null;
-    setAmplitude(0);
+    setMicLevel(0);
+    setAgentLevel(0);
     setMic('off');
     setLink('idle');
     setAgent(false);
@@ -727,7 +767,8 @@ export function useSession() {
     agentState,
     toolState,
     conversation,
-    amplitude,
+    micLevel,
+    agentLevel,
     prefs,
     error,
     audioPlaybackError,

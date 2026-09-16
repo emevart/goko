@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { voiceOrbPresentation } from './components/VoiceOrb.tsx';
+import { voiceOrbLevel, voiceOrbPresentation } from './components/VoiceOrb.tsx';
 
 describe('VoiceOrb', () => {
   it('не утверждает присутствие Гоко до binding trusted AGENT', () => {
@@ -25,5 +25,11 @@ describe('VoiceOrb', () => {
       state: 'connecting',
       label: 'Соединяюсь',
     });
+  });
+
+  it('реагирует только на канал уровня активного говорящего', () => {
+    expect(voiceOrbLevel('listening', 0.7, 1)).toBe(0.7);
+    expect(voiceOrbLevel('speaking', 0.2, 0.8)).toBe(0.8);
+    expect(voiceOrbLevel('tool', 1, 1)).toBe(0);
   });
 });
