@@ -47,6 +47,12 @@ describe('промпт Гоко', () => {
     expect(INSTRUCTIONS).toContain('Не повторяй «твой ход» на каждый короткий отклик');
     expect(INSTRUCTIONS).toContain('«верни отменённое», «вперёд», «переиграем» — redo');
   });
+  it('проверка позиции остаётся внутренней и может быть озвучена только при долгом ожидании', () => {
+    expect(INSTRUCTIONS).toContain('«сверюсь с позицией»');
+    expect(INSTRUCTIONS).toContain('это уже показывает орб');
+    expect(VOICE_INSTRUCTIONS).toContain('сверюсь с позицией');
+    expect(VOICE_INSTRUCTIONS).toContain('не комментируй вслух');
+  });
   it('вопрос о факте не разрешает объявлять будущий ход или выдуманный план', () => {
     for (const prompt of [BACKEND_INSTRUCTIONS, VOICE_INSTRUCTIONS]) {
       expect(prompt).toContain('Отвечай ровно на заданный вопрос');
