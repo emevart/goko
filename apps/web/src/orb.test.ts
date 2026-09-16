@@ -7,6 +7,8 @@ describe('модель орба', () => {
     const speaking = orbVisualForState('speaking');
     expect(listening.pulse).toBeLessThan(speaking.pulse);
     expect(listening.colorA).not.toEqual(speaking.colorA);
+    expect(listening.voiceDeformation).toBeGreaterThan(0);
+    expect(orbVisualForState('thinking').voiceDeformation).toBe(0);
   });
 
   it('интерполирует переход без скачка и ограничивает прогресс', () => {
@@ -28,5 +30,7 @@ describe('модель орба', () => {
     expect(transitionProgress(-1, 460)).toBe(0);
     expect(transitionProgress(230, 460)).toBeCloseTo(0.5);
     expect(transitionProgress(1000, 460)).toBe(1);
+    expect(transitionProgress(46, 460)).toBeLessThan(0.1);
+    expect(transitionProgress(414, 460)).toBeGreaterThan(0.9);
   });
 });
