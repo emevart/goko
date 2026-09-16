@@ -22,6 +22,7 @@ import {
 import { colorName, describeResult, parseRank, speakMove, speakRank } from './phrases.ts';
 import { type AgentState, forgetFinishIfReopened, noteFinishRevision } from './state.ts';
 import { IntentLedger, type MutationIntent } from './intent.ts';
+import { boardStones } from './board-facts.ts';
 
 export type ToolClient = Pick<
   GokoClient,
@@ -37,6 +38,7 @@ export type ToolDeps = {
   now?: () => number;
   log?: (line: string) => void;
   intent?: IntentLedger;
+  onToolStateChange?: (busy: boolean, toolName: string) => void;
 };
 
 export const ASSESSMENT_VISITS = 50;
@@ -531,12 +533,19 @@ export function createToolFns(deps: ToolDeps) {
         .slice(-6)
         .map((m) => `${m.n}. ${colorName(m.color)} ${m.coord === 'pass' ? 'пас' : m.coord}`)
         .join('; ');
+      const stones = boardStones(g);
+      const stonesSpoken = {
+        black: stones.black.map(speakMove),
+        white: stones.white.map(speakMove),
+      };
       const turn = g.status === 'finished' ? 'партия окончена' : turnOf(g);
       // humanFallback приходит только событием state.updated хода движка (events.ts запоминает номер хода).
       const fallback = state.fallbackMove === null ? undefined : g.moves.find((m) => m.n === state.fallbackMove);
       return [
         `Ориентация: доска ${g.settings.boardSize} на ${g.settings.boardSize}; строки идут сверху от ${g.settings.boardSize} вниз до 1, столбцы слева направо A–N без I.`,
         `# ${g.id} rev ${g.revision} ${g.status} toPlay ${g.toPlay} moves ${g.moves.length}`,
+        `Канонический список камней по цветам (точный список сервера; доверяй ему, ASCII ниже только схема): ${JSON.stringify(stones)}`,
+        `Произношение координат из списка: чёрные: ${stonesSpoken.black.join(', ') || 'нет'}; белые: ${stonesSpoken.white.join(', ') || 'нет'}`,
         board.trimEnd(),
         `Последние ходы: ${last || 'нет'}`,
         `Пленные: чёрные сняли ${g.captures.B}, белые сняли ${g.captures.W}`,
@@ -672,6 +681,14 @@ export type ToolFns = ReturnType<typeof createToolFns>;
 export function createTools(deps: ToolDeps) {
   const fns = createToolFns(deps);
   const ledger = deps.intent ?? new IntentLedger();
+  const tracked = <T, R>(name: string, run: (args: T) => Promise<R>) => async (args: T) => {
+    deps.onToolStateChange?.(true, name);
+    try {
+      return await run(args);
+    } finally {
+      deps.onToolStateChange?.(false, name);
+    }
+  };
   const guarded = <T extends { user_utterance: string }, R>(intent: MutationIntent, run: (args: Omit<T, 'user_utterance'>) => Promise<R>) => async (args: T) => {
     const { user_utterance: _utterance, ...rest } = args;
     const permit = await ledger.consume(intent, args.user_utterance, rest, 1_500, deps.signal);
@@ -689,50 +706,50 @@ export function createTools(deps: ToolDeps) {
         komi: z.number().optional(),
         user_utterance: utterance,
       }),
-      execute: guarded('start_game', (args) => fns.startGame({ ...args, rank: args.rank?.trim() || undefined })),
+      execute: tracked('start_game', guarded('start_game', (args) => fns.startGame({ ...args, rank: args.rank?.trim() || undefined }))),
     }),
     play_move: llm.tool({
       description: 'Применить ход человека. coord — латиницей: буква столбца A–N без I и число 1–13, например D4. Ответный ход Гоко приходит в myMove.',
       parameters: z.object({ coord: z.string().describe('Например D4'), user_utterance: utterance }),
-      execute: guarded('play_move', (args) => fns.playMove(args)),
+      execute: tracked('play_move', guarded('play_move', (args) => fns.playMove(args))),
     }),
     correct_last_move: llm.tool({
       description: 'Человек поправил свой последний ход («нет, дэ пять»): заменить его на coord. Ответ как у play_move.',
       parameters: z.object({ coord: z.string().describe('Например D5'), user_utterance: utterance }),
-      execute: guarded('correct_last_move', (args) => fns.correctLastMove(args)),
+      execute: tracked('correct_last_move', guarded('correct_last_move', (args) => fns.correctLastMove(args))),
     }),
     pass: llm.tool({
       description: 'Человек пасует. Если Гоко тоже пасует, партия завершается и приходит result.',
       parameters: z.object({ user_utterance: utterance }),
-      execute: guarded('pass', () => fns.pass()),
+      execute: tracked('pass', guarded('pass', () => fns.pass())),
     }),
     resign: llm.tool({
       description: 'Человек сдаётся (в партии двух людей — тот, чей сейчас ход). Возвращает result.',
       parameters: z.object({ user_utterance: utterance }),
-      execute: guarded('resign', () => fns.resign()),
+      execute: tracked('resign', guarded('resign', () => fns.resign())),
     }),
     undo: llm.tool({
       description: 'Отменить последний ход человека и ответ Гоко («отмени», «верни ход»).',
       parameters: z.object({ user_utterance: utterance }),
-      execute: guarded('undo', () => fns.undo()),
+      execute: tracked('undo', guarded('undo', () => fns.undo())),
     }),
     redo: llm.tool({
       description: 'Вернуть ровно последнюю отменённую порцию ходов («верни отменённое», «вперёд»). Если восстановлен итог, объявить result; иначе сказать, чей ход.',
       parameters: z.object({ user_utterance: utterance }),
-      execute: guarded('redo', () => fns.redo()),
+      execute: tracked('redo', guarded('redo', () => fns.redo())),
     }),
     get_position: llm.tool({
-      description: 'Текущая позиция: размер и ориентация ASCII-доски, последние ходы, пленные, чей ход. Зови, когда спрашивают о доске или ты не уверен, что было.',
-      execute: () => fns.getPosition(),
+      description: 'Текущая позиция: точный полный список камней по цветам, размер и ориентация ASCII-доски, последние ходы, пленные, чей ход. Для расположения доверяй списку камней, а ASCII используй только как схему.',
+      execute: tracked('get_position', () => fns.getPosition()),
     }),
     get_assessment: llm.tool({
       description: 'Оценка позиции: кто впереди и на сколько, слабые группы со всеми камнями и свободами, кандидаты с оценками. Кандидаты и оценки называй только по прямой просьбе подсказать ход.',
-      execute: () => fns.getAssessment(),
+      execute: tracked('get_assessment', () => fns.getAssessment()),
     }),
     set_rank: llm.tool({
       description: 'Сменить уровень Гоко: rank словами человека, например «5 кю», «1 дан».',
       parameters: z.object({ rank: z.string(), user_utterance: utterance }),
-      execute: guarded('set_rank', (args) => fns.setRank(args)),
+      execute: tracked('set_rank', guarded('set_rank', (args) => fns.setRank(args))),
     }),
   };
 }

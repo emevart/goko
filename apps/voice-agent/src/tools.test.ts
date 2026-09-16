@@ -1,5 +1,6 @@
 import { getEventListeners } from 'node:events';
 import { describe, expect, it, vi } from 'vitest';
+import { coordToIndex, withCells } from '@goko/go-core';
 import { ApiError, ClientTimeoutError, type GameState, HttpError, humanText } from '@goko/protocol';
 import { type AgentState, newAgentState } from './state.ts';
 import { handleEvent } from './events.ts';
@@ -933,6 +934,20 @@ describe('pass / resign / undo', () => {
 });
 
 describe('get_position / get_assessment / set_rank', () => {
+  it('позиция отдаёт полный явный список камней по цветам, а не только ASCII', async () => {
+    const { fns, client } = await withGame();
+    const g = gameOf(client);
+    g.board = withCells(g.board, [
+      [coordToIndex('D4', 13), 'B'],
+      [coordToIndex('M10', 13), 'B'],
+      [coordToIndex('K12', 13), 'W'],
+      [coordToIndex('N8', 13), 'W'],
+    ]);
+    const text = await fns.getPosition();
+    expect(text).toContain('Канонический список камней по цветам (точный список сервера; доверяй ему, ASCII ниже только схема): {"black":["M10","D4"],"white":["K12","N8"]}');
+    expect(text).toContain('Произношение координат из списка: чёрные: эм десять, дэ четыре; белые: ка двенадцать, эн восемь');
+  });
+
   it('позиция: доска, последние 6 ходов, пленные, чей ход', async () => {
     const { fns, client } = await withGame({ replies: ['K10', 'D10', 'K4', 'G7'] });
     for (const c of ['D4', 'C3', 'E3', 'F4']) await fns.playMove({ coord: c });
@@ -1026,6 +1041,17 @@ describe('get_position / get_assessment / set_rank', () => {
 });
 
 describe('createTools', () => {
+  it('сообщает начало и конец работы инструмента для состояния орба', async () => {
+    const { client, state } = await withGame();
+    const intent = new IntentLedger();
+    const activity: Array<[boolean, string]> = [];
+    const tools = createTools({ client, state, intent, onToolStateChange: (busy, name) => activity.push([busy, name]) });
+    const text = 'Д четыре';
+    intent.add(text);
+    await expect(tools.play_move.execute({ coord: 'D4', user_utterance: text }, {} as never)).resolves.toMatchObject({ ok: true });
+    expect(activity).toEqual([[true, 'play_move'], [false, 'play_move']]);
+  });
+
   it('проводит исходную регрессию К4 до игрового клиента', async () => {
     const { client, state } = await withGame();
     const intent = new IntentLedger();

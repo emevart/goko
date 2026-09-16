@@ -2,7 +2,7 @@
 // «Голос / Чат» атрибутом goko.mode, микрофон, чат и лента диалога. Комнат страница не создаёт (D-0001).
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { LocalAudioTrack, ParticipantKind, Room, RoomEvent, Track } from 'livekit-client';
-import { cleanSpeechTranscript, CONVERSATION_TOPIC, CreateSessionResponse } from '@goko/protocol';
+import { CONVERSATION_TOPIC, CreateSessionResponse, formatSpeechTranscript } from '@goko/protocol';
 import { client } from '../api.ts';
 import { agentReady, sendChat } from '../chat.ts';
 import { type Mode, type Prefs, loadPrefs, modeAttributes, savePrefs } from '../prefs.ts';
@@ -69,6 +69,7 @@ export function useSession() {
   const [agent, setAgent] = useState(false);
   const [agentPresent, setAgentPresent] = useState(false);
   const [agentState, setAgentState] = useState<string>('connecting');
+  const [toolState, setToolState] = useState<string>('idle');
   const [conversation, setConversation] = useState<ConversationState>('idle');
   const conversationRef = useRef<ConversationState>('idle');
   const [amplitude, setAmplitude] = useState(0);
@@ -164,6 +165,7 @@ export function useSession() {
     setAgent(false);
     setAgentPresent(false);
     setAgentState('connecting');
+    setToolState('idle');
     setConversation('idle');
     conversationRef.current = 'idle';
     setLines([]);
@@ -232,6 +234,7 @@ export function useSession() {
       setAgentPresent(Boolean(p));
       setAgent(Boolean(p && agentReady(p.attributes)));
       setAgentState(p?.attributes['lk.agent.state'] ?? (p ? 'initializing' : 'connecting'));
+      setToolState(p?.attributes['goko.tool'] ?? 'idle');
       for (const notify of readyListeners.current) notify();
       if (!p) remoteAgentTrack.current = null;
     };
@@ -276,7 +279,10 @@ export function useSession() {
     });
     room.on(RoomEvent.ParticipantAttributesChanged, (_attrs, participant) => {
       refreshAgent();
-      if (agentBinding.current?.sid === participant.sid) setAgentState(participant.attributes['lk.agent.state'] ?? 'initializing');
+      if (agentBinding.current?.sid === participant.sid) {
+        setAgentState(participant.attributes['lk.agent.state'] ?? 'initializing');
+        setToolState(participant.attributes['goko.tool'] ?? 'idle');
+      }
     });
     room.on(RoomEvent.AudioPlaybackStatusChanged, (playing) => {
       recorderRef.current.trace('room.audio-playback', { playing });
@@ -312,6 +318,7 @@ export function useSession() {
       setAgent(false);
       setAgentPresent(false);
       setAgentState('connecting');
+      setToolState('idle');
     });
     // Регистрировать до connect: первые реплики агента приходят сразу после входа.
     // Ленту трогает только текущая попытка входа: после reset лента принадлежит новой сессии.
@@ -333,7 +340,7 @@ export function useSession() {
       if (who === 'me') {
         // Человек: промежуточные результаты STT — отдельные закрытые потоки того же сегмента; обновляем одну строку до финала.
         try {
-          const text = cleanSpeechTranscript(await reader.readAll());
+          const text = formatSpeechTranscript(await reader.readAll());
           const final = attrs['lk.transcription_final'] === 'true';
           if (validSender() && text.trim()) {
             recorderRef.current.trace(final ? 'transcript.final' : 'transcript.partial', { id, who, text });
@@ -697,6 +704,7 @@ export function useSession() {
     setAgent(false);
     setAgentPresent(false);
     setAgentState('connecting');
+    setToolState('idle');
   }, [info]);
   const startRecording = useCallback(() => {
     void recorderRef.current.start(micTrack.current, remoteAgentTrack.current)
@@ -717,6 +725,7 @@ export function useSession() {
     agent,
     agentPresent,
     agentState,
+    toolState,
     conversation,
     amplitude,
     prefs,
