@@ -103,7 +103,7 @@ export function App() {
         </section>
         <section className="conversation" aria-label="разговор с Гоко">
           <button type="button" className="chat-toggle" aria-expanded={chatOpen} onClick={() => setChatOpen(!chatOpen)}>Диалог {s.lines.length > 0 ? `· ${s.lines.length}` : ''} <span>{chatOpen ? '⌄' : '⌃'}</span></button>
-          {s.conversation === 'voice' && <VoiceOrb link={link} mic={mic} agentPresent={s.agentPresent} agentState={s.agentState} amplitude={s.amplitude} onToggle={() => void s.toggleMute()} />}
+          {s.conversation === 'voice' && <VoiceOrb link={link} mic={mic} agentPresent={s.agentPresent} agentState={s.agentState} toolState={s.toolState} amplitude={s.amplitude} onToggle={() => void s.toggleMute()} />}
           {s.audioPlaybackError && <div className="playback-error">{s.audioPlaybackError} <button type="button" className="btn btn-inline btn-accent" onClick={() => void s.retryAudio()}>Включить звук</button></div>}
           <Transcript lines={s.lines} mode={s.prefs.mode} notice={agentHint ? AGENT_HINT_TEXT[agentHint] : null} />
           <ChatInput ready={agent} active={s.conversation !== 'idle'} hint={agentHint} onSend={async text => {setChatOpen(true); return onSend(text);}} voiceActive={s.conversation === 'voice'} voiceConnecting={mic === 'connecting'} onVoice={() => {keepAwake(); if (s.conversation === 'voice') void s.endConversation(); else void s.startVoice();}} />

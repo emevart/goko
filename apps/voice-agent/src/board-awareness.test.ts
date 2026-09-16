@@ -33,3 +33,12 @@ it('снимок старой партии после session.game не возв
  const emit=vi.fn();const board=new BoardAwareness({publish:emit,analyze:vi.fn()});
  board.update(game());board.clear('b');board.update(game());expect(emit).toHaveBeenCalledTimes(2);board.close();
 });
+it('фоновая сводка содержит полный список камней текущей ревизии',()=>{
+ const emit=vi.fn();const g=applyMove(game(),'B','D4','2026-09-15').state;
+ const next=applyMove(g,'W','K12','2026-09-15').state;
+ const board=new BoardAwareness({publish:emit,analyze:vi.fn()});
+ board.update(next);
+ expect(emit.mock.calls.at(-1)?.[0].compact).toContain('"stones":{"black":["D4"],"white":["K12"]}');
+ expect(emit.mock.calls.at(-1)?.[0].compact).toContain('"stonesSpoken":{"black":["дэ четыре"],"white":["ка двенадцать"]}');
+ board.close();
+});

@@ -6,7 +6,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { type JobContext, ServerOptions, cli, defineAgent, voice } from '@livekit/agents';
 import { type Participant, type RemoteParticipant, RoomEvent } from '@livekit/rtc-node';
-import { cleanSpeechTranscript, createClient } from '@goko/protocol';
+import { cleanSpeechTranscript, createClient, formatSpeechTranscript } from '@goko/protocol';
 import { GokoAgent } from './agent.ts';
 import { CONFIG_EXIT_CODE, readConfig } from './config.ts';
 import { attachConversationEvents } from './conversation-events.ts';
@@ -74,6 +74,8 @@ async function runSession(ctx: JobContext, sessionId: string): Promise<void> {
     return;
   }
   const identity = participant.identity;
+  const localParticipant = ctx.room.localParticipant;
+  if (!localParticipant) throw new Error('local participant unavailable after connect');
 
   // Уход участника сеанс не закрывает (closeOnDisconnect: false ниже): перезагрузка вкладки возвращает того же
   // участника в ту же комнату. Не вернулся за RETURN_GRACE_MS (15 мин) — job завершается (departure.ts).
@@ -91,6 +93,21 @@ async function runSession(ctx: JobContext, sessionId: string): Promise<void> {
   const client = createClient({ baseUrl: apiBase, appKey });
   const state = newAgentState(sessionId);
   const intent = new IntentLedger();
+  const activeTools: string[] = [];
+  let toolAttributeTail = Promise.resolve();
+  const onToolStateChange = (busy: boolean, toolName: string) => {
+    if (busy) activeTools.push(toolName);
+    else {
+      const index = activeTools.lastIndexOf(toolName);
+      if (index >= 0) activeTools.splice(index, 1);
+    }
+    const current = activeTools.at(-1) ?? 'idle';
+    // setAttributes — patch, но отправляем состояния последовательно, чтобы быстрый
+    // вызов инструмента не вернул на клиент устаревший `busy` после `idle`.
+    toolAttributeTail = toolAttributeTail
+      .then(() => localParticipant.setAttributes({ 'goko.tool': current }))
+      .catch(() => {});
+  };
   // Сигнал сеанса: закрытие сессии или остановка воркера обрывает поток и вызовы инструментов.
   // Долгоживущий сигнал в CallOptions допустим: клиент снимает свой слушатель после каждого вызова.
   const abort = new AbortController();
@@ -101,7 +118,7 @@ async function runSession(ctx: JobContext, sessionId: string): Promise<void> {
   });
   abort.signal.addEventListener('abort',()=>awareness.close(),{once:true});
   // Приветствие не в onEnter, а после применения режима: в «Чате» оно должно прийти только текстом.
-  const agent = new GokoAgent(createTools({ client, state, log, signal: abort.signal, intent, awareness }), {
+  const agent = new GokoAgent(createTools({ client, state, log, signal: abort.signal, intent, awareness, onToolStateChange }), {
     greet: false,
     ...(voiceMode === 'live' ? { instructions: VOICE_INSTRUCTIONS } : {}),
   });
@@ -110,8 +127,6 @@ async function runSession(ctx: JobContext, sessionId: string): Promise<void> {
   let resolveLiveBridge: (bridge: LiveBridge) => void = () => {};
   const liveBridgeReady = new Promise<LiveBridge>((resolve) => { resolveLiveBridge = resolve; });
   let watch: WatchHandle | null = null;
-  const localParticipant = ctx.room.localParticipant;
-  if (!localParticipant) throw new Error('local participant unavailable after connect');
   const stopConversationEvents = attachConversationEvents({
     subscribe: (listener) => {
       session.on(Events.ConversationItemAdded, listener);
@@ -129,7 +144,7 @@ async function runSession(ctx: JobContext, sessionId: string): Promise<void> {
     if (!ev.isFinal) return;
     const text = cleanSpeechTranscript(ev.transcript);
     if (!text) return;
-    log(`[user] ${text}`);
+    log(`[user] ${formatSpeechTranscript(ev.transcript) || text}`);
     intent.add(text, ev.itemId ? `item:${ev.itemId}` : `transcript:${ev.createdAt}`);
     watch?.humanSpoke();
   });
@@ -137,8 +152,12 @@ async function runSession(ctx: JobContext, sessionId: string): Promise<void> {
     const item = ev.item;
     if (item.type !== 'message') return; // AgentHandoffItem без role и текста
     if (item.role === 'user') {
+      const text = item.textContent ? cleanSpeechTranscript(item.textContent) : '';
+      // Шумовая расшифровка не считается новой репликой: она не попадает в
+      // intent и не перебивает текущую речь Гоко.
+      if (!text) return;
       watch?.humanSpoke();
-      if (item.transcriptConfidence === undefined && item.textContent) intent.add(item.textContent, `item:${item.id}`);
+      if (item.transcriptConfidence === undefined) intent.add(text, `item:${item.id}`);
     }
     if (item.role === 'assistant' && item.textContent) {
       liveResponses?.noteAssistant(item.textContent);

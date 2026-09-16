@@ -1,6 +1,7 @@
 import { coordToIndex, toAscii } from '@goko/go-core';
 import type { Analysis, EngineDecision, GameState } from '@goko/protocol';
 import { speakMove } from './phrases.ts';
+import { boardStones } from './board-facts.ts';
 
 export type BoardContext = { compact:string; detailed:string; current:()=>boolean };
 // Только подтверждённые сервером снимки; при смене ревизии кеш и расчёт устаревают.
@@ -47,7 +48,10 @@ export class BoardAwareness {
   }
   private publish() {
     const g=this.state!;const epoch=this.epoch;const a=this.result;
-    const facts={gameId:g.id,revision:g.revision,status:g.status,toPlay:g.toPlay,moves:g.moves.length,captures:g.captures,
+    const stones=boardStones(g);
+    const facts={gameId:g.id,revision:g.revision,boardSize:g.settings.boardSize,status:g.status,toPlay:g.toPlay,moves:g.moves.length,captures:g.captures,
+      stones,
+      stonesSpoken:{black:stones.black.map(speakMove),white:stones.white.map(speakMove)},
       lastMoves:g.moves.slice(-2).map(m=>({color:m.color,coord:speakMove(m.coord)})),
       intention:this.intention?{moveN:this.intention.moveN,text:this.intention.text}:null,
       analysis:a?{scoreLeadBlack:Math.round(a.scoreLeadB*2)/2,weakGroups:a.groups.filter(x=>x.status!=='safe').slice(0,6).map(x=>({color:x.color,stones:x.stones.slice(0,8).map(speakMove),liberties:x.liberties,status:x.status}))}:null};

@@ -106,10 +106,19 @@ body { background: var(--bg); color: var(--fg); font: 16px/1.4 system-ui, -apple
 .voice-orb { --level: 0; position: relative; flex: 0 0 112px; display: grid; justify-items: center; align-content: center; gap: 7px; border: 0; background: transparent; color: inherit; cursor: pointer; font: inherit; }
 .voice-orb-core { width: 82px; height: 82px; border-radius: 50%; background: radial-gradient(circle at 35% 30%, #f1dcae, var(--accent)); box-shadow: 0 0 calc(12px + var(--level) * 26px) color-mix(in srgb, var(--accent) 60%, transparent); transform: scale(calc(1 + var(--level) * .12)); animation: orb-idle 4s ease-in-out infinite; transition: transform 100ms linear, box-shadow 100ms linear; }
 .voice-orb-speaking .voice-orb-core { background: radial-gradient(circle at 35% 30%, #fff0c8, #bf6f45); }
-.voice-orb-thinking .voice-orb-core { animation-duration: 1.8s; }
+.voice-orb-speaking .voice-orb-core { animation: orb-speaking .8s ease-in-out infinite; }
+.voice-orb-listening .voice-orb-core { background: radial-gradient(circle at 35% 30%, #d9f2df, #4d9b73); animation: orb-listening 1.5s ease-in-out infinite; }
+.voice-orb-thinking .voice-orb-core { background: radial-gradient(circle at 35% 30%, #e5ddff, #7664bb); animation: orb-thinking 1.6s ease-in-out infinite; }
+.voice-orb-tool .voice-orb-core { background: conic-gradient(from 0deg, #f4d99b, #b87936, #f4d99b); animation: orb-tool 1.25s linear infinite; }
 .voice-orb-connecting .voice-orb-core { opacity: .55; }
+.voice-orb-muted .voice-orb-core { filter: grayscale(.7); opacity: .65; animation-duration: 5s; }
+.voice-orb-error .voice-orb-core { background: radial-gradient(circle at 35% 30%, #f5d0c9, #b55c54); opacity: .8; }
 .voice-orb-label { font-size: 14px; color: var(--muted); }
 @keyframes orb-idle { 50% { transform: scale(calc(1.025 + var(--level) * .12)); } }
+@keyframes orb-speaking { 50% { transform: scale(calc(1.05 + var(--level) * .16)); } }
+@keyframes orb-listening { 50% { transform: scale(calc(1.045 + var(--level) * .12)); } }
+@keyframes orb-thinking { 0%,100% { transform: scale(calc(1 + var(--level) * .08)) rotate(0deg); filter: hue-rotate(0deg); } 50% { transform: scale(calc(1.035 + var(--level) * .08)) rotate(8deg); filter: hue-rotate(18deg); } }
+@keyframes orb-tool { to { transform: rotate(360deg) scale(calc(1.035 + var(--level) * .1)); } }
 @media (prefers-reduced-motion: reduce) { .voice-orb-core { animation: none; transition: none; } }
 .move-history ol { max-height: 150px; overflow-y: auto; margin: 4px 0 0; padding: 0; list-style: none; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 3px 12px; }
 .move-history li { display: flex; gap: 7px; align-items: center; padding: 3px 5px; border-radius: 6px; }
