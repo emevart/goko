@@ -23,8 +23,10 @@ HTTP/SSE game-server, fake engine и test-only LiveKit проверяют инт
 passed / 13 skipped. Облачный onboarding на main до harness: 1570 passed /
 13 skipped, smoke и build PASS. Настоящий локальный KataGo отдельно прошёл
 пять контрактных тестов. Финальный Playwright на Windows: 15/15 PASS;
-typecheck, smoke и build PASS. Ревью harness закрывает изоляцию, готовность и
-освобождение микрофона. Остался повторный Linux browser/teardown gate в Cloud.
+typecheck, smoke и build PASS. CI на Ubuntu для `bb2a76e` тоже PASS, включая
+15 browser-сценариев. Ревью harness закрывает изоляцию, готовность и освобождение
+микрофона. Остался повторный browser/teardown gate именно в Codex Cloud:
+его образ не имеет root/sudo; installer адаптируется к готовым системным libs.
 
 Текущий main уже содержит GPT-Live/Stone, persona-player, фоновую доску,
 composer, redo, запись и живой 3D-орб. `get_position` согласует ASCII/камни из

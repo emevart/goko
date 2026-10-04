@@ -23,11 +23,14 @@ KataGo, GPU и сетевого медиа. Game-server в нём настоящ
 bash scripts/cloud-install.sh
 ```
 
-Скрипт проверяет Node 22.18+, выполняет `npm ci` и ставит Chromium с системными
-зависимостями. Для установки нужен доступ к npm registry, Debian/Ubuntu mirrors
+Скрипт проверяет Node 22.18+, выполняет `npm ci` и ставит Chromium. При наличии
+root/passwordless sudo ставятся системные зависимости; без этих прав используются
+библиотеки образа. Обязательный launch/close Chromium подтверждает готовность,
+иначе install завершается ошибкой. Для установки нужен доступ к npm registry, Debian/Ubuntu mirrors
 и CDN браузеров Playwright. Бесплатные проверки не требуют переменных
 окружения и Network secrets. Разрешены набор «Менеджеры пакетов»,
-`cdn.playwright.dev`, `playwright.download.prss.microsoft.com` и `api.openai.com`.
+`cdn.playwright.dev`, `playwright.download.prss.microsoft.com`,
+`storage.googleapis.com` (редирект загрузки Chromium) и `api.openai.com`.
 С разрешения founder сохранён существующий `OPENAI_API_KEY` как Network secret
 только для `api.openai.com`; окружение доступно только владельцу. Это не raw key
 в checkout: облачный proxy подставляет значение на разрешённом HTTPS-запросе.
