@@ -1,11 +1,12 @@
 import { mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import { expect, test } from '@playwright/test';
-import { isolateClient, playAt, startGame } from './helpers.ts';
+import { finishGames, isolateClient, playAt, startGame } from './helpers.ts';
 
 test.beforeEach(async ({ page }, testInfo) => {
   await isolateClient(page, testInfo);
 });
+test.afterEach(async ({ page }) => { await finishGames(page); });
 
 test('@layout актуальный интерфейс доступен без запуска разговора', async ({ page }) => {
   await page.goto('/');

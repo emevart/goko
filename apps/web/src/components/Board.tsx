@@ -2,7 +2,7 @@
 // после счёта — территория и мёртвые камни из result.score. Тап -> ближайший пункт -> onTap(coord).
 // SVG заполняет гибкий бокс .board-wrap (доска сжимается по доступной высоте) и вписывает квадрат по центру;
 // поля бокса при пересчёте тапа вычитает toView.
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import type { PointerEvent } from 'react';
 import { BoardDrag } from '../board-drag.ts';
 import { COLUMN_LETTERS, parseCoord } from '@goko/go-core';
@@ -14,6 +14,7 @@ type Props = { state: GameState | null; size: number; onTap: (coord: string) => 
 const TERRITORY_THRESHOLD = 0.6;
 
 export function Board({ state, size, onTap }: Props) {
+  const id = useId();
   const ref = useRef<SVGSVGElement>(null);
   const drag = useRef(new BoardDrag());
   const [preview, setPreview] = useState<string | null>(null);
@@ -47,7 +48,22 @@ export function Board({ state, size, onTap }: Props) {
         onPointerUp={e => { if (!e.isPrimary) return; const coord=drag.current.end(e.pointerId,position,target(e)); setPreview(null); if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId); if (coord) onTap(coord); }}
         onPointerCancel={() => { drag.current.cancel(); setPreview(null); }}
         onLostPointerCapture={() => { drag.current.cancel(); setPreview(null); }}>
-        <rect className="board-bg" width={VIEW} height={VIEW} />
+        <defs>
+          <linearGradient id={`${id}-wood`} x2=".85" y2="1">
+            <stop className="wood-light" offset="0" /><stop className="wood-dark" offset="1" />
+          </linearGradient>
+          <pattern id={`${id}-grain`} width="47" height="1000" patternUnits="userSpaceOnUse">
+            <path d="M8 0 Q21 230 9 500 T12 1000 M31 0 Q18 300 36 620 T29 1000" fill="none" stroke="#704517" strokeWidth="1.6" opacity=".07" />
+          </pattern>
+          <radialGradient id={`${id}-black`} cx="32%" cy="26%" r="74%">
+            <stop offset="0" stopColor="#596064" /><stop offset=".42" stopColor="#25292c" /><stop offset="1" stopColor="#0b0d0f" />
+          </radialGradient>
+          <radialGradient id={`${id}-white`} cx="32%" cy="24%" r="78%">
+            <stop offset="0" stopColor="#fff" /><stop offset=".5" stopColor="#f5f3e9" /><stop offset="1" stopColor="#c8c6ba" />
+          </radialGradient>
+        </defs>
+        <rect className="board-bg" x="6" y="6" width={VIEW - 12} height={VIEW - 12} rx="20" style={{ fill: `url(#${id}-wood)` }} />
+        <rect x="6" y="6" width={VIEW - 12} height={VIEW - 12} rx="20" fill={`url(#${id}-grain)`} pointerEvents="none" />
         {lineIdx.map((i) => (
           <g key={i} className="grid">
             <line x1={x(l, i)} y1={y(l, 0)} x2={x(l, i)} y2={y(l, size - 1)} />
@@ -75,7 +91,7 @@ export function Board({ state, size, onTap }: Props) {
           const coord = coordAt({ col: s.col, row: s.row });
           return (
             <g key={coord}>
-              <circle className={s.color === 'B' ? 'stone-b' : 'stone-w'} cx={x(l, s.col)} cy={y(l, s.row)} r={l.step * 0.47} />
+              <circle className={s.color === 'B' ? 'stone-b' : 'stone-w'} style={{ fill: `url(#${id}-${s.color === 'B' ? 'black' : 'white'})` }} cx={x(l, s.col)} cy={y(l, s.row)} r={l.step * 0.47} />
               {dead.has(coord) && (
                 <g className="dead">
                   <line x1={x(l, s.col) - l.step * 0.25} y1={y(l, s.row) - l.step * 0.25} x2={x(l, s.col) + l.step * 0.25} y2={y(l, s.row) + l.step * 0.25} />

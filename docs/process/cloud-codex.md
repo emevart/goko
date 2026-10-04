@@ -32,10 +32,14 @@ root/passwordless sudo ставятся системные зависимост�
 и CDN браузеров Playwright. Бесплатные проверки не требуют переменных
 окружения и Network secrets. Разрешены набор «Менеджеры пакетов»,
 `cdn.playwright.dev`, `playwright.download.prss.microsoft.com`,
-`storage.googleapis.com` (редирект загрузки Chromium) и `api.openai.com`.
+`storage.googleapis.com` (редирект загрузки Chromium), `api.openai.com` и
+`api.github.com` (чтение/обновление существующего PR штатным `gh`).
 С разрешения founder сохранён существующий `OPENAI_API_KEY` как Network secret
 только для `api.openai.com`; окружение доступно только владельцу. Это не raw key
 в checkout: облачный proxy подставляет значение на разрешённом HTTPS-запросе.
+Добавление GitHub API владельцем не расширяет scope OpenAI-секрета и не
+добавляет новых секретов. Продуктовые правки не меняют и не перепубликуют
+сохранённую конфигурацию среды.
 
 **Start skill**
 

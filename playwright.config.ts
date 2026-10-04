@@ -21,9 +21,12 @@ export default defineConfig({
     permissions: ['microphone'],
   },
   projects: [
-    { name: 'phone-390x844', use: { browserName: 'chromium', viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true } },
-    { name: 'narrow-360x640', grep: /@layout/, use: { browserName: 'chromium', viewport: { width: 360, height: 640 }, hasTouch: true, isMobile: true } },
-    { name: 'desktop-1280x800', grep: /@layout|@visual/, use: { browserName: 'chromium', viewport: { width: 1280, height: 800 } } },
+    { name: 'phone-390x844', use: { browserName: 'chromium', viewport: { width: 390, height: 844 }, colorScheme: 'light', hasTouch: true, isMobile: true } },
+    { name: 'phone-390x844-dark', grep: /@layout|@visual/, use: { browserName: 'chromium', viewport: { width: 390, height: 844 }, colorScheme: 'dark', hasTouch: true, isMobile: true } },
+    { name: 'narrow-360x640', grep: /@layout|@visual/, use: { browserName: 'chromium', viewport: { width: 360, height: 640 }, colorScheme: 'light', hasTouch: true, isMobile: true } },
+    { name: 'narrow-360x640-dark', grep: /@layout|@visual/, use: { browserName: 'chromium', viewport: { width: 360, height: 640 }, colorScheme: 'dark', hasTouch: true, isMobile: true } },
+    { name: 'desktop-1440x900', grep: /@layout|@visual/, use: { browserName: 'chromium', viewport: { width: 1440, height: 900 }, colorScheme: 'light' } },
+    { name: 'desktop-1440x900-dark', grep: /@layout|@visual/, use: { browserName: 'chromium', viewport: { width: 1440, height: 900 }, colorScheme: 'dark' } },
   ],
   webServer: {
     command: 'npm run preview',

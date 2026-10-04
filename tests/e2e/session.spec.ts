@@ -1,9 +1,10 @@
 import { expect, test } from '@playwright/test';
-import { isolateClient } from './helpers.ts';
+import { finishGames, isolateClient } from './helpers.ts';
 
 test.beforeEach(async ({ page }, testInfo) => {
   await isolateClient(page, testInfo);
 });
+test.afterEach(async ({ page }) => { await finishGames(page); });
 
 test('единый composer запускает чат и показывает mock GPT-Live transcript', async ({ page }) => {
   await page.goto('/');
