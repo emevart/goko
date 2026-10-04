@@ -14,6 +14,8 @@ KataGo, GPU и сетевого медиа. Game-server в нём настоящ
 ## Актуальный Codex Cloud
 
 Приватное окружение `goko` для `emevart/goko` создано и опубликовано 05.10.
+Подготовленный repository ref закреплён на `58fd6f6`; продуктовая задача
+получает актуальную `origin/codex/cloud-ux-voice` перед началом изменений.
 Продолжение — [бриф текущей итерации](2026-10-05-cloud-continuation.md).
 Для подготовленной ветки используются следующие настройки:
 
@@ -58,6 +60,13 @@ test:browser: Playwright сам поднимет и корректно оста�
 Браузерные сценарии выполняются
 через Playwright CLI; HTML-отчёт, trace, видео и скриншоты отказов лежат в
 `.agent-artifacts/playwright/` и игнорируются git.
+
+В образе текущего Codex Cloud PID 1 не собирает завершённых сирот. Поэтому
+snapshot содержит `/workspace/goko-cloud-subreaper.py`: он запускает команду
+и собирает только её собственных потомков. Команды будущих проверок — из
+сохранённого Start skill, например
+`python3 /workspace/goko-cloud-subreaper.py npm run test:browser`.
+Это особенность Cloud-образа; обычные CI/Windows используют стандартный CLI.
 
 ## Команды
 
