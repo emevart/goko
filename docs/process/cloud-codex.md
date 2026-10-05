@@ -94,6 +94,24 @@ Chromium, затем запускает `npm run check`, `npm run smoke`, `npm r
 и `npm run test:browser`. Общий потолок job — 20 минут. При отказе Playwright
 артефакты сохраняются на 7 дней.
 
+## Отдельный разрешённый Live smoke
+
+05.10 founder отдельно разрешил два коротких Live-сеанса. Testing runner
+`scripts/cloud-live-probe.mjs` использует production agent/tools с fake game
+client, явный proxy только своего child, одноразовый ledger claim и watchdog.
+Install/start и сохранённая конфигурация среды при этом не менялись.
+Настоящие Upgrade/authentication и typed D4/repeat/«и»/факты прошли; использовано
+2 подключения / 43.425 секунды parent wall из исходного лимита 2 / 180.
+Provider usage — 34 секунды. Количество исчерпано: третий запуск не разрешён
+остатком времени. Платные команды не запускать через free subreaper, который
+удаляет bindings. Бесплатный preview/CI по-прежнему не наследует их и `.env`.
+
+Это не проверка STT/перебиваний/телефона или субъективной естественности;
+аудиозаписи вне git, прослушивание Cloud-моделью недоступно.
+[Результаты, воспроизведение и следующий бюджет](../research/2026-10-05-cloud-voice-acceptance.md).
+В следующей Cloud-задаче сначала сверять NOW и использованный бюджет: старый
+нулевой ledger из опубликованного snapshot не обнуляет уже выполненные сеансы.
+
 Legacy Codex Cloud setup/maintenance для этого проекта не нужен. Используется
 актуальная модель окружения с полями Install script и Start skill.
 Источник: [официальная документация Cloud environments](https://learn.chatgpt.com/docs/environments/cloud-environments).
