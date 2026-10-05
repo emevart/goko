@@ -47,8 +47,9 @@ Sol xhigh был единственным исполнителем, Astra отд
   ноль reconnect/ошибок. Исходные 2 слота исчерпаны.
 - [!] WAV 12.82s/19.82s вне git; модель Cloud-чата не поддерживает audio input,
   прослушивание/интонация unverified. STT/кашель/barge-in/телефон unrun.
-  Предложение Astra: следующий цикл 5×3 минуты речи и 2×5 минут телефона;
-  не автоматический budget grant. [Voice итог](../research/2026-10-05-cloud-voice-acceptance.md).
+  После этого founder одобрил ещё 7 сеансов / до 25 минут (всего до 9 / 28 минут);
+добавочные слоты не использованы, а текущий runner и ledger остаются на исходном
+лимите 2 / 180 секунд. [Voice итог](../research/2026-10-05-cloud-voice-acceptance.md).
 
 [Приёмка, команды и оставшиеся границы](../research/2026-10-05-cloud-product-acceptance.md).
 Merge/deploy/VPS/DNS/tailnet не выполнялись. Код передаётся в существующий

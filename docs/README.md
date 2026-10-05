@@ -37,6 +37,10 @@
 
 Разбор последней партии 16.09: [позиция, шум и состояния орба](research/2026-09-16-last-party-state-review.md).
 
+Итерация Cloud 05.10: [продуктовая приёмка](research/2026-10-05-cloud-product-acceptance.md),
+[голосовой smoke и одобренный следующий цикл](research/2026-10-05-cloud-voice-acceptance.md),
+[журнал](journal/2026-10-05-cloud-product.md), [D-0017](decisions/0017-cloud-repeat-and-ui.md).
+
 Составные команды 16.09: [последовательное выполнение нескольких действий](research/2026-09-16-multi-action-intents.md).
 
 Орб 16.09: [спецификация живого 3D-орба](superpowers/specs/2026-09-16-orb-visual-design.md),
