@@ -1,7 +1,7 @@
 ---
 status: living
 area: process
-updated: 2026-09-14
+updated: 2026-10-05
 ---
 
 # Журнал решений
@@ -48,6 +48,8 @@ updated: YYYY-MM-DD
 
 Следующая итерация разговора и истории: [D-0014](0014-unified-conversation-history-recording.md), 15.09.2026.
 Явный запуск, GPT-Live и защита намерения: [D-0015](0015-explicit-live-conversation.md), 15.09.2026.
+Фоновый контекст позиции: [D-0016](0016-background-board-awareness.md), 15.09.2026.
+Read-only повтор хода и Cloud-итерация UI: [D-0017](0017-cloud-repeat-and-ui.md), 05.10.2026.
 
 | № | Решение | Дата | Статус |
 | --- | --- | --- | --- |

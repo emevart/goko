@@ -16,5 +16,7 @@ apps/go-engine/bin/
 spike/log.jsonl
 spike/last-url.txt
 .agent-artifacts/
+playwright-report/
+test-results/
 spike/tone.wav
 .mutants/

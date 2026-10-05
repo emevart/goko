@@ -1,28 +1,38 @@
 /* Несколько переменных, две темы по prefers-color-scheme, никаких библиотек (раздел 10 спеки). Цели касания ≥ 44 px. */
 :root {
-  --bg: #f4f1ea;
-  --fg: #1d1a16;
-  --muted: #6b665c;
-  --panel: #ffffff;
-  --board: #dcb35c;
-  --line: #4a3a1a;
-  --accent: #2f6f4f;
+  --bg: #f5f2eb;
+  --fg: #242b27;
+  --muted: #676e64;
+  --panel: #fffdf8;
+  --board: #dfba78;
+  --wood-light: #f0d398;
+  --wood-dark: #d9ae6b;
+  --line: #534326;
+  --border: #d6d8ca;
+  --shadow: #34332218;
+  --warning: #8b3c27;
+  --accent: #306b52;
   --accent-fg: #ffffff; /* 5,99:1 на --accent */
-  --btn: #e8e3d8;
-  --btn-fg: #1d1a16;
+  --btn: #e9ecdf;
+  --btn-fg: #283a30;
 }
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #15130f;
-    --fg: #ece7dc;
-    --muted: #9a938a;
-    --panel: #1f1c17;
-    --board: #b98d3f;
-    --line: #2b2110;
-    --accent: #5fb58a;
+    --bg: #171d19;
+    --fg: #eceee4;
+    --muted: #a7afa3;
+    --panel: #222a24;
+    --board: #c7a46d;
+    --wood-light: #d9bb84;
+    --wood-dark: #bb945e;
+    --line: #3d301e;
+    --border: #485347;
+    --shadow: #00000035;
+    --warning: #f3b19b;
+    --accent: #87c6a3;
     --accent-fg: #0f1a14; /* 7,18:1 на --accent; белый давал 2,48:1 */
-    --btn: #2b2721;
-    --btn-fg: #ece7dc;
+    --btn: #303c32;
+    --btn-fg: #e4e9dc;
   }
 }
 * { box-sizing: border-box; }
@@ -30,25 +40,25 @@ html, body, #root { margin: 0; height: 100%; }
 body { background: var(--bg); color: var(--fg); font: 16px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; -webkit-tap-highlight-color: transparent; }
 .app { display: flex; flex-direction: column; height: 100dvh; padding: env(safe-area-inset-top) 8px env(safe-area-inset-bottom); gap: 8px; }
 .top-row { display: flex; justify-content: flex-end; padding-top: 6px; }
-.status { padding: 0 4px; }
-/* Главная строка — во всю ширину и ровно две строки высоты: фразы на 3 с не сдвигают доску. На 360 px все фразы
-   укладываются в две строки; обрезка многоточием — страховка для экранов уже 360 px и крупного шрифта. */
-.status-main { font-size: 18px; font-weight: 600; line-height: 1.3; height: 2.6em; overflow: hidden; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; }
+.status { padding: 2px 8px; flex: 0 0 auto; }
+.status-main { font-size: 18px; font-weight: 650; line-height: 1.35; overflow-wrap: anywhere; }
+.status-message, .status-notice { margin-top: 5px; color: var(--warning); font-size: 14px; line-height: 1.45; overflow-wrap: anywhere; }
 /* «Повторить» (D-0006) — своей строкой под главной: появляется по состоянию, а не на 3 с. */
 .status-retry { display: flex; margin-top: 4px; }
-.status-notice { font-size: 14px; line-height: 1.3; }
 .status-sub { font-size: 14px; min-height: 20px; }
 .muted { color: var(--muted); }
 /* Доска сжимается по доступной высоте: бокс гибкий (3 доли против 1 у ленты), не выше ширины страницы;
    SVG вписывает квадрат по центру, поля бокса при тапе вычитает toView. */
 .board-wrap { position: relative; flex: 3 1 0; min-height: 0; max-height: calc(100vw - 16px); }
 .board { position: absolute; inset: 0; width: 100%; height: 100%; touch-action: manipulation; user-select: none; -webkit-user-select: none; }
-.board-bg { fill: var(--board); }
-.grid line { stroke: var(--line); stroke-width: 2.5; }
-.coord { fill: var(--line); font-size: 32px; text-anchor: middle; dominant-baseline: middle; }
+.board-bg { fill: var(--board); stroke: #9d783e; stroke-width: 5; filter: drop-shadow(0 7px 7px var(--shadow)); }
+.wood-light { stop-color: var(--wood-light); }.wood-dark { stop-color: var(--wood-dark); }
+.grid line { stroke: var(--line); stroke-width: 2.2; }
+.coord { fill: var(--line); font-size: 30px; font-weight: 500; text-anchor: middle; dominant-baseline: middle; }
 .hoshi { fill: var(--line); }
-.stone-b { fill: #111; stroke: #000; stroke-width: 1.5; }
-.stone-w { fill: #f7f7f2; stroke: #555; stroke-width: 1.5; }
+.stone-b { fill: #111; stroke: #0b0d0e; stroke-width: 1.8; }
+.stone-w { fill: #f7f7f2; stroke: #858071; stroke-width: 1.8; }
+.stone-b, .stone-w { filter: drop-shadow(2px 3px 2px #0005); }
 .mark-on-b { fill: none; stroke: #fff; stroke-width: 5; }
 .mark-on-w { fill: none; stroke: #111; stroke-width: 5; }
 .territory-b { fill: #111; opacity: 0.6; }
@@ -56,8 +66,12 @@ body { background: var(--bg); color: var(--fg); font: 16px/1.4 system-ui, -apple
 .dead line { stroke: #d33; stroke-width: 6; }
 .controls { display: flex; flex-direction: column; gap: 8px; }
 .controls-row { display: flex; gap: 8px; }
-.btn { min-height: 44px; flex: 1; border: 0; border-radius: 10px; background: var(--btn); color: var(--btn-fg); font-size: 16px; padding: 0 10px; }
-.btn:disabled { opacity: 0.45; }
+.btn { min-height: 44px; min-width: 44px; flex: 1; border: 1px solid transparent; border-radius: 12px; background: var(--btn); color: var(--btn-fg); font: inherit; font-size: 15px; font-weight: 500; padding: 0 12px; cursor: pointer; transition: background 140ms ease, box-shadow 140ms ease; }
+.btn:disabled { opacity: 0.48; cursor: not-allowed; }
+.btn:enabled:hover { background: color-mix(in srgb, var(--btn) 88%, var(--fg)); box-shadow: 0 2px 5px var(--shadow); }
+.btn-accent:enabled:hover { background: color-mix(in srgb, var(--accent) 87%, var(--fg)); }
+.btn:enabled:active { box-shadow: inset 0 1px 4px var(--shadow); }
+:where(button, textarea, a):focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
 .btn-mic { background: var(--accent); color: var(--accent-fg); font-size: 18px; font-weight: 600; min-height: 52px; }
 .btn-accent { background: var(--accent); color: var(--accent-fg); font-weight: 600; }
 .btn-inline { flex: 0 0 auto; }
@@ -68,10 +82,10 @@ body { background: var(--bg); color: var(--fg); font: 16px/1.4 system-ui, -apple
 .seg-btn { background: transparent; min-width: 44px; }
 .seg-btn[aria-pressed="true"] { background: var(--accent); color: var(--accent-fg); font-weight: 600; }
 .mode-switch { width: min(100%, 220px); }
-.newgame { display: flex; flex-direction: column; gap: 6px; background: var(--panel); border-radius: 10px; padding: 8px; }
+.newgame { display: flex; flex-direction: column; gap: 8px; background: var(--panel); border: 1px solid var(--border); border-radius: 16px; padding: 12px; }
 .rank-row { display: flex; align-items: center; gap: 8px; }
 .rank-value { flex: 1; text-align: center; font-size: 18px; font-weight: 600; }
-.transcript { flex: 1 1 0; min-height: 80px; overflow-y: auto; background: var(--panel); border-radius: 10px; padding: 8px 10px; }
+.transcript { flex: 1 1 0; min-height: 80px; overflow-y: auto; overscroll-behavior: contain; background: var(--panel); border: 1px solid var(--border); border-radius: 16px; padding: 12px; overflow-wrap: anywhere; }
 /* Открытая панель «Новой партии» на невысоком экране: лента уступает место, «Начать» остаётся на экране. */
 .app:has(.newgame) .transcript { min-height: 0; }
 .line { margin: 0 0 6px; }
@@ -85,12 +99,13 @@ body { background: var(--bg); color: var(--fg); font: 16px/1.4 system-ui, -apple
 .chat-field { flex: 1; min-width: 0; min-height: 44px; font-size: 16px; border-radius: 10px; border: 1px solid var(--muted); background: var(--panel); color: var(--fg); padding: 0 10px; }
 
 /* Единый экран: компактная панель сверху, доска и разговор без карточной сетки. */
-.app { max-width: 1280px; width: 100%; margin: 0 auto; overflow-y: auto; }
-.app-header { position: relative; display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 48px; }
-.app-header h1 { margin: 0; font-size: 23px; letter-spacing: .02em; }
+.app { max-width: 1280px; width: 100%; margin: 0 auto; overflow: hidden; padding-top: max(8px, env(safe-area-inset-top)); padding-bottom: max(8px, env(safe-area-inset-bottom)); }
+.app-header { position: relative; display: flex; align-items: center; justify-content: flex-end; gap: 12px; min-height: 48px; }
+.app-header h1 { margin: 0 auto 0 0; font-size: 23px; letter-spacing: .02em; }
 .app-header > .btn { flex: 0 0 auto; }
-.app-header .newgame { position: absolute; z-index: 5; top: 48px; right: 0; width: min(350px, calc(100vw - 16px)); box-shadow: 0 12px 30px #0002; }
-.game-actions { flex: 0 0 auto; }
+.app-header .newgame { position: absolute; z-index: 5; top: 48px; right: 0; width: min(350px, calc(100vw - 16px)); max-height: calc(100dvh - 120px); overflow-y: auto; box-shadow: 0 12px 30px var(--shadow); }
+.game-actions { flex: 0 0 auto; max-width: 640px; }
+.game-actions .btn { border-color: var(--border); }
 .mutation-busy { position: absolute; z-index: 4; top: 60px; left: 50%; transform: translateX(-50%); background: var(--panel); border-radius: 8px; padding: 6px 10px; box-shadow: 0 5px 16px #0002; }
 .main-grid { min-height: 0; flex: 1; display: grid; grid-template-columns: minmax(0, 1.08fr) minmax(320px, .92fr); gap: 16px; }
 .board-column, .conversation { min-height: 0; display: flex; flex-direction: column; gap: 8px; }
@@ -102,7 +117,7 @@ body { background: var(--bg); color: var(--fg); font: 16px/1.4 system-ui, -apple
 .voice-button { flex: 0 0 auto; white-space: nowrap; }
 .voice-button-on { background: var(--accent); color: var(--accent-fg); }
 .chat-field { resize: none; padding: 10px; line-height: 1.35; }
-.playback-error { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: #9b341f; }
+.playback-error { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: var(--warning); }
 .voice-orb {
   --level: 0;
   --orb-a: #d5d9e2;
@@ -226,23 +241,25 @@ body { background: var(--bg); color: var(--fg); font: 16px/1.4 system-ui, -apple
   .voice-orb { flex-basis: auto; }
   .voice-orb-visual { width: 72px; }
   .voice-orb-label { font-size: 12px; }
-  .status-main { font-size: 15px; height: 1.3em; -webkit-line-clamp: 1; line-clamp: 1; }
+  .status-main { font-size: 15px; }
+  .status-message, .status-notice { font-size: 13px; }
   .status-sub { font-size: 12px; min-height: 16px; }
 }
 .board { touch-action: none; }
 .board-preview { opacity: .65; pointer-events: none; }
 .board-preview-label { position: absolute; z-index: 2; top: 0; left: 50%; transform: translateX(-50%); white-space: nowrap; padding: 5px 10px; border-radius: 20px; background: var(--panel); font-size: 13px; pointer-events: none; box-shadow: 0 3px 12px #0002; }
-.chat-input { flex: 0 0 auto; align-items: center; padding: 5px; border: 1px solid color-mix(in srgb,var(--muted) 25%,transparent); border-radius: 28px; background: var(--panel); }
+.chat-input { flex: 0 0 auto; align-items: center; padding: 5px; border: 1px solid var(--border); border-radius: 28px; background: var(--panel); box-shadow: 0 2px 8px var(--shadow); }
 .chat-field { border: 0; background: transparent; border-radius: 20px; max-height: 90px; }
 .chat-input .btn { border-radius: 50%; display: grid; place-items: center; }
-.chat-toggle { display: flex; justify-content: space-between; align-items: center; flex: 0 0 32px; background: none; color: var(--muted); border: 0; font: inherit; cursor: pointer; padding: 2px 10px; }
+.chat-toggle { display: flex; justify-content: space-between; align-items: center; flex: 0 0 44px; min-height: 44px; background: none; color: var(--muted); border: 0; border-radius: 10px; font: inherit; cursor: pointer; padding: 2px 10px; }
+.chat-toggle:hover { background: color-mix(in srgb, var(--btn) 60%, transparent); }
 .voice-orb { display: flex; flex-direction: row; align-items: center; justify-content: center; gap: 12px; }
 .line { line-height: 1.5; margin-bottom: 12px; }
 .line-me { background: color-mix(in srgb,var(--accent) 8%,var(--panel)); border-radius: 14px; padding: 8px 10px; margin-left: 24px; }
 .line-goko { padding: 2px 4px; }
 .utility-menu { flex: 0 0 auto; }
 .utility-trigger { display: flex; align-items: center; gap: 5px; }
-.utility-panel { position: fixed; z-index: 8; right: max(12px, calc((100vw - 1280px) / 2)); bottom: 80px; width: min(420px, calc(100vw - 24px)); max-height: calc(100dvh - 150px); overflow: auto; padding: 12px; border-radius: 16px; background: var(--panel); box-shadow: 0 10px 60px #0004; }
+.utility-panel { position: fixed; z-index: 8; right: max(12px, calc((100vw - 1280px) / 2)); bottom: 80px; width: min(420px, calc(100vw - 24px)); max-height: calc(100dvh - 150px); overflow: auto; overscroll-behavior: contain; padding: 12px; border: 1px solid var(--border); border-radius: 16px; background: var(--panel); box-shadow: 0 10px 40px var(--shadow); }
 .utility-panel-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; color: var(--muted); font-size: 14px; }
 .utility-panel-heading .btn { background: transparent; }
 @media (max-width: 720px) {
@@ -251,3 +268,4 @@ body { background: var(--bg); color: var(--fg); font: 16px/1.4 system-ui, -apple
   .app-header .btn { font-size: 13px; padding: 0 8px; }
   .app-header .btn-square { font-size: 24px; }
 }
+@media (prefers-reduced-motion: reduce) { .btn { transition: none; } }

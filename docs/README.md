@@ -12,6 +12,8 @@
 2. [NOW.md](NOW.md) — где мы сейчас, открытые вопросы founder'у, следующий шаг.
 3. [Процесс для агентов](process/agent-development.md) — как подготовить
    окружение и какие проверки запускать.
+4. [Codex Cloud и браузерные проверки](process/cloud-codex.md),
+   [текущая передача продолжения](process/2026-10-05-cloud-continuation.md).
 
 ## Разделы
 
@@ -21,7 +23,7 @@
 | `superpowers/plans/` | планы реализации (writing-plans) | стадия 0, стадия 1 ядро, стадия 1 голос и веб |
 | `research/` | результаты замеров, спайков и приёмки | [стадия 0](research/stage0-results.md), [приёмка стадии 1](research/2026-09-14-stage1-acceptance.md), [отзыв с телефона](research/2026-09-14-voice-feedback.md) |
 | `journal/` | журналы исполнения по стадиям: задача, проверка, коммиты | стадия 0, [стадия 1 ядро](journal/2026-09-08-stage1-core.md), [голос и веб](journal/2026-09-14-stage1-voice-web.md) |
-| `decisions/` | журнал решений после спеки, `D-NNNN` | [реестр](decisions/README.md), D-0001…D-0014 |
+| `decisions/` | журнал решений после спеки, `D-NNNN` | [реестр](decisions/README.md), D-0001…D-0016 |
 | `process/` | как работают агенты и founder | [agent-development](process/agent-development.md) |
 | `runbooks/` | эксплуатация: [vps](runbooks/vps.md) — деплой, логи, режимы API, откат, ресурсы | стадия 1 |
 | `reference/` | грабли и находки, на которые больно наступать дважды | `[TODO]` по мере появления |
@@ -34,6 +36,10 @@
 [результаты проверок](research/2026-09-15-live-polish-acceptance.md).
 
 Разбор последней партии 16.09: [позиция, шум и состояния орба](research/2026-09-16-last-party-state-review.md).
+
+Итерация Cloud 05.10: [продуктовая приёмка](research/2026-10-05-cloud-product-acceptance.md),
+[голосовой smoke и одобренный следующий цикл](research/2026-10-05-cloud-voice-acceptance.md),
+[журнал](journal/2026-10-05-cloud-product.md), [D-0017](decisions/0017-cloud-repeat-and-ui.md).
 
 Составные команды 16.09: [последовательное выполнение нескольких действий](research/2026-09-16-multi-action-intents.md).
 

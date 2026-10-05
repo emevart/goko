@@ -108,6 +108,40 @@ async function make(opts: MakeOptions = {}) {
 
 const decoder = new TextDecoder();
 
+it('HTTP analyze exact revision: undo завершается до release движка, старый анализ даёт 409, свежий проходит', async () => {
+  const inner = createFakeEngine();
+  let entered!: () => void;
+  let release!: () => void;
+  const started = new Promise<void>(resolve => { entered = resolve; });
+  const held = new Promise<void>(resolve => { release = resolve; });
+  let calls = 0;
+  const engine: Engine = { ...inner, analyze: async (request, signal) => {
+    if (++calls === 1) { entered(); await held; }
+    return inner.analyze(request, signal);
+  } };
+  const { client } = await make({ engine });
+  const { session } = await client.createSession();
+  const created = await client.newGame(session.id, HUMAN_ONLY);
+  const played = await client.play(created.state.id, { coord: 'D4' });
+  const id = played.state.id;
+  const revision = played.state.revision;
+  const pending = client.analyze(id, { maxVisits: 50, expectedRevision: revision });
+  // Подписываемся на отказ сразу: ошибка не превращается в unhandled rejection.
+  const outcome = errorOf(pending);
+  try {
+    await started;
+    const undone = await client.undo(id, { expectedRevision: revision });
+    expect(undone.state.moves).toHaveLength(0);
+    expect(undone.state.revision).toBeGreaterThan(revision);
+    expect(calls).toBe(1);
+    release();
+    expect(await outcome).toMatchObject({ code: 'revision_conflict', status: 409, details: { revision: undone.state.revision } });
+    expect(await client.analyze(id, { maxVisits: 50, expectedRevision: undone.state.revision }))
+      .toMatchObject({ gameId: id, revision: undone.state.revision, visits: 50 });
+    expect(calls).toBe(2);
+  } finally { release(); }
+});
+
 // Читает поток, пока накопленный текст не удовлетворит условию. Ожидание привязано к событию
 // (приходу чанка), число чтений ограничено; конец потока — ошибка теста, а не зависание.
 async function readUntil(reader: ReadableStreamDefaultReader<Uint8Array>, pred: (text: string) => boolean, maxReads = 100): Promise<string> {
