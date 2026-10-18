@@ -1,4 +1,5 @@
 // Watchdog принадлежит только запущенной нами process group. SDK в parent не загружается.
+import { spawnSync } from 'node:child_process';
 import { performance } from 'node:perf_hooks';
 
 export async function runManagedChild({ spawnChild, hardMs = 90_000, workMs = 80_000, grant = undefined }) {
@@ -10,6 +11,14 @@ export async function runManagedChild({ spawnChild, hardMs = 90_000, workMs = 80
   let granted = false;
   const kill = signal => {
     if (!child?.pid) return;
+    // На POSIX сигнал идёт всей запущенной нами группе (-pid), иначе внуки живут дальше.
+    // Windows групп процессов не знает и на -pid отвечает отказом: дерево снимает taskkill,
+    // мягкого сигнала там нет вовсе, поэтому любой сигнал закрывает дерево принудительно.
+    if (process.platform === 'win32') {
+      try { spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true }); } catch {}
+      try { child.kill('SIGKILL'); } catch {}
+      return;
+    }
     try { process.kill(-child.pid, signal); } catch {}
   };
   const requestStop = () => {

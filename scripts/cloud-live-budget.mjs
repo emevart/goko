@@ -20,13 +20,20 @@ function read(path) {
   try { raw = readFileSync(path, 'utf8'); } catch (error) { fail(error.code === 'ENOENT' ? 'CLOUD_LEDGER_MISSING' : 'CLOUD_LEDGER_CORRUPT'); }
   try { return JSON.parse(raw); } catch { fail('CLOUD_LEDGER_CORRUPT'); }
 }
+// Каталог fsync-ом закрепляет появление и переименование файла там, где это умеет ядро.
+// Windows на дескриптор каталога отвечает EPERM: сам файл уже закреплён своим fsync,
+// и отказ именно каталога ошибкой не является.
+function fsyncDir(path) {
+  try { const dir = openSync(dirname(path), 'r'); try { fsyncSync(dir); } finally { closeSync(dir); } }
+  catch (error) { if (!['EPERM', 'EACCES', 'EINVAL', 'EISDIR', 'ENOTSUP'].includes(error.code)) throw error; }
+}
 function atomicWrite(path, value) {
   const temp = `${path}.${randomUUID()}.tmp`;
   let fd;
   try {
     fd = openSync(temp, 'wx', 0o600); writeFileSync(fd, JSON.stringify(value, null, 2) + '\n'); fsyncSync(fd); closeSync(fd); fd = undefined;
     renameSync(temp, path);
-    const dir = openSync(dirname(path), 'r'); try { fsyncSync(dir); } finally { closeSync(dir); }
+    fsyncDir(path);
   } finally { if (fd !== undefined) closeSync(fd); try { unlinkSync(temp); } catch {} }
 }
 export function initializeBudget(path) {
@@ -96,5 +103,5 @@ export function claimBudget(path, id, scenario, grant) {
   catch { fail('CLOUD_CHILD_ALREADY_CLAIMED'); }
   try { writeFileSync(fd, JSON.stringify({ id, scenario, childPid, parentPid })); fsyncSync(fd); }
   finally { closeSync(fd); }
-  const dir = openSync(dirname(path), 'r'); try { fsyncSync(dir); } finally { closeSync(dir); }
+  fsyncDir(path);
 }

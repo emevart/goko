@@ -9,7 +9,8 @@ it('default dry path has no provider/SDK or ledger mutation and omits injected s
   try {
     mkdirSync(join(isolated,'scripts'));
     mkdirSync(join(isolated,'apps/voice-agent/src'),{recursive:true});
-    symlinkSync(join(process.cwd(),'apps/voice-agent/node_modules'),join(isolated,'apps/voice-agent/node_modules'),'dir');
+    // junction вместо dir: на Windows символьная ссылка на каталог требует прав, junction — нет.
+    symlinkSync(join(process.cwd(),'apps/voice-agent/node_modules'),join(isolated,'apps/voice-agent/node_modules'),process.platform==='win32'?'junction':'dir');
     for(const name of ['cloud-live-probe','cloud-live-budget','cloud-live-transport','cloud-live-managed-child']) copyFileSync(join(process.cwd(),`scripts/${name}.mjs`),join(isolated,`scripts/${name}.mjs`));
     const ledger=join(isolated,'.agent-artifacts/cloud-product/voice-budget.json');mkdirSync(join(isolated,'.agent-artifacts/cloud-product'),{recursive:true});
     const before='own corrupt fixture — dry must not read or rewrite it';writeFileSync(ledger,before);

@@ -84,6 +84,12 @@ export const CLOSE_CEILING_MS = 3_000;
 // Потолок вызовов startTask после close. После close kick задач не ставит, и любой такой вызов —
 // дефект. Без потолка мутант без проверки closed в kick крутил бы задачи бесконечно и вешал прогон.
 export const STARTS_AFTER_CLOSE_CEILING = 50;
+// Потолок всех вызовов startTask за время жизни сервиса. Самый насыщенный тест файла не доходит
+// и до двух тысяч, так что этот потолок задевает только патологию: задача завершилась без прогресса,
+// kick поставил её снова и так по кругу. Такой круг идёт по микрозадачам, поэтому таймаут vitest
+// (настоящий таймер) не срабатывает: на фейковых часах прогон висит до смерти worker'а по памяти.
+// С потолком круг обрывается, причина печатается в лог, и файл краснеет таймаутом за секунды.
+export const TOTAL_STARTS_CEILING = 20_000;
 
 type Closable = { close(): Promise<void> };
 export type GuardedService<S extends Closable = Closable> = { service: S; startsAfterClose: () => number };
@@ -108,7 +114,12 @@ export function guardService<S extends Closable>(service: S): GuardedService<S> 
   const close = probe.close.bind(service);
   let closeCalled = false;
   let afterClose = 0;
+  let total = 0;
   probe.startTask = (...args: unknown[]) => {
+    if (++total > TOTAL_STARTS_CEILING) {
+      if (total === TOTAL_STARTS_CEILING + 1) console.error(`[X] startTask вызван больше ${TOTAL_STARTS_CEILING} раз: задача перезапускается без прогресса`);
+      return;
+    }
     if (closeCalled && ++afterClose > STARTS_AFTER_CLOSE_CEILING) return;
     startTask(...args);
   };
