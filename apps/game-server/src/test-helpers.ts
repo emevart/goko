@@ -84,15 +84,21 @@ export const CLOSE_CEILING_MS = 3_000;
 // Потолок вызовов startTask после close. После close kick задач не ставит, и любой такой вызов —
 // дефект. Без потолка мутант без проверки closed в kick крутил бы задачи бесконечно и вешал прогон.
 export const STARTS_AFTER_CLOSE_CEILING = 50;
-// Потолок всех вызовов startTask за время жизни сервиса. Самый насыщенный тест файла не доходит
-// и до двух тысяч, так что этот потолок задевает только патологию: задача завершилась без прогресса,
-// kick поставил её снова и так по кругу. Такой круг идёт по микрозадачам, поэтому таймаут vitest
-// (настоящий таймер) не срабатывает: на фейковых часах прогон висит до смерти worker'а по памяти.
-// С потолком круг обрывается, причина печатается в лог, и файл краснеет таймаутом за секунды.
+// Потолок всех вызовов startTask за время жизни сервиса — страховка от зависания прогона.
+// startTask после любого исхода задачи зовёт kick, а kick ставит задачу снова, пока партии
+// задача нужна. Значит задача, которая осела без прогресса, но и без отказа (отказ считается
+// и кончается gaveUp), заводит круг по микрозадачам: настоящий таймер в такой круг не попадает,
+// поэтому таймаут vitest не срабатывает и прогон висит, пока worker не умрёт по памяти.
+// Такой круг доказан тестом «задача без прогресса» ниже в service.test.ts на подменённом
+// runEngine. Пути через публичное API, который давал бы такую задачу, не найдено: каждый выход
+// runEngine и runScoring без коммита либо снимает нужду в задаче, либо попадает в gaveUp,
+// либо получает новый сигнал (taskSignal заменяет отменённый) и на следующем витке доходит
+// до конца. Потолок на порядки выше настоящей нагрузки: самый насыщенный сервис в тестах
+// доходит до 126 вызовов. Сработал — значит круг завёлся: в логе будет строка с причиной.
 export const TOTAL_STARTS_CEILING = 20_000;
 
 type Closable = { close(): Promise<void> };
-export type GuardedService<S extends Closable = Closable> = { service: S; startsAfterClose: () => number };
+export type GuardedService<S extends Closable = Closable> = { service: S; startsAfterClose: () => number; totalStarts: () => number };
 
 export async function closeWithin(service: Closable, ms = CLOSE_CEILING_MS): Promise<void> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -127,5 +133,5 @@ export function guardService<S extends Closable>(service: S): GuardedService<S> 
     closeCalled = true;
     return close();
   };
-  return { service, startsAfterClose: () => afterClose };
+  return { service, startsAfterClose: () => afterClose, totalStarts: () => total };
 }
