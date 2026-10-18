@@ -23,7 +23,7 @@ import {
 } from './service.ts';
 import { SESSION_TTL_MS } from './sessions.ts';
 import { GameStore, type SnapshotStore } from './store.ts';
-import { type GuardedService, type MemoryStore, closeWithin, guardService, memoryMarks, memoryStore, track } from './test-helpers.ts';
+import { type GuardedService, type MemoryStore, TOTAL_STARTS_CEILING, closeWithin, guardService, memoryMarks, memoryStore, track } from './test-helpers.ts';
 
 let dir = '';
 // Сервисы теста закрываются до удаления каталога: иначе фоновая задача движка
@@ -61,9 +61,10 @@ async function make(engine: Engine, extra: Partial<ConstructorParameters<typeof 
   const bus = new EventBus();
   const store = extra.store ?? memoryStore();
   const service = new GameService({ engine, bus, replyTimeoutMs: 500, retryDelaysMs: delays(20), ...extra, store });
-  opened.push(guardService(service));
+  const guard = guardService(service);
+  opened.push(guard);
   await service.init();
-  return { service, bus, store };
+  return { service, bus, store, guard };
 }
 
 function record(bus: EventBus, channel: string): GameEvent[] {
@@ -897,6 +898,22 @@ describe('GameService: партия человек против движка', (
 });
 
 describe('GameService: фоновые задачи, дедлайны и мьютекс', () => {
+  // Что держит круг «задача осела без прогресса -> kick поставил её снова»: startTask зовёт kick
+  // после любого исхода, а kick ставит задачу, пока партии задача нужна. Задача без коммита и без
+  // отказа не трогает ни gaveUp, ни пауз, поэтому круг замыкается и крутится по микрозадачам —
+  // настоящий таймер в него не попадает, и без потолка прогон висел бы до смерти worker'а.
+  // Пути через публичное API, который давал бы такую задачу, не найдено (см. TOTAL_STARTS_CEILING),
+  // поэтому задача без прогресса здесь подставлена в шов runEngine.
+  it('задача без прогресса обрывается потолком, а не вешает прогон', async () => {
+    const { service, guard } = await make(createFakeEngine({ script: ['E5'] }));
+    const game = await service.create({ ...HUMAN_BLACK, ...S9, waitForReply: false });
+    (service as unknown as { runEngine: () => Promise<void> }).runEngine = async () => {};
+    await service.play(game.state.id, { coord: 'D4', waitForReply: false, via: 'api' });
+    await tick();
+    expect(guard.totalStarts()).toBe(TOTAL_STARTS_CEILING + 1);
+    expect(service.get(game.state.id).pendingEngineMove).toBe(true);
+  });
+
   // Снапшот, который отдаёт управление и умеет падать или ждать на нужном ходе.
   function gatedStore(real: SnapshotStore, hook: (state: GameState) => Promise<void>): SnapshotStore {
     return {

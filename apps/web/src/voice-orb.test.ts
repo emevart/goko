@@ -20,6 +20,11 @@ describe('VoiceOrb', () => {
     expect(voiceOrbPresentation('connected', true, 'speaking', 'on')).toEqual({ state: 'speaking', label: 'Гоко говорит' });
   });
 
+  it('повтор хода имеет собственную подпись и приоритет tool над speaking', () => {
+    expect(voiceOrbPresentation('connected', true, 'speaking', 'on', 'repeat_last_move'))
+      .toEqual({ state: 'tool', label: 'Повторяю ход' });
+  });
+
   it('не выдаёт состояние инструмента до подключения агента', () => {
     expect(voiceOrbPresentation('connecting', true, 'thinking', 'on', 'get_position')).toEqual({
       state: 'connecting',

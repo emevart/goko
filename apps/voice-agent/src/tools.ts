@@ -539,6 +539,34 @@ export function createToolFns(deps: ToolDeps) {
 
     async redo(args: { count?: number } = {}) { return historyAction('redo', args.count); },
 
+    async repeatLastMove() {
+      const gameId = gameGuard();
+      if (typeof gameId !== 'string') return gameId;
+      const generation = state.gameGeneration;
+      try {
+        // Только актуальная история: undo/correct могли заменить прежний ответ.
+        // Повтор не поглощает объявления хода или итога из SSE.
+        const g = await client.getGame(gameId, opts);
+        if (g.id !== gameId || !resultIsCurrent(gameId, generation, g.revision)) return staleGame();
+        const engine = seatColor(g.seats, 'engine');
+        if (!engine) return fail('в этой партии играют два человека: хода Гоко нет');
+        const last = g.moves.findLast(move => move.color === engine);
+        if (!last) return fail(g.pendingEngineMove ? 'ответ Гоко ещё ожидается: записанного хода пока нет' : 'Гоко ещё не сделал ни одного хода в этой партии');
+        return {
+          ok: true as const,
+          gameId: g.id,
+          revision: g.revision,
+          moveNumber: last.n,
+          myMove: last.coord,
+          myMoveSpoken: speakMove(last.coord),
+          ...(g.pendingEngineMove ? { note: 'это последний записанный ход; новый ответ Гоко ещё ожидается' } : {}),
+        };
+      } catch (e) {
+        if (!gameIsCurrent(gameId, generation)) return staleGame();
+        return reasonOf(e);
+      }
+    },
+
     async getPosition(): Promise<string> {
       const gameId = gameGuard();
       if (typeof gameId !== 'string') return gameId.reason;
@@ -778,6 +806,10 @@ export function createTools(deps: ToolDeps) {
       description: `Вернуть отменённые порции ходов («верни отменённое», «вперёд»). count — сколько порций вернуть последовательно (1–${MAX_HISTORY_STEPS}); для «верни на три шага» передай count: 3. Если восстановлен итог, объявить result; иначе сказать, чей ход.`,
       parameters: z.object({ count: z.number().int().min(1).max(MAX_HISTORY_STEPS).optional(), user_utterance: utterance }),
       execute: tracked('redo', guarded('redo', (args) => fns.redo(args))),
+    }),
+    repeat_last_move: llm.tool({
+      description: 'Повторить вслух последний уже записанный ход Гоко («не расслышал твой ход», «повтори свой последний ход»). Только чтение актуальной истории: не делает ход, пас, анализ или возврат отменённого. Произнеси myMoveSpoken; note сообщает, если новый ответ ещё ожидается. Для «верни отменённый ход» используй redo, а «повтори» без контекста уточни.',
+      execute: tracked('repeat_last_move', () => fns.repeatLastMove()),
     }),
     get_position: llm.tool({
       description: 'Служебно получить текущую позицию: точный полный список камней по цветам, размер и ориентация ASCII-доски, последние ходы, пленные, чей ход. Вызов невидим человеку: не объявляй его и после результата сразу отвечай по фактам. Для расположения доверяй списку камней, а ASCII используй только как схему.',

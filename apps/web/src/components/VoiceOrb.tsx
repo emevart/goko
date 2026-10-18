@@ -25,7 +25,7 @@ export function voiceOrbPresentation(link: LinkState, agentPresent: boolean, age
     listening: 'Слушаю',
     thinking: 'Гоко думает',
     speaking: 'Гоко говорит',
-    tool: toolState === 'get_position' ? 'Сверяю доску' : toolState === 'get_assessment' ? 'Оцениваю позицию' : 'Работаю с доской',
+    tool: toolState === 'repeat_last_move' ? 'Повторяю ход' : toolState === 'get_position' ? 'Сверяю доску' : toolState === 'get_assessment' ? 'Оцениваю позицию' : 'Работаю с доской',
     error: 'Микрофон недоступен',
     muted: 'Микрофон выключен',
   };

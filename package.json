@@ -2,8 +2,14 @@
   "name": "goko",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=22.18" },
-  "workspaces": ["packages/*", "apps/*", "spike"],
+  "engines": {
+    "node": ">=22.18"
+  },
+  "workspaces": [
+    "packages/*",
+    "apps/*",
+    "spike"
+  ],
   "scripts": {
     "doctor": "node scripts/doctor.mjs",
     "test": "vitest run",
@@ -12,10 +18,14 @@
     "build:web": "npm run build --workspace apps/web",
     "smoke": "node scripts/smoke.mjs",
     "dev": "node scripts/dev.mjs",
-    "chat": "node scripts/chat.mjs"
+    "chat": "node scripts/chat.mjs",
+    "preview": "node scripts/preview.mjs",
+    "test:browser": "playwright test",
+    "test:browser:install": "playwright install chromium"
   },
   "devDependencies": {
     "@livekit/rtc-node": "^0.13.34",
+    "@playwright/test": "^1.63.0",
     "@types/node": "^22.19.0",
     "typescript": "^5.9.3",
     "vite": "^8.2.2",

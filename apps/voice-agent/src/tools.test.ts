@@ -1112,11 +1112,11 @@ describe('createTools', () => {
     await expect(tools.play_move.execute({ coord: 'D4', user_utterance: text }, {} as never)).resolves.toMatchObject({ ok: false });
     expect(client.calls.filter((call) => call.method === 'play')).toHaveLength(1);
   });
-  it('отдаёт девять инструментов с именами из спеки', () => {
+  it('отдаёт инструменты с именами из спеки, включая read-only повтор', () => {
     const { client, state } = setup();
     const tools = createTools({ client, state });
     expect(Object.keys(tools).sort()).toEqual(
-      ['correct_last_move', 'get_assessment', 'get_position', 'pass', 'play_move', 'redo', 'resign', 'set_rank', 'start_game', 'undo'],
+      ['correct_last_move', 'get_assessment', 'get_position', 'pass', 'play_move', 'redo', 'repeat_last_move', 'resign', 'set_rank', 'start_game', 'undo'],
     );
   });
   it('mutation требует тот же trusted final turn и сверяет координату аргумента', async () => {

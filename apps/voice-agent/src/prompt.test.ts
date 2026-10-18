@@ -3,6 +3,23 @@ import { EVENT_MESSAGE_PREFIX } from './event-speech.ts';
 import { BACKEND_INSTRUCTIONS, GREETING_INSTRUCTIONS, INSTRUCTIONS, VOICE_INSTRUCTIONS } from './prompt.ts';
 
 describe('промпт Гоко', () => {
+  it('backend и GPT-Live уточняют отдельную «и»/I до мутации, сохраняя союз и «е»/Е', () => {
+    for (const prompt of [BACKEND_INSTRUCTIONS, VOICE_INSTRUCTIONS]) {
+      expect(prompt).toContain('отдельно названная «и» или I');
+      expect(prompt).toContain('уточни до мутации');
+      expect(prompt).toContain('не угадывай E');
+      expect(prompt).toContain('«е»/Е означает E');
+      expect(prompt).toContain('союз «и»');
+    }
+  });
+  it('повтор услышанного хода отделён от redo и неопределённого «повтори»', () => {
+    for (const prompt of [BACKEND_INSTRUCTIONS, VOICE_INSTRUCTIONS]) {
+      expect(prompt).toContain('repeat_last_move');
+      expect(prompt).toContain('«верни отменённый ход»');
+      expect(prompt).toContain('«повтори» без контекста');
+      expect(prompt).toContain('уточни');
+    }
+  });
   it('знает сообщения «Событие с экрана» под тем же именем, что пишет адаптер реплик (D-0013)', () => {
     expect(INSTRUCTIONS).toContain(`«${EVENT_MESSAGE_PREFIX}»`);
     const rule = INSTRUCTIONS.split('\n').find((line) => line.startsWith(`- Сообщение «${EVENT_MESSAGE_PREFIX}»`)) ?? '';

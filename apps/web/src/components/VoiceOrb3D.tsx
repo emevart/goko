@@ -198,6 +198,14 @@ export function VoiceOrb3D({ state, level }: Props) {
   const levelRef = useRef(safeLevel(level));
   const renderRef = useRef<(() => void) | null>(null);
   const [fallback, setFallback] = useState(false);
+  const [reducedMotion, setReducedMotion] = useState(() => typeof window !== 'undefined' && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+
+  useEffect(() => {
+    const media = window.matchMedia('(prefers-reduced-motion: reduce)');
+    const change = () => setReducedMotion(media.matches);
+    media.addEventListener('change', change);
+    return () => media.removeEventListener('change', change);
+  }, []);
 
   useEffect(() => {
     stateRef.current = state;
@@ -206,6 +214,7 @@ export function VoiceOrb3D({ state, level }: Props) {
   }, [state, level]);
 
   useEffect(() => {
+    if (reducedMotion || fallback) return;
     let cancelled = false;
     let destroy = () => {};
 
@@ -268,7 +277,6 @@ export function VoiceOrb3D({ state, level }: Props) {
       let lastTime = transitionStarted;
       let frame = 0;
       let running = true;
-      const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
       const resize = () => {
         const rect = canvas.getBoundingClientRect();
@@ -310,20 +318,26 @@ export function VoiceOrb3D({ state, level }: Props) {
         renderer.render(scene, camera);
       };
       renderRef.current = () => render();
-      render();
       const tick = (now: number) => {
         if (!running) return;
         render(now);
         frame = requestAnimationFrame(tick);
       };
-      if (!reducedMotion) frame = requestAnimationFrame(tick);
-
+      let disposed = false;
+      const contextLost = (event: Event) => {
+        event.preventDefault();
+        destroy();
+        if (!cancelled) setFallback(true);
+      };
       destroy = () => {
+        if (disposed) return;
+        disposed = true;
         running = false;
         cancelAnimationFrame(frame);
         renderRef.current = null;
         window.removeEventListener('resize', resize);
         resizeObserver?.disconnect();
+        canvas.removeEventListener('webglcontextlost', contextLost);
         sphereGeometry.dispose();
         sphereMaterial.dispose();
         shellGeometry.dispose();
@@ -331,6 +345,9 @@ export function VoiceOrb3D({ state, level }: Props) {
         scene.clear();
         renderer.dispose();
       };
+      canvas.addEventListener('webglcontextlost', contextLost);
+      render();
+      frame = requestAnimationFrame(tick);
     }).catch(() => {
       // Ошибка ленивого импорта Three.js не должна ломать разговор: CSS-слой уже виден.
       if (!cancelled) setFallback(true);
@@ -340,12 +357,12 @@ export function VoiceOrb3D({ state, level }: Props) {
       cancelled = true;
       destroy();
     };
-  }, []);
+  }, [reducedMotion, fallback]);
 
   return (
     <>
-      <span className={`voice-orb-fallback${fallback ? ' voice-orb-fallback-visible' : ''}`} aria-hidden="true" />
-      <canvas ref={canvasRef} className="voice-orb-canvas" aria-hidden="true" />
+      <span className={`voice-orb-fallback${fallback || reducedMotion ? ' voice-orb-fallback-visible' : ''}`} aria-hidden="true" />
+      {!fallback && !reducedMotion && <canvas ref={canvasRef} className="voice-orb-canvas" aria-hidden="true" />}
     </>
   );
 }
